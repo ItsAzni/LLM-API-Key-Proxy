@@ -1715,7 +1715,8 @@ async def anthropic_messages(
             logging.info(
                 f"🧠 Thinking: requested={thinking_budget_requested}, "
                 f"effort={openai_request.get('reasoning_effort', 'none')}, "
-                f"custom_budget={openai_request.get('custom_reasoning_budget', False)}"
+                f"custom_budget={openai_request.get('custom_reasoning_budget', False)}, "
+                f"max_tokens={body.max_tokens}"
             )
 
         log_request_to_console(
