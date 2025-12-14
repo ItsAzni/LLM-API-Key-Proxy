@@ -52,11 +52,17 @@ _start_time = time.time()
 from dotenv import load_dotenv
 from glob import glob
 
+# Get the application root directory (EXE dir if frozen, else CWD)
+# Inlined here to avoid triggering heavy rotator_library imports before loading screen
+if getattr(sys, "frozen", False):
+    _root_dir = Path(sys.executable).parent
+else:
+    _root_dir = Path.cwd()
+
 # Load main .env first
-load_dotenv()
+load_dotenv(_root_dir / ".env")
 
 # Load any additional .env files (e.g., antigravity_all_combined.env, gemini_cli_all_combined.env)
-_root_dir = Path.cwd()
 _env_files_found = list(_root_dir.glob("*.env"))
 for _env_file in sorted(_root_dir.glob("*.env")):
     if _env_file.name != ".env":  # Skip main .env (already loaded)
@@ -93,8 +99,7 @@ with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, Request, HTTPException, Depends
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse, JSONResponse
-    import uuid
+    from fastapi.responses import StreamingResponse
     from fastapi.security import APIKeyHeader
 
 print("  → Loading core dependencies...")
@@ -349,8 +354,10 @@ print(
 # Note: Debug logging will be added after logging configuration below
 
 # --- Logging Configuration ---
-LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# Import path utilities here (after loading screen) to avoid triggering heavy imports early
+from rotator_library.utils.paths import get_logs_dir, get_data_file
+
+LOG_DIR = get_logs_dir(_root_dir)
 
 # Configure a console handler with color (INFO and above only, no DEBUG)
 console_handler = colorlog.StreamHandler(sys.stdout)
@@ -439,7 +446,7 @@ litellm_logger.propagate = False
 logging.debug(f"Modules loaded in {_elapsed:.2f}s")
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(_root_dir / ".env")
 
 # --- Configuration ---
 USE_EMBEDDING_BATCHER = False
@@ -685,22 +692,10 @@ async def lifespan(app: FastAPI):
     )
 
     # Log loaded credentials summary (compact, always visible for deployment verification)
-    _api_summary = (
-        ", ".join([f"{p}:{len(c)}" for p, c in api_keys.items()])
-        if api_keys
-        else "none"
-    )
-    _oauth_summary = (
-        ", ".join([f"{p}:{len(c)}" for p, c in oauth_credentials.items()])
-        if oauth_credentials
-        else "none"
-    )
-    _total_summary = ", ".join(
-        [f"{p}:{len(c)}" for p, c in client.all_credentials.items()]
-    )
-    print(
-        f"🔑 Credentials loaded: {_total_summary} (API: {_api_summary} | OAuth: {_oauth_summary})"
-    )
+    # _api_summary = ', '.join([f"{p}:{len(c)}" for p, c in api_keys.items()]) if api_keys else "none"
+    # _oauth_summary = ', '.join([f"{p}:{len(c)}" for p, c in oauth_credentials.items()]) if oauth_credentials else "none"
+    # _total_summary = ', '.join([f"{p}:{len(c)}" for p, c in client.all_credentials.items()])
+    # print(f"🔑 Credentials loaded: {_total_summary} (API: {_api_summary} | OAuth: {_oauth_summary})")
     client.background_refresher.start()  # Start the background task
     app.state.rotating_client = client
 
@@ -776,6 +771,9 @@ def get_embedding_batcher(request: Request) -> EmbeddingBatcher:
 
 async def verify_api_key(auth: str = Depends(api_key_header)):
     """Dependency to verify the proxy API key."""
+    # If PROXY_API_KEY is not set or empty, skip verification (open access)
+    if not PROXY_API_KEY:
+        return auth
     if not auth or auth != f"Bearer {PROXY_API_KEY}":
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     return auth
@@ -2099,8 +2097,8 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
 
 
 if __name__ == "__main__":
-    # Define ENV_FILE for onboarding checks
-    ENV_FILE = Path.cwd() / ".env"
+    # Define ENV_FILE for onboarding checks using centralized path
+    ENV_FILE = get_data_file(".env")
 
     # Check if launcher TUI should be shown (no arguments provided)
     if len(sys.argv) == 1:
@@ -2167,7 +2165,7 @@ if __name__ == "__main__":
 
         ensure_env_defaults()
         # Reload environment variables after ensure_env_defaults creates/updates .env
-        load_dotenv(override=True)
+        load_dotenv(ENV_FILE, override=True)
         run_credential_tool()
     else:
         # Check if onboarding is needed
@@ -2185,11 +2183,11 @@ if __name__ == "__main__":
             from rotator_library.credential_tool import ensure_env_defaults
 
             ensure_env_defaults()
-            load_dotenv(override=True)
+            load_dotenv(ENV_FILE, override=True)
             run_credential_tool()
 
             # After credential tool exits, reload and re-check
-            load_dotenv(override=True)
+            load_dotenv(ENV_FILE, override=True)
             # Re-read PROXY_API_KEY from environment
             PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 
@@ -2203,12 +2201,6 @@ if __name__ == "__main__":
             else:
                 console.print("\n[bold green]✅ Configuration complete![/bold green]")
                 console.print("\nStarting proxy server...\n")
-
-        # Validate PROXY_API_KEY before starting the server
-        if not PROXY_API_KEY:
-            raise ValueError(
-                "PROXY_API_KEY environment variable not set. Please run with --add-credential to set up your environment."
-            )
 
         import uvicorn
 

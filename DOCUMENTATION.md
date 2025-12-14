@@ -10,6 +10,7 @@ The project is a monorepo containing two primary components:
     *   **Batch Manager**: Optimizes high-volume embedding requests.
     *   **Detailed Logger**: Provides per-request file logging for debugging.
     *   **OpenAI-Compatible Endpoints**: `/v1/chat/completions`, `/v1/embeddings`, etc.
+    *   **Model Filter GUI**: Visual interface for configuring model ignore/whitelist rules per provider (see Section 6).
 2.  **The Resilience Library (`rotator_library`)**: This is the core engine that provides high availability. It is consumed by the proxy app to manage a pool of API keys, handle errors gracefully, and ensure requests are completed successfully even when individual keys or provider endpoints face issues.
 
 This architecture cleanly separates the API interface from the resilience logic, making the library a portable and powerful tool for any application needing robust API key management.
@@ -96,22 +97,30 @@ The `_safe_streaming_wrapper` is a critical component for stability. It:
 
 ### 2.2. `usage_manager.py` - Stateful Concurrency & Usage Management
 
-This class is the stateful core of the library, managing concurrency, usage tracking, and cooldowns.
+This class is the stateful core of the library, managing concurrency, usage tracking, cooldowns, and quota resets.
 
 #### Key Concepts
 
 *   **Async-Native & Lazy-Loaded**: Fully asynchronous, using `aiofiles` for non-blocking file I/O. Usage data is loaded only when needed.
 *   **Fine-Grained Locking**: Each API key has its own `asyncio.Lock` and `asyncio.Condition`. This allows for highly granular control.
+*   **Multiple Reset Modes**: Supports three reset strategies:
+    - **per_model**: Each model has independent usage window with authoritative `quota_reset_ts` (from provider errors)
+    - **credential**: One window per credential with custom duration (e.g., 5 hours, 7 days)
+    - **daily**: Legacy daily reset at `daily_reset_time_utc`
+*   **Model Quota Groups**: Models can be grouped to share quota limits. When one model in a group hits quota, all receive the same reset timestamp.
 
 #### Tiered Key Acquisition Strategy
 
 The `acquire_key` method uses a sophisticated strategy to balance load:
 
 1.  **Filtering**: Keys currently on cooldown (global or model-specific) are excluded.
-2.  **Tiering**: Valid keys are split into two tiers:
+2.  **Rotation Mode**: Determines credential selection strategy:
+    *   **Balanced Mode** (default): Credentials sorted by usage count - least-used first for even distribution
+    *   **Sequential Mode**: Credentials sorted by usage count descending - most-used first to maintain sticky behavior until exhausted
+3.  **Tiering**: Valid keys are split into two tiers:
     *   **Tier 1 (Ideal)**: Keys that are completely idle (0 concurrent requests).
     *   **Tier 2 (Acceptable)**: Keys that are busy but still under their configured `MAX_CONCURRENT_REQUESTS_PER_KEY_<PROVIDER>` limit for the requested model. This allows a single key to be used multiple times for the same model, maximizing throughput.
-3.  **Selection Strategy** (configurable via `rotation_tolerance`):
+4.  **Selection Strategy** (configurable via `rotation_tolerance`):
     *   **Deterministic (tolerance=0.0)**: Within each tier, keys are sorted by daily usage count and the least-used key is always selected. This provides perfect load balance but predictable patterns.
     *   **Weighted Random (tolerance>0, default)**: Keys are selected randomly with weights biased toward less-used ones:
         - Formula: `weight = (max_usage - credential_usage) + tolerance + 1`
@@ -119,14 +128,19 @@ The `acquire_key` method uses a sophisticated strategy to balance load:
         - `tolerance=5.0+`: High randomness - even heavily-used credentials have significant probability
         - **Security Benefit**: Unpredictable selection patterns make rate limit detection and fingerprinting harder
         - **Load Balance**: Lower-usage credentials still preferred, maintaining reasonable distribution
-4.  **Concurrency Limits**: Checks against `max_concurrent` limits to prevent overloading a single key.
-5.  **Priority Groups**: When credential prioritization is enabled, higher-tier credentials (lower priority numbers) are tried first before moving to lower tiers.
+5.  **Concurrency Limits**: Checks against `max_concurrent` limits (with priority multipliers applied) to prevent overloading a single key.
+6.  **Priority Groups**: When credential prioritization is enabled, higher-tier credentials (lower priority numbers) are tried first before moving to lower tiers.
 
 #### Failure Handling & Cooldowns
 
 *   **Escalating Backoff**: When a failure occurs, the key gets a temporary cooldown for that specific model. Consecutive failures increase this time (10s -> 30s -> 60s -> 120s).
 *   **Key-Level Lockouts**: If a key accumulates failures across multiple distinct models (3+), it is assumed to be dead/revoked and placed on a global 5-minute lockout.
 *   **Authentication Errors**: Immediate 5-minute global lockout.
+*   **Quota Exhausted Errors**: When a provider returns a quota exhausted error with an authoritative reset timestamp:
+    - The `quota_reset_ts` is extracted from the error response (via provider's `parse_quota_error()` method)
+    - Applied to the affected model (and all models in its quota group if defined)
+    - Cooldown preserved even during daily/window resets until the actual quota reset time
+    - Logs show the exact reset time in local timezone with ISO format
 
 ### 2.3. `batch_manager.py` - Efficient Request Aggregation
 
@@ -406,6 +420,10 @@ The most sophisticated provider implementation, supporting Google's internal Ant
 - **Thought Signature Caching**: Server-side caching of encrypted signatures for multi-turn Gemini 3 conversations
 - **Model-Specific Logic**: Automatic configuration based on model type (Gemini 3, Claude Sonnet, Claude Opus)
 - **Credential Prioritization**: Automatic tier detection with paid credentials prioritized over free (paid tier resets every 5 hours, free tier resets weekly)
+- **Sequential Rotation Mode**: Default rotation mode is sequential (use credentials until exhausted) to maximize thought signature cache hits
+- **Per-Model Quota Tracking**: Each model tracks independent usage windows with authoritative reset timestamps from quota errors
+- **Quota Groups**: Claude models (Sonnet 4.5 + Opus 4.5) can be grouped to share quota limits (disabled by default, configurable via `QUOTA_GROUPS_ANTIGRAVITY_CLAUDE`)
+- **Priority Multipliers**: Paid tier credentials get higher concurrency limits (Priority 1: 5x, Priority 2: 3x, Priority 3+: 2x in sequential mode)
 
 #### Model Support
 
@@ -585,6 +603,221 @@ cache/
 
 ---
 
+### 2.13. Sequential Rotation & Per-Model Quota Tracking
+
+A comprehensive credential rotation and quota management system introduced in PR #31.
+
+#### Rotation Modes
+
+Two rotation strategies are available per provider:
+
+**Balanced Mode (Default)**:
+- Distributes load evenly across all credentials
+- Least-used credentials selected first
+- Best for providers with per-minute rate limits
+- Prevents any single credential from being overused
+
+**Sequential Mode**:
+- Uses one credential until it's exhausted (429 quota error)
+- Switches to next credential only after current one fails
+- Most-used credentials selected first (sticky behavior)
+- Best for providers with daily/weekly quotas
+- Maximizes cache hit rates (e.g., Antigravity thought signatures)
+- Default for Antigravity provider
+
+**Configuration**:
+```env
+# Set per provider
+ROTATION_MODE_GEMINI=sequential
+ROTATION_MODE_OPENAI=balanced
+ROTATION_MODE_ANTIGRAVITY=balanced  # Override default
+```
+
+#### Per-Model Quota Tracking
+
+Instead of tracking usage at the credential level, the system now supports granular per-model tracking:
+
+**Data Structure** (when `mode="per_model"`):
+```json
+{
+  "credential_id": {
+    "models": {
+      "gemini-2.5-pro": {
+        "window_start_ts": 1733678400.0,
+        "quota_reset_ts": 1733696400.0,
+        "success_count": 15,
+        "prompt_tokens": 5000,
+        "completion_tokens": 1000,
+        "approx_cost": 0.05,
+        "window_started": "2025-12-08 14:00:00 +0100",
+        "quota_resets": "2025-12-08 19:00:00 +0100"
+      }
+    },
+    "global": {...},
+    "model_cooldowns": {...}
+  }
+}
+```
+
+**Key Features**:
+- Each model tracks its own usage window independently
+- `window_start_ts`: When the current quota period started
+- `quota_reset_ts`: Authoritative reset time from provider error response
+- Human-readable timestamps added for debugging
+- Supports custom window durations (5h, 7d, etc.)
+
+#### Provider-Specific Quota Parsing
+
+Providers can implement `parse_quota_error()` to extract precise reset times from error responses:
+
+```python
+@staticmethod
+def parse_quota_error(error, error_body) -> Optional[Dict]:
+    """Extract quota reset timestamp from provider error.
+    
+    Returns:
+        {
+            'quota_reset_timestamp': 1733696400.0,  # Unix timestamp
+            'retry_after': 18000  # Seconds until reset
+        }
+    """
+```
+
+**Google RPC Format** (Antigravity, Gemini CLI):
+- Parses `RetryInfo` and `ErrorInfo` from error details
+- Handles duration strings: `"143h4m52.73s"` or `"515092.73s"`
+- Extracts `quotaResetTimeStamp` and converts to Unix timestamp
+- Falls back to `quotaResetDelay` if timestamp not available
+
+**Example Error Response**:
+```json
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded",
+    "details": [{
+      "@type": "type.googleapis.com/google.rpc.RetryInfo",
+      "retryDelay": "143h4m52.73s"
+    }, {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      "metadata": {
+        "quotaResetTimeStamp": "2025-12-08T19:00:00Z"
+      }
+    }]
+  }
+}
+```
+
+#### Model Quota Groups
+
+Models that share the same quota limits can be grouped:
+
+**Configuration**:
+```env
+# Models in a group share quota/cooldown timing
+QUOTA_GROUPS_ANTIGRAVITY_CLAUDE="claude-sonnet-4-5,claude-opus-4-5"
+
+# To disable a default group:
+QUOTA_GROUPS_ANTIGRAVITY_CLAUDE=""
+```
+
+**Behavior**:
+- When one model hits quota, all models in the group receive the same `quota_reset_ts`
+- Combined weighted usage for credential selection (e.g., Opus counts 2x vs Sonnet)
+- Group resets only when ALL models' quotas have reset
+- Preserves unexpired cooldowns during other resets
+
+**Provider Implementation**:
+```python
+class AntigravityProvider(ProviderInterface):
+    model_quota_groups = {
+        "claude": ["claude-sonnet-4-5", "claude-opus-4-5"]
+    }
+    
+    model_usage_weights = {
+        "claude-opus-4-5": 2  # Opus counts 2x vs Sonnet
+    }
+```
+
+#### Priority-Based Concurrency Multipliers
+
+Credentials can be assigned to priority tiers with configurable concurrency limits:
+
+**Configuration**:
+```env
+# Universal multipliers (all modes)
+CONCURRENCY_MULTIPLIER_ANTIGRAVITY_PRIORITY_1=10
+CONCURRENCY_MULTIPLIER_ANTIGRAVITY_PRIORITY_2=3
+
+# Mode-specific overrides
+CONCURRENCY_MULTIPLIER_ANTIGRAVITY_PRIORITY_2_BALANCED=1  # Lower in balanced mode
+```
+
+**How it works**:
+```python
+effective_concurrent_limit = MAX_CONCURRENT_REQUESTS_PER_KEY * tier_multiplier
+```
+
+**Provider Defaults** (Antigravity):
+- Priority 1 (paid ultra): 5x multiplier
+- Priority 2 (standard paid): 3x multiplier  
+- Priority 3+ (free): 2x (sequential mode) or 1x (balanced mode)
+
+**Benefits**:
+- Paid credentials handle more load without manual configuration
+- Different concurrency for different rotation modes
+- Automatic tier detection based on credential properties
+
+#### Reset Window Configuration
+
+Providers can specify custom reset windows per priority tier:
+
+```python
+class AntigravityProvider(ProviderInterface):
+    usage_reset_configs = {
+        frozenset([1, 2]): UsageResetConfigDef(
+            mode="per_model",
+            window_hours=5,  # 5-hour rolling window for paid tiers
+            field_name="5h_window"
+        ),
+        frozenset([3, 4, 5]): UsageResetConfigDef(
+            mode="per_model",
+            window_hours=168,  # 7-day window for free tier
+            field_name="7d_window"
+        )
+    }
+```
+
+**Supported Modes**:
+- `per_model`: Independent window per model with authoritative reset times
+- `credential`: Single window per credential (legacy)
+- `daily`: Daily reset at configured UTC hour (legacy)
+
+#### Usage Flow
+
+1. **Request arrives** for model X with credential Y
+2. **Check rotation mode**: Sequential or balanced?
+3. **Select credential**:
+   - Filter by priority tier requirements
+   - Apply concurrency multiplier for effective limit
+   - Sort by rotation mode strategy
+4. **Check quota**:
+   - Load model's usage data
+   - Check if within window (window_start_ts to quota_reset_ts)
+   - Check model quota groups for combined usage
+5. **Execute request**
+6. **On success**: Increment model usage count
+7. **On quota error**:
+   - Parse error for `quota_reset_ts`
+   - Apply to model (and quota group)
+   - Credential remains on cooldown until reset time
+8. **On window expiration**:
+   - Archive model data to global stats
+   - Start fresh window with new `window_start_ts`
+   - Preserve unexpired quota cooldowns
+
+---
+
 ### 2.12. Google OAuth Base (`providers/google_oauth_base.py`)
 
 A refactored, reusable OAuth2 base class that eliminates code duplication across Google-based providers.
@@ -624,6 +857,142 @@ class AntigravityAuthBase(GoogleOAuthBase):
 - Headless environment detection
 - Sequential refresh queue processing
 
+#### OAuth Callback Port Configuration
+
+Each OAuth provider uses a local callback server during authentication. The callback port can be customized via environment variables to avoid conflicts with other services.
+
+**Default Ports:**
+
+| Provider | Default Port | Environment Variable |
+|----------|-------------|---------------------|
+| Gemini CLI | 8085 | `GEMINI_CLI_OAUTH_PORT` |
+| Antigravity | 51121 | `ANTIGRAVITY_OAUTH_PORT` |
+| iFlow | 11451 | `IFLOW_OAUTH_PORT` |
+
+**Configuration Methods:**
+
+1. **Via TUI Settings Menu:**
+   - Main Menu → `4. View Provider & Advanced Settings` → `1. Launch Settings Tool`
+   - Select the provider (Gemini CLI, Antigravity, or iFlow)
+   - Modify the `*_OAUTH_PORT` setting
+   - Use "Reset to Default" to restore the original port
+
+2. **Via `.env` file:**
+   ```env
+   # Custom OAuth callback ports (optional)
+   GEMINI_CLI_OAUTH_PORT=8085
+   ANTIGRAVITY_OAUTH_PORT=51121
+   IFLOW_OAUTH_PORT=11451
+   ```
+
+**When to Change Ports:**
+
+- If the default port conflicts with another service on your system
+- If running multiple proxy instances on the same machine
+- If firewall rules require specific port ranges
+
+**Note:** Port changes take effect on the next OAuth authentication attempt. Existing tokens are not affected.
+
+---
+
+### 2.14. HTTP Timeout Configuration (`timeout_config.py`)
+
+Centralized timeout configuration for all HTTP requests to LLM providers.
+
+#### Purpose
+
+The `TimeoutConfig` class provides fine-grained control over HTTP timeouts for streaming and non-streaming LLM requests. This addresses the common issue of proxy hangs when upstream providers stall during connection establishment or response generation.
+
+#### Timeout Types Explained
+
+| Timeout | Description |
+|---------|-------------|
+| **connect** | Maximum time to establish a TCP/TLS connection to the upstream server |
+| **read** | Maximum time to wait between receiving data chunks (resets on each chunk for streaming) |
+| **write** | Maximum time to wait while sending the request body |
+| **pool** | Maximum time to wait for a connection from the connection pool |
+
+#### Default Values
+
+| Setting | Streaming | Non-Streaming | Rationale |
+|---------|-----------|---------------|-----------|
+| **connect** | 30s | 30s | Fast fail if server is unreachable |
+| **read** | 180s (3 min) | 600s (10 min) | Streaming expects periodic chunks; non-streaming may wait for full generation |
+| **write** | 30s | 30s | Request bodies are typically small |
+| **pool** | 60s | 60s | Reasonable wait for connection pool |
+
+#### Environment Variable Overrides
+
+All timeout values can be customized via environment variables:
+
+```env
+# Connection establishment timeout (seconds)
+TIMEOUT_CONNECT=30
+
+# Request body send timeout (seconds)
+TIMEOUT_WRITE=30
+
+# Connection pool acquisition timeout (seconds)
+TIMEOUT_POOL=60
+
+# Read timeout between chunks for streaming requests (seconds)
+# If no data arrives for this duration, the connection is considered stalled
+TIMEOUT_READ_STREAMING=180
+
+# Read timeout for non-streaming responses (seconds)
+# Longer to accommodate models that take time to generate full responses
+TIMEOUT_READ_NON_STREAMING=600
+```
+
+#### Streaming vs Non-Streaming Behavior
+
+**Streaming Requests** (`TimeoutConfig.streaming()`):
+- Uses shorter read timeout (default 3 minutes)
+- Timer resets every time a chunk arrives
+- If no data for 3 minutes → connection considered dead → failover to next credential
+- Appropriate for chat completions where tokens should arrive periodically
+
+**Non-Streaming Requests** (`TimeoutConfig.non_streaming()`):
+- Uses longer read timeout (default 10 minutes)
+- Server may take significant time to generate the complete response before sending anything
+- Complex reasoning tasks or large outputs may legitimately take several minutes
+- Only used by Antigravity provider's `_handle_non_streaming()` method
+
+#### Provider Usage
+
+The following providers use `TimeoutConfig`:
+
+| Provider | Method | Timeout Type |
+|----------|--------|--------------|
+| `antigravity_provider.py` | `_handle_non_streaming()` | `non_streaming()` |
+| `antigravity_provider.py` | `_handle_streaming()` | `streaming()` |
+| `gemini_cli_provider.py` | `acompletion()` | `streaming()` |
+| `iflow_provider.py` | `acompletion()` | `streaming()` |
+| `qwen_code_provider.py` | `acompletion()` | `streaming()` |
+
+**Note:** iFlow, Qwen Code, and Gemini CLI providers always use streaming internally (even for non-streaming requests), aggregating chunks into a complete response. Only Antigravity has a true non-streaming path.
+
+#### Tuning Recommendations
+
+| Use Case | Recommendation |
+|----------|----------------|
+| **Long thinking tasks** | Increase `TIMEOUT_READ_STREAMING` to 300-360s |
+| **Unstable network** | Increase `TIMEOUT_CONNECT` to 60s |
+| **High concurrency** | Increase `TIMEOUT_POOL` if seeing pool exhaustion |
+| **Large context/output** | Increase `TIMEOUT_READ_NON_STREAMING` to 900s+ |
+
+#### Example Configuration
+
+```env
+# For environments with complex reasoning tasks
+TIMEOUT_READ_STREAMING=300
+TIMEOUT_READ_NON_STREAMING=900
+
+# For unstable network conditions
+TIMEOUT_CONNECT=60
+TIMEOUT_POOL=120
+```
+
 ---
 
 
@@ -637,10 +1006,16 @@ The library handles provider idiosyncrasies through specialized "Provider" class
 
 The `GeminiCliProvider` is the most complex implementation, mimicking the Google Cloud Code extension.
 
+**New in PR #31**:
+- **Quota Parsing**: Implements `parse_quota_error()` using Google RPC format parser
+- **Tier Configuration**: Defines `tier_priorities` and `usage_reset_configs` for automatic priority resolution
+- **Balanced Rotation**: Defaults to balanced mode (unlike Antigravity which uses sequential)
+- **Priority Multipliers**: Same as Antigravity (P1: 5x, P2: 3x, others: 1x)
+
 #### Authentication (`gemini_auth_base.py`)
 
- *   **Device Flow**: Uses a standard OAuth 2.0 flow. The `credential_tool` spins up a local web server (`localhost:8085`) to capture the callback from Google's auth page.
-*   **Token Lifecycle**:
+ *   **Device Flow**: Uses a standard OAuth 2.0 flow. The `credential_tool` spins up a local web server (default: `localhost:8085`, configurable via `GEMINI_CLI_OAUTH_PORT`) to capture the callback from Google's auth page.
+ *   **Token Lifecycle**:
     *   **Proactive Refresh**: Tokens are refreshed 5 minutes before expiry.
     *   **Atomic Writes**: Credential files are updated using a temp-file-and-move strategy to prevent corruption during writes.
     *   **Revocation Handling**: If a `400` or `401` occurs during refresh, the token is marked as revoked, preventing infinite retry loops.
@@ -669,7 +1044,7 @@ The provider employs a sophisticated, cached discovery mechanism to find a valid
 ### 3.3. iFlow (`iflow_provider.py`)
 
 *   **Hybrid Auth**: Uses a custom OAuth flow (Authorization Code) to obtain an `access_token`. However, the *actual* API calls use a separate `apiKey` that is retrieved from the user's profile (`/api/oauth/getUserInfo`) using the access token.
-*   **Callback Server**: The auth flow spins up a local server on port `11451` to capture the redirect.
+*   **Callback Server**: The auth flow spins up a local server (default: port `11451`, configurable via `IFLOW_OAUTH_PORT`) to capture the redirect.
 *   **Token Management**: Automatically refreshes the OAuth token and re-fetches the API key if needed.
 *   **Schema Cleaning**: Similar to Qwen, it aggressively sanitizes tool schemas to prevent 400 errors.
 *   **Dedicated Logging**: Implements `_IFlowFileLogger` to capture raw chunks for debugging proprietary API behaviors.
@@ -697,4 +1072,257 @@ To facilitate robust debugging, the proxy includes a comprehensive transaction l
 
 This level of detail allows developers to trace exactly why a request failed or why a specific key was rotated.
 
+---
+
+## 5. Runtime Resilience
+
+The proxy is engineered to maintain high availability even in the face of runtime filesystem disruptions. This "Runtime Resilience" capability ensures that the service continues to process API requests even if data files or directories are deleted while the application is running.
+
+### 5.1. Centralized Resilient I/O (`resilient_io.py`)
+
+All file operations are centralized in a single utility module that provides consistent error handling, graceful degradation, and automatic retry with shutdown flush:
+
+#### `BufferedWriteRegistry` (Singleton)
+
+Global registry for buffered writes with periodic retry and shutdown flush. Ensures critical data is saved even if disk writes fail temporarily:
+
+- **Per-file buffering**: Each file path has its own pending write (latest data always wins)
+- **Periodic retries**: Background thread retries failed writes every 30 seconds
+- **Shutdown flush**: `atexit` hook ensures final write attempt on app exit (Ctrl+C)
+- **Thread-safe**: Safe for concurrent access from multiple threads
+
+```python
+# Get the singleton instance
+registry = BufferedWriteRegistry.get_instance()
+
+# Check pending writes (for monitoring)
+pending_count = registry.get_pending_count()
+pending_files = registry.get_pending_paths()
+
+# Manual flush (optional - atexit handles this automatically)
+results = registry.flush_all()  # Returns {path: success_bool}
+
+# Manual shutdown (if needed before atexit)
+results = registry.shutdown()
+```
+
+#### `ResilientStateWriter`
+
+For stateful files that must persist (usage stats):
+- **Memory-first**: Always updates in-memory state before attempting disk write
+- **Atomic writes**: Uses tempfile + move pattern to prevent corruption
+- **Automatic retry with backoff**: If disk fails, waits `retry_interval` seconds before trying again
+- **Shutdown integration**: Registers with `BufferedWriteRegistry` on failure for final flush
+- **Health monitoring**: Exposes `is_healthy` property for monitoring
+
+```python
+writer = ResilientStateWriter("data.json", logger, retry_interval=30.0)
+writer.write({"key": "value"})  # Always succeeds (memory update)
+if not writer.is_healthy:
+    logger.warning("Disk writes failing, data in memory only")
+# On next write() call after retry_interval, disk write is attempted again
+# On app exit (Ctrl+C), BufferedWriteRegistry attempts final save
+```
+
+#### `safe_write_json()`
+
+For JSON writes with configurable options (credentials, cache):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `path` | required | File path to write to |
+| `data` | required | JSON-serializable data |
+| `logger` | required | Logger for warnings |
+| `atomic` | `True` | Use atomic write pattern (tempfile + move) |
+| `indent` | `2` | JSON indentation level |
+| `ensure_ascii` | `True` | Escape non-ASCII characters |
+| `secure_permissions` | `False` | Set file permissions to 0o600 |
+| `buffer_on_failure` | `False` | Register with BufferedWriteRegistry on failure |
+
+When `buffer_on_failure=True`:
+- Failed writes are registered with `BufferedWriteRegistry`
+- Data is retried every 30 seconds in background
+- On app exit, final write attempt is made automatically
+- Success unregisters the pending write
+
+```python
+# For critical data (auth tokens) - use buffer_on_failure
+safe_write_json(path, creds, logger, secure_permissions=True, buffer_on_failure=True)
+
+# For non-critical data (logs) - no buffering needed
+safe_write_json(path, data, logger)
+```
+
+#### `safe_log_write()`
+
+For log files where occasional loss is acceptable:
+- Fire-and-forget pattern
+- Creates parent directories if needed
+- Returns `True`/`False`, never raises
+- **No buffering** - logs are dropped on failure
+
+#### `safe_mkdir()`
+
+For directory creation with error handling.
+
+### 5.2. Resilience Hierarchy
+
+The system follows a strict hierarchy of survival:
+
+1. **Core API Handling (Level 1)**: The Python runtime keeps all necessary code in memory. Deleting source code files while the proxy is running will **not** crash active requests.
+
+2. **Credential Management (Level 2)**: OAuth tokens are cached in memory first. If credential files are deleted, the proxy continues using cached tokens. If a token refresh succeeds but the file cannot be written, the new token is buffered for retry and saved on shutdown.
+
+3. **Usage Tracking (Level 3)**: Usage statistics (`key_usage.json`) are maintained in memory via `ResilientStateWriter`. If the file is deleted, the system tracks usage internally and attempts to recreate the file on the next save interval. Pending writes are flushed on shutdown.
+
+4. **Provider Cache (Level 4)**: The provider cache tracks disk health and continues operating in memory-only mode if disk writes fail. Has its own shutdown mechanism.
+
+5. **Logging (Level 5)**: Logging is treated as non-critical. If the `logs/` directory is removed, the system attempts to recreate it. If creation fails, logging degrades gracefully without interrupting the request flow. **No buffering or retry**.
+
+### 5.3. Component Integration
+
+| Component | Utility Used | Behavior on Disk Failure | Shutdown Flush |
+|-----------|--------------|--------------------------|----------------|
+| `UsageManager` | `ResilientStateWriter` | Continues in memory, retries after 30s | Yes (via registry) |
+| `GoogleOAuthBase` | `safe_write_json(buffer_on_failure=True)` | Memory cache preserved, buffered for retry | Yes (via registry) |
+| `QwenAuthBase` | `safe_write_json(buffer_on_failure=True)` | Memory cache preserved, buffered for retry | Yes (via registry) |
+| `IFlowAuthBase` | `safe_write_json(buffer_on_failure=True)` | Memory cache preserved, buffered for retry | Yes (via registry) |
+| `ProviderCache` | `safe_write_json` + own shutdown | Retries via own background loop | Yes (own mechanism) |
+| `DetailedLogger` | `safe_write_json` | Logs dropped, no crash | No |
+| `failure_logger` | Python `logging.RotatingFileHandler` | Falls back to NullHandler | No |
+
+### 5.4. Shutdown Behavior
+
+When the application exits (including Ctrl+C):
+
+1. **atexit handler fires**: `BufferedWriteRegistry._atexit_handler()` is called
+2. **Pending writes counted**: Registry checks how many files have pending writes
+3. **Flush attempted**: Each pending file gets a final write attempt
+4. **Results logged**:
+   - Success: `"Shutdown flush: all N write(s) succeeded"`
+   - Partial: `"Shutdown flush: X succeeded, Y failed"` with failed file names
+
+**Console output example:**
+```
+INFO:rotator_library.resilient_io:Flushing 2 pending write(s) on shutdown...
+INFO:rotator_library.resilient_io:Shutdown flush: all 2 write(s) succeeded
+```
+
+### 5.5. "Develop While Running"
+
+This architecture supports a robust development workflow:
+
+- **Log Cleanup**: You can safely run `rm -rf logs/` while the proxy is serving traffic. The system will recreate the directory structure on the next request.
+- **Config Reset**: Deleting `key_usage.json` resets the persistence layer, but the running instance preserves its current in-memory counts for load balancing consistency.
+- **File Recovery**: If you delete a critical file, the system attempts directory auto-recreation before every write operation.
+- **Safe Exit**: Ctrl+C triggers graceful shutdown with final data flush attempt.
+
+### 5.6. Graceful Degradation & Data Loss
+
+While functionality is preserved, persistence may be compromised during filesystem failures:
+
+- **Logs**: If disk writes fail, detailed request logs may be lost (no buffering).
+- **Usage Stats**: Buffered in memory and flushed on shutdown. Data loss only if shutdown flush also fails.
+- **Credentials**: Buffered in memory and flushed on shutdown. Re-authentication only needed if shutdown flush fails.
+- **Cache**: Provider cache entries may need to be regenerated after restart if its own shutdown mechanism fails.
+
+### 5.7. Monitoring Disk Health
+
+Components expose health information for monitoring:
+
+```python
+# BufferedWriteRegistry
+registry = BufferedWriteRegistry.get_instance()
+pending = registry.get_pending_count()  # Number of files with pending writes
+files = registry.get_pending_paths()    # List of pending file names
+
+# UsageManager
+writer = usage_manager._state_writer
+health = writer.get_health_info()
+# Returns: {"healthy": True, "failure_count": 0, "last_success": 1234567890.0, ...}
+
+# ProviderCache
+stats = cache.get_stats()
+# Includes: {"disk_available": True, "disk_errors": 0, ...}
+```
+
+---
+
+## 6. Model Filter GUI
+
+The Model Filter GUI (`model_filter_gui.py`) provides a visual interface for configuring model ignore and whitelist rules per provider. It replaces the need to manually edit `IGNORE_MODELS_*` and `WHITELIST_MODELS_*` environment variables.
+
+### 6.1. Overview
+
+**Purpose**: Visually manage which models are exposed via the `/v1/models` endpoint for each provider.
+
+**Launch**: 
+```bash
+python -c "from src.proxy_app.model_filter_gui import run_model_filter_gui; run_model_filter_gui()"
+```
+
+Or via the launcher TUI if integrated.
+
+### 6.2. Features
+
+#### Core Functionality
+
+- **Provider Selection**: Dropdown to switch between available providers with automatic model fetching
+- **Ignore Rules**: Pattern-based rules (supports wildcards like `*-preview`, `gpt-4*`) to exclude models
+- **Whitelist Rules**: Pattern-based rules to explicitly include models, overriding ignore rules
+- **Real-time Preview**: Typing in rule input fields highlights affected models before committing
+- **Rule-Model Linking**: Click a model to highlight the affecting rule; click a rule to highlight all affected models
+- **Persistence**: Rules saved to `.env` file in standard `IGNORE_MODELS_<PROVIDER>` and `WHITELIST_MODELS_<PROVIDER>` format
+
+#### Dual-Pane Model View
+
+The interface displays two synchronized lists:
+
+| Left Pane | Right Pane |
+|-----------|------------|
+| All fetched models (plain text) | Same models with color-coded status |
+| Shows total count | Shows available/ignored count |
+| Scrolls in sync with right pane | Color indicates affecting rule |
+
+**Color Coding**:
+- **Green**: Model is available (no rule affects it, or whitelisted)
+- **Red/Orange tones**: Model is ignored (color matches the specific ignore rule)
+- **Blue/Teal tones**: Model is explicitly whitelisted (color matches the whitelist rule)
+
+#### Rule Management
+
+- **Comma-separated input**: Add multiple rules at once (e.g., `*-preview, *-beta, gpt-3.5*`)
+- **Wildcard support**: `*` matches any characters (e.g., `gemini-*-preview`)
+- **Affected count**: Each rule shows how many models it affects
+- **Tooltips**: Hover over a rule to see the list of affected models
+- **Instant delete**: Click the × button to remove a rule immediately
+
+### 6.3. Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+S` | Save changes to `.env` |
+| `Ctrl+R` | Refresh models from provider |
+| `Ctrl+F` | Focus search field |
+| `F1` | Show help dialog |
+| `Escape` | Clear search / Clear highlights |
+
+### 6.4. Context Menu
+
+Right-click on any model to access:
+
+- **Add to Ignore List**: Creates an ignore rule for the exact model name
+- **Add to Whitelist**: Creates a whitelist rule for the exact model name
+- **View Affecting Rule**: Highlights the rule that affects this model
+- **Copy Model Name**: Copies the full model ID to clipboard
+
+### 6.5. Integration with Proxy
+
+The GUI modifies the same environment variables that the `RotatingClient` reads:
+
+1. **GUI saves rules** → Updates `.env` file
+2. **Proxy reads on startup** → Loads `IGNORE_MODELS_*` and `WHITELIST_MODELS_*`
+3. **Proxy applies rules** → `get_available_models()` filters based on rules
+
+**Note**: The proxy must be restarted to pick up rule changes made via the GUI (or use the Launcher TUI's reload functionality if available).
 
