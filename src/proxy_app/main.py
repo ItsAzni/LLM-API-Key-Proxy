@@ -390,11 +390,12 @@ debug_file_handler.setFormatter(
 )
 
 
-# Create a filter to ensure the debug handler ONLY gets DEBUG messages from the rotator_library
+# Create a filter to ensure the debug handler ONLY gets DEBUG messages from the rotator_library or anthropic_stream
 class RotatorDebugFilter(logging.Filter):
     def filter(self, record):
-        return record.levelno == logging.DEBUG and record.name.startswith(
-            "rotator_library"
+        return record.levelno == logging.DEBUG and (
+            record.name.startswith("rotator_library") or
+            record.name.startswith("anthropic_stream")
         )
 
 
@@ -1067,6 +1068,16 @@ async def anthropic_streaming_wrapper(
     - message_delta: Final message metadata (stop_reason, usage)
     - message_stop: End of message
     """
+    stream_logger = logging.getLogger("anthropic_stream")
+    # Enable console debug output if DEBUG_STREAM env var is set
+    if os.environ.get("DEBUG_STREAM") and not getattr(stream_logger, '_console_handler_added', False):
+        console_debug_handler = logging.StreamHandler(sys.stdout)
+        console_debug_handler.setLevel(logging.DEBUG)
+        console_debug_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        stream_logger.addHandler(console_debug_handler)
+        stream_logger.setLevel(logging.DEBUG)
+        stream_logger._console_handler_added = True
+    stream_logger.debug(f"Starting anthropic_streaming_wrapper for {request_id}")
     message_started = False
     content_block_started = False
     thinking_block_started = False
@@ -1079,18 +1090,26 @@ async def anthropic_streaming_wrapper(
     output_tokens = 0
 
     try:
+        chunk_count = 0
         async for chunk_str in openai_stream:
+            chunk_count += 1
             if await request.is_disconnected():
+                stream_logger.debug(f"[{request_id}] Client disconnected at chunk {chunk_count}")
                 break
 
             if not chunk_str.strip() or not chunk_str.startswith("data:"):
+                stream_logger.debug(f"[{request_id}] Skipping non-data chunk {chunk_count}: {chunk_str[:100] if chunk_str else 'empty'}")
                 continue
 
             data_content = chunk_str[len("data:") :].strip()
+            stream_logger.debug(f"[{request_id}] Chunk {chunk_count}: {data_content[:200]}...")
+
             if data_content == "[DONE]":
+                stream_logger.debug(f"[{request_id}] Received [DONE], message_started={message_started}")
                 # CRITICAL: Send message_start if we haven't yet (e.g., empty response)
                 # Claude Code and other clients require message_start before message_stop
                 if not message_started:
+                    stream_logger.warning(f"[{request_id}] Sending late message_start at [DONE]!")
                     message_start = {
                         "type": "message_start",
                         "message": {
@@ -1131,12 +1150,15 @@ async def anthropic_streaming_wrapper(
                 yield f'event: message_delta\ndata: {{"type": "message_delta", "delta": {{"stop_reason": "{stop_reason}", "stop_sequence": null}}, "usage": {{"output_tokens": {output_tokens}}}}}\n\n'
 
                 # Send message_stop
+                stream_logger.debug(f"[{request_id}] Sending message_stop (total chunks: {chunk_count})")
                 yield 'event: message_stop\ndata: {"type": "message_stop"}\n\n'
+                stream_logger.info(f"[{request_id}] Stream completed successfully")
                 break
 
             try:
                 chunk = json.loads(data_content)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                stream_logger.warning(f"[{request_id}] JSON decode error at chunk {chunk_count}: {e}")
                 continue
 
             # Extract usage if present
@@ -1146,6 +1168,7 @@ async def anthropic_streaming_wrapper(
 
             # Send message_start on first chunk
             if not message_started:
+                stream_logger.debug(f"[{request_id}] Sending message_start on chunk {chunk_count}")
                 message_start = {
                     "type": "message_start",
                     "message": {
@@ -1164,6 +1187,7 @@ async def anthropic_streaming_wrapper(
 
             choices = chunk.get("choices", [])
             if not choices:
+                stream_logger.debug(f"[{request_id}] Chunk {chunk_count} has no choices, skipping")
                 continue
 
             delta = choices[0].get("delta", {})
@@ -1283,7 +1307,9 @@ async def anthropic_streaming_wrapper(
             # premature closes with providers that send finish_reason on each chunk.
 
     except Exception as e:
-        logging.error(f"Error in Anthropic streaming wrapper: {e}")
+        import traceback
+        stream_logger.error(f"Error in Anthropic streaming wrapper: {e}")
+        stream_logger.error(f"Traceback: {traceback.format_exc()}")
 
         # If we haven't sent message_start yet, send it now so the client can display the error
         # Claude Code and other clients may ignore events that come before message_start
