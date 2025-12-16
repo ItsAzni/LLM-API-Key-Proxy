@@ -117,6 +117,54 @@ class PreRequestCallbackError(Exception):
     pass
 
 
+class CredentialNeedsReauthError(Exception):
+    """
+    Raised when a credential's refresh token is invalid and re-authentication is required.
+
+    This is a rotatable error - the request should try the next credential while
+    the broken credential is queued for re-authentication in the background.
+
+    Unlike generic HTTPStatusError, this exception signals:
+    - The credential is temporarily unavailable (needs user action)
+    - Re-auth has already been queued
+    - The request should rotate to the next credential without logging scary tracebacks
+
+    Attributes:
+        credential_path: Path to the credential file that needs re-auth
+        message: Human-readable message about the error
+    """
+
+    def __init__(self, credential_path: str, message: str = ""):
+        self.credential_path = credential_path
+        self.message = (
+            message or f"Credential '{credential_path}' requires re-authentication"
+        )
+        super().__init__(self.message)
+
+
+class EmptyResponseError(Exception):
+    """
+    Raised when a provider returns an empty response after multiple retry attempts.
+
+    This is a rotatable error - the request should try the next credential.
+    Treated as a transient server-side issue (503 equivalent).
+
+    Attributes:
+        provider: The provider name (e.g., "antigravity")
+        model: The model that was requested
+        message: Human-readable message about the error
+    """
+
+    def __init__(self, provider: str, model: str, message: str = ""):
+        self.provider = provider
+        self.model = model
+        self.message = (
+            message
+            or f"Empty response from {provider}/{model} after multiple retry attempts"
+        )
+        super().__init__(self.message)
+
+
 # =============================================================================
 # ERROR TRACKING FOR CLIENT REPORTING
 # =============================================================================
@@ -698,6 +746,23 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             status_code=400,  # Treat as a bad request
         )
 
+    if isinstance(e, CredentialNeedsReauthError):
+        # This is a rotatable error - credential is broken but re-auth is queued
+        return ClassifiedError(
+            error_type="credential_reauth_needed",
+            original_exception=e,
+            status_code=401,  # Treat as auth error for reporting purposes
+        )
+
+    if isinstance(e, EmptyResponseError):
+        # Transient server-side issue - provider returned empty response
+        # This is rotatable - try next credential
+        return ClassifiedError(
+            error_type="server_error",
+            original_exception=e,
+            status_code=503,
+        )
+
     if isinstance(e, RateLimitError):
         retry_after = get_retry_after(e)
         # Check if this is a quota error vs rate limit
@@ -789,6 +854,7 @@ def should_rotate_on_error(classified_error: ClassifiedError) -> bool:
     - quota_exceeded: Current key/account exhausted
     - forbidden: Current credential denied access
     - authentication: Current credential invalid
+    - credential_reauth_needed: Credential needs interactive re-auth (queued)
     - server_error: Provider having issues (might work with different endpoint/key)
     - api_connection: Network issues (might be transient)
     - unknown: Safer to try another key
