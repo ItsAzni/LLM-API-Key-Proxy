@@ -699,10 +699,14 @@ async def lifespan(app: FastAPI):
     }
 
     # The client now uses the root logger configuration
+    # MAX_RETRIES: Number of retries per credential before rotating to next.
+    # Set to 0 to immediately rotate on errors (errors fall through to lower-priority/free credentials faster)
+    max_retries = int(os.getenv("MAX_RETRIES", "0"))
     client = RotatingClient(
         api_keys=api_keys,
         oauth_credentials=oauth_credentials,  # Pass OAuth config
         configure_logging=True,
+        max_retries=max_retries,
         litellm_provider_params=litellm_provider_params,
         ignore_models=ignore_models,
         whitelist_models=whitelist_models,
