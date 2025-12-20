@@ -370,11 +370,9 @@ def translate_anthropic_request(request: AnthropicMessagesRequest) -> Dict[str, 
             openai_request["reasoning_effort"] = "disable"
     elif _is_opus_model(request.model):
         # Enable thinking for Opus models when no thinking config is provided
-        # Use "high" effort but NOT custom_reasoning_budget, so // 4 applies
-        # This gives 8192 thinking tokens (32768 // 4) which is reasonable for most tasks
-        # Users who want full capacity can explicitly set thinking.budget_tokens >= 32000
+        # Always use full thinking capacity for Opus (no // 4 reduction)
         openai_request["reasoning_effort"] = "high"
-        # Note: NOT setting custom_reasoning_budget here to conserve tokens
+        openai_request["custom_reasoning_budget"] = True
 
     return openai_request
 
