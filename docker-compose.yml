@@ -1,4 +1,18 @@
 services:
+  nginx-proxy-manager:
+    image: "jc21/nginx-proxy-manager:latest"
+    container_name: nginx-proxy-manager
+    restart: unless-stopped
+    ports:
+      - "80:80" # Public HTTP
+      - "443:443" # Public HTTPS
+      - "81:81" # Admin Web Interface
+    volumes:
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+    # This allows the proxy to talk to other containers using "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   llm-proxy:
     build:
       context: .
@@ -24,7 +38,13 @@ services:
       # Ensure Python output is not buffered
       - PYTHONUNBUFFERED=1
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8317/')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8317/')",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
