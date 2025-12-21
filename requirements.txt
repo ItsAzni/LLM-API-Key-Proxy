@@ -25,3 +25,6 @@ customtkinter
 
 # For building the executable
 pyinstaller
+
+# Telegram bot for quota monitoring
+python-telegram-bot>=21.0
