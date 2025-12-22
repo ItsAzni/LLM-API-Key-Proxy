@@ -64,6 +64,7 @@ services:
       # Point to the llm-proxy container
       - PROXY_HOST=llm-proxy
       - PROXY_PORT=8317
+      - PROXY_SCHEME=http
     depends_on:
       llm-proxy:
         condition: service_healthy

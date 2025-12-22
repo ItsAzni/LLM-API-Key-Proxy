@@ -76,6 +76,9 @@ def get_config() -> Dict[str, Any]:
     proxy_host = os.getenv("PROXY_HOST", "127.0.0.1")
     proxy_port = int(os.getenv("PROXY_PORT", "8000"))
     proxy_api_key = os.getenv("PROXY_API_KEY", "")
+    proxy_scheme = os.getenv(
+        "PROXY_SCHEME", ""
+    )  # "http" or "https", auto-detect if empty
 
     return {
         "token": token,
@@ -83,6 +86,7 @@ def get_config() -> Dict[str, Any]:
         "proxy_host": proxy_host,
         "proxy_port": proxy_port,
         "proxy_api_key": proxy_api_key,
+        "proxy_scheme": proxy_scheme,
     }
 
 
@@ -171,16 +175,17 @@ async def fetch_quota_stats(provider: Optional[str] = None) -> Optional[Dict[str
     host = CONFIG["proxy_host"]
     port = CONFIG["proxy_port"]
     api_key = CONFIG["proxy_api_key"]
+    scheme = CONFIG["proxy_scheme"]
 
-    # Determine scheme
-    if (
-        host in ("localhost", "127.0.0.1", "::1")
-        or host.startswith("192.168.")
-        or host.startswith("10.")
-    ):
-        scheme = "http"
-    else:
-        scheme = "https"
+    if not scheme:
+        if (
+            host in ("localhost", "127.0.0.1", "::1")
+            or host.startswith("192.168.")
+            or host.startswith("10.")
+        ):
+            scheme = "http"
+        else:
+            scheme = "https"
 
     url = f"{scheme}://{host}:{port}/v1/quota-stats"
     if provider:
@@ -218,15 +223,17 @@ async def post_refresh_action(
     host = CONFIG["proxy_host"]
     port = CONFIG["proxy_port"]
     api_key = CONFIG["proxy_api_key"]
+    scheme = CONFIG["proxy_scheme"]
 
-    if (
-        host in ("localhost", "127.0.0.1", "::1")
-        or host.startswith("192.168.")
-        or host.startswith("10.")
-    ):
-        scheme = "http"
-    else:
-        scheme = "https"
+    if not scheme:
+        if (
+            host in ("localhost", "127.0.0.1", "::1")
+            or host.startswith("192.168.")
+            or host.startswith("10.")
+        ):
+            scheme = "http"
+        else:
+            scheme = "https"
 
     url = f"{scheme}://{host}:{port}/v1/quota-stats"
 
