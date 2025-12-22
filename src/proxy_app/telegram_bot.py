@@ -165,6 +165,34 @@ def escape_markdown(text: str) -> str:
     return text
 
 
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+def chunk_message(
+    text: str, max_length: int = TELEGRAM_MAX_MESSAGE_LENGTH
+) -> List[str]:
+    """Split message into chunks that fit Telegram's limit, splitting on newlines."""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current_chunk = ""
+
+    for line in text.split("\n"):
+        line_with_newline = line + "\n"
+        if len(current_chunk) + len(line_with_newline) > max_length:
+            if current_chunk:
+                chunks.append(current_chunk.rstrip("\n"))
+            current_chunk = line_with_newline
+        else:
+            current_chunk += line_with_newline
+
+    if current_chunk:
+        chunks.append(current_chunk.rstrip("\n"))
+
+    return chunks
+
+
 # =============================================================================
 # API Client
 # =============================================================================
@@ -490,13 +518,19 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             message = format_summary_message(stats)
 
-        # Try MarkdownV2 first, fall back to plain text
+        chunks = chunk_message(message)
+
         try:
-            await loading_msg.edit_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+            await loading_msg.edit_text(chunks[0], parse_mode=ParseMode.MARKDOWN_V2)
+            for chunk in chunks[1:]:
+                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
-            # Strip markdown and send as plain text
-            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
-            await loading_msg.edit_text(plain_message)
+            plain_chunks = chunk_message(
+                message.replace("*", "").replace("`", "").replace("\\", "")
+            )
+            await loading_msg.edit_text(plain_chunks[0])
+            for chunk in plain_chunks[1:]:
+                await update.message.reply_text(chunk)
 
     except Exception as e:
         logger.exception("Error fetching quota stats")
@@ -546,11 +580,19 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             message = format_summary_message(stats)
 
+        chunks = chunk_message(message)
+
         try:
-            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(chunks[0], parse_mode=ParseMode.MARKDOWN_V2)
+            for chunk in chunks[1:]:
+                await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
-            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
-            await update.message.reply_text(plain_message)
+            plain_chunks = chunk_message(
+                message.replace("*", "").replace("`", "").replace("\\", "")
+            )
+            await update.message.reply_text(plain_chunks[0])
+            for chunk in plain_chunks[1:]:
+                await update.message.reply_text(chunk)
 
     except Exception as e:
         logger.exception("Error refreshing quota")
