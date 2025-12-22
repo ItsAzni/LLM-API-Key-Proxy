@@ -30,6 +30,7 @@ ENV PATH=/root/.local/bin:$PATH
 
 # Copy application code
 COPY src/ ./src/
+COPY prompts/ ./prompts/
 
 # Create directories for logs and oauth credentials
 RUN mkdir -p logs oauth_creds
