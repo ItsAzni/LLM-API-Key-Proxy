@@ -58,6 +58,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence httpx INFO logs (noisy getUpdates polling)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 # =============================================================================
 # Session Management (In-Memory)
@@ -179,19 +182,6 @@ def load_system_prompt() -> str:
     logger.warning("System prompt not found, using default")
     SYSTEM_PROMPT = "You are a helpful AI assistant."
     return SYSTEM_PROMPT
-
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
-
-# Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
