@@ -3,6 +3,11 @@ services:
     image: "jc21/nginx-proxy-manager:latest"
     container_name: nginx-proxy-manager
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "80:80" # Public HTTP
       - "443:443" # Public HTTPS
@@ -19,6 +24,11 @@ services:
       dockerfile: Dockerfile
     container_name: llm-api-proxy
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "8317:8317"
     volumes:
