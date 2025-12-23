@@ -34,9 +34,10 @@ from dotenv import load_dotenv
 
 # Telegram imports
 try:
-    from telegram import Update
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.ext import (
         Application,
+        CallbackQueryHandler,
         CommandHandler,
         ContextTypes,
         MessageHandler,
@@ -750,20 +751,35 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if provider:
             message = format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
         else:
             message = format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons for antigravity
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
 
+        reply_markup = InlineKeyboardMarkup(keyboard)
         chunks = chunk_message(message)
 
         try:
-            await loading_msg.edit_text(chunks[0], parse_mode=ParseMode.MARKDOWN_V2)
+            await loading_msg.edit_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
             for chunk in chunks[1:]:
                 await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
             plain_chunks = chunk_message(
                 message.replace("*", "").replace("`", "").replace("\\", "")
             )
-            await loading_msg.edit_text(plain_chunks[0])
+            await loading_msg.edit_text(plain_chunks[0], reply_markup=reply_markup)
             for chunk in plain_chunks[1:]:
                 await update.message.reply_text(chunk)
 
@@ -832,6 +848,164 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.exception("Error refreshing quota")
         await loading_msg.edit_text(f"❌ Error: {str(e)}")
+
+
+async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle refresh button callback."""
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        await query.edit_message_text("⛔ Unauthorized.")
+        return
+
+    # Parse callback data: "refresh:<provider>" or "refresh:all"
+    data = query.data or ""
+    if not data.startswith("refresh:"):
+        return
+
+    provider = data[8:]  # Remove "refresh:" prefix
+    if provider == "all":
+        provider = None
+        scope = "all"
+    else:
+        scope = "provider"
+
+    # Update message to show loading
+    await query.edit_message_text("🔄 Refreshing quota data...")
+
+    try:
+        result = await post_refresh_action("force_refresh", scope, provider)
+
+        if result and "error" in result:
+            await query.edit_message_text(f"❌ {result['error']}")
+            return
+
+        refresh_info = ""
+        if result and result.get("refresh_result"):
+            rr = result["refresh_result"]
+            creds = rr.get("credentials_refreshed", 0)
+            duration = rr.get("duration_ms", 0)
+            refresh_info = f"✅ Refreshed {creds} credentials in {duration}ms\n\n"
+
+        # Fetch and show updated stats
+        await asyncio.sleep(0.5)
+        stats = await fetch_quota_stats(provider)
+        if stats is None:
+            stats = {"error": "Failed to fetch stats"}
+
+        if provider:
+            message = refresh_info + format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
+        else:
+            message = refresh_info + format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        chunks = chunk_message(message)
+        try:
+            await query.edit_message_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
+            # Send additional chunks without buttons
+            if query.message:
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
+            plain_chunks = chunk_message(plain_message)
+            await query.edit_message_text(plain_chunks[0], reply_markup=reply_markup)
+            if query.message:
+                for chunk in plain_chunks[1:]:
+                    await query.message.reply_text(chunk)
+
+    except Exception as e:
+        logger.exception("Error in refresh callback")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+
+
+async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle view button callback for navigating between quota views."""
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        await query.edit_message_text("⛔ Unauthorized.")
+        return
+
+    # Parse callback data: "view:<provider>" or "view:summary"
+    data = query.data or ""
+    if not data.startswith("view:"):
+        return
+
+    view_target = data[5:]  # Remove "view:" prefix
+    provider = None if view_target == "summary" else view_target
+
+    # Update message to show loading
+    await query.edit_message_text("⏳ Fetching quota stats...")
+
+    try:
+        stats = await fetch_quota_stats(provider)
+        if stats is None:
+            stats = {"error": "Failed to fetch stats"}
+
+        if provider:
+            message = format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
+        else:
+            message = format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        chunks = chunk_message(message)
+        try:
+            await query.edit_message_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
+            if query.message:
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
+            plain_chunks = chunk_message(plain_message)
+            await query.edit_message_text(plain_chunks[0], reply_markup=reply_markup)
+            if query.message:
+                for chunk in plain_chunks[1:]:
+                    await query.message.reply_text(chunk)
+
+    except Exception as e:
+        logger.exception("Error in view callback")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1233,6 +1407,10 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("quota", quota_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
+
+    # Callback handlers for inline buttons
+    application.add_handler(CallbackQueryHandler(refresh_callback, pattern=r"^refresh:"))
+    application.add_handler(CallbackQueryHandler(view_callback, pattern=r"^view:"))
 
     # LLM Chat handlers
     application.add_handler(CommandHandler("models", models_command))
