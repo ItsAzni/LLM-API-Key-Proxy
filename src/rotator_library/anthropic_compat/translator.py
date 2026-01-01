@@ -479,8 +479,9 @@ def translate_anthropic_request(request: AnthropicMessagesRequest) -> Dict[str, 
             openai_request["reasoning_effort"] = "disable"
     elif _is_opus_model(request.model):
         # Enable thinking for Opus models when no thinking config is provided
+        # Always use full thinking capacity for Opus (no // 4 reduction)
         openai_request["reasoning_effort"] = "high"
-
+        openai_request["custom_reasoning_budget"] = True
     return openai_request
 
 
