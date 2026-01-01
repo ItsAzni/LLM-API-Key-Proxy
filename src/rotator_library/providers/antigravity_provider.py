@@ -290,7 +290,7 @@ If you are unsure about a tool's parameters, YOU MUST read the schema definition
 DEFAULT_PARALLEL_TOOL_INSTRUCTION = """When multiple independent operations are needed, prefer making parallel tool calls in a single response rather than sequential calls across multiple responses. This reduces round-trips and improves efficiency. Only use sequential calls when one tool's output is required as input for another."""
 
 # Claude interleaved thinking hint (encourages thinking after tool results)
-DEFAULT_CLAUDE_INTERLEAVED_THINKING_HINT = """Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer."""
+DEFAULT_CLAUDE_INTERLEAVED_THINKING_HINT = """Interleaved thinking is enabled. Always emit a thinking block before each tool call and after each tool result, even if brief, before deciding the next action or final answer."""
 
 
 # =============================================================================
@@ -1870,6 +1870,26 @@ class AntigravityProvider(
                             "This is likely from context compression or non-thinking model. "
                             "New response will include thinking naturally."
                         )
+                elif not state["turn_has_thinking"]:
+                    # CASE: Last assistant message has NO tool calls AND NO thinking
+                    # This happens when:
+                    # 1. Previous turn was made without thinking enabled
+                    # 2. A simple text response without any tool use
+                    #
+                    # Per Claude docs: "the final assistant message must start with a thinking block"
+                    # If we're enabling thinking now, we MUST close the turn and start fresh,
+                    # otherwise Claude API rejects with:
+                    # "Expected `thinking` or `redacted_thinking`, but found `text`"
+                    lib_logger.info(
+                        "[Thinking Sanitization] Last model message has no thinking and no tool calls. "
+                        "Adding synthetic user message to start fresh thinking turn."
+                    )
+                    synthetic_user = {
+                        "role": "user",
+                        "parts": [{"text": "[Continue]"}],
+                    }
+                    messages.append(synthetic_user)
+                    return self._strip_all_thinking_blocks(messages), False
 
             # Strip thinking from old turns, let new response add thinking naturally
             return self._strip_old_turn_thinking(
@@ -2217,7 +2237,11 @@ class AntigravityProvider(
     # =========================================================================
 
     def _get_thinking_config(
-        self, reasoning_effort: Optional[str], model: str, custom_budget: bool = False
+        self,
+        reasoning_effort: Optional[str],
+        model: str,
+        custom_budget: bool = False,
+        thinking_budget: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Map reasoning_effort to thinking configuration.
@@ -2225,6 +2249,12 @@ class AntigravityProvider(
         - Gemini 2.5 & Claude: thinkingBudget (integer tokens)
         - Gemini 3 Pro: thinkingLevel (string: "low"/"high")
         - Gemini 3 Flash: thinkingLevel (string: "minimal"/"low"/"medium"/"high")
+
+        Args:
+            reasoning_effort: The reasoning effort level (low/medium/high/disable)
+            model: The model name
+            custom_budget: Whether to use the full budget without reduction
+            thinking_budget: Exact thinking budget from client (takes precedence for Claude)
         """
         internal = self._alias_to_internal(model)
         is_gemini_25 = "gemini-2.5" in model
@@ -2257,8 +2287,10 @@ class AntigravityProvider(
         # Gemini 2.5 & Claude: Integer thinkingBudget
         if not reasoning_effort:
             if is_claude:
+                # Use client-provided budget if available, otherwise use default
+                budget = thinking_budget if thinking_budget else CLAUDE_FORCED_THINKING_BUDGET
                 return {
-                    "thinkingBudget": CLAUDE_FORCED_THINKING_BUDGET,
+                    "thinkingBudget": budget,
                     "include_thoughts": True,
                 }
             return {"thinkingBudget": -1, "include_thoughts": True}  # Auto
@@ -2267,8 +2299,10 @@ class AntigravityProvider(
             return {"thinkingBudget": 0, "include_thoughts": False}
 
         if is_claude:
+            # Use client-provided budget if available, otherwise use default
+            budget = thinking_budget if thinking_budget else CLAUDE_FORCED_THINKING_BUDGET
             return {
-                "thinkingBudget": CLAUDE_FORCED_THINKING_BUDGET,
+                "thinkingBudget": budget,
                 "include_thoughts": True,
             }
 
@@ -4350,6 +4384,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         temperature = kwargs.get("temperature")
         max_tokens = kwargs.get("max_tokens")
         custom_budget = kwargs.get("custom_reasoning_budget", False)
+        thinking_budget = kwargs.get("thinking_budget")  # Exact budget from client
         enable_logging = kwargs.pop("enable_request_logging", False)
 
         # Create logger
@@ -4442,7 +4477,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             gen_config["temperature"] = 1.0
 
         thinking_config = self._get_thinking_config(
-            reasoning_effort, model, custom_budget
+            reasoning_effort, model, custom_budget, thinking_budget
         )
         if thinking_config:
             gen_config.setdefault("thinkingConfig", {}).update(thinking_config)

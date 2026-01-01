@@ -90,14 +90,20 @@ def anthropic_to_openai_messages(
                             )
                     elif block_type == "thinking":
                         signature = block.get("signature", "")
-                        if signature and len(signature) >= MIN_THINKING_SIGNATURE_LENGTH:
+                        if (
+                            signature
+                            and len(signature) >= MIN_THINKING_SIGNATURE_LENGTH
+                        ):
                             thinking_text = block.get("thinking", "")
                             if thinking_text:
                                 reasoning_content += thinking_text
                             thinking_signature = signature
                     elif block_type == "redacted_thinking":
                         signature = block.get("signature", "")
-                        if signature and len(signature) >= MIN_THINKING_SIGNATURE_LENGTH:
+                        if (
+                            signature
+                            and len(signature) >= MIN_THINKING_SIGNATURE_LENGTH
+                        ):
                             thinking_signature = signature
                     elif block_type == "tool_use":
                         # Anthropic tool_use -> OpenAI tool_calls
@@ -151,7 +157,9 @@ def anthropic_to_openai_messages(
                                         tool_content_parts.append(
                                             {
                                                 "type": "image_url",
-                                                "image_url": {"url": source.get("url", "")},
+                                                "image_url": {
+                                                    "url": source.get("url", "")
+                                                },
                                             }
                                         )
 
@@ -192,7 +200,9 @@ def anthropic_to_openai_messages(
                                 {
                                     "role": "tool",
                                     "tool_call_id": block.get("tool_use_id", ""),
-                                    "content": str(tool_content) if tool_content else "",
+                                    "content": str(tool_content)
+                                    if tool_content
+                                    else "",
                                 }
                             )
                         continue  # Don't add to current message
@@ -453,37 +463,23 @@ def translate_anthropic_request(request: AnthropicMessagesRequest) -> Dict[str, 
     # and doesn't affect the model's behavior.
 
     # Handle Anthropic thinking config -> reasoning_effort translation
-    # The provider (antigravity_provider.py) applies a // 4 reduction to thinking budget
-    # unless custom_reasoning_budget is True. This conserves thinking tokens.
-    #
-    # Reasoning budget thresholds map to provider budgets:
-    # - Claude "high" = 32768 tokens (but // 4 = 8192 unless custom_reasoning_budget)
-    # - Claude "medium" = 16384 tokens (// 4 = 4096)
-    # - Claude "low" = 8192 tokens (// 4 = 2048)
-    #
-    # We only set custom_reasoning_budget=True when user explicitly requests
-    # a large budget (32000+), indicating they want full thinking capacity.
+    # Pass through the exact budget_tokens value when specified, allowing the
+    # provider to use the client's requested thinking budget directly.
     if request.thinking:
         if request.thinking.type == "enabled":
-            budget = request.thinking.budget_tokens or 10000
-            if budget >= 32000:
-                # User explicitly wants full thinking capacity
+            budget = request.thinking.budget_tokens
+            if budget:
+                # Pass the exact budget through for the provider to use
                 openai_request["reasoning_effort"] = "high"
-                openai_request["custom_reasoning_budget"] = True
-            elif budget >= 10000:
-                openai_request["reasoning_effort"] = "high"
-                # custom_reasoning_budget defaults to False, so // 4 applies
-            elif budget >= 5000:
-                openai_request["reasoning_effort"] = "medium"
+                openai_request["thinking_budget"] = budget
             else:
-                openai_request["reasoning_effort"] = "low"
+                # No specific budget requested, use high effort
+                openai_request["reasoning_effort"] = "high"
         elif request.thinking.type == "disabled":
             openai_request["reasoning_effort"] = "disable"
     elif _is_opus_model(request.model):
         # Enable thinking for Opus models when no thinking config is provided
-        # Always use full thinking capacity for Opus (no // 4 reduction)
         openai_request["reasoning_effort"] = "high"
-        openai_request["custom_reasoning_budget"] = True
 
     return openai_request
 
@@ -510,8 +506,8 @@ def _is_opus_model(model_name: str) -> bool:
     # - "antigravity/claude-opus-4-5"
     # Avoid matching things like "magnum-opus" or other non-Claude models
     opus_patterns = [
-        r'claude[-_]?opus',        # "claude-opus", "claude_opus", "claudeopus"
-        r'opus[-_]?\d',            # "opus-4", "opus_4", "opus4" (with version number)
-        r'\d[-_]?opus(?:[-_]|$)',  # "4-opus", "4_opus" at word boundary
+        r"claude[-_]?opus",  # "claude-opus", "claude_opus", "claudeopus"
+        r"opus[-_]?\d",  # "opus-4", "opus_4", "opus4" (with version number)
+        r"\d[-_]?opus(?:[-_]|$)",  # "4-opus", "4_opus" at word boundary
     ]
     return any(re.search(pattern, model_lower) for pattern in opus_patterns)
