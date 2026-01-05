@@ -100,7 +100,8 @@ with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
     from contextlib import asynccontextmanager
     from fastapi import FastAPI, Request, HTTPException, Depends
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse, JSONResponse
+    from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+    from fastapi.staticfiles import StaticFiles
     from fastapi.security import APIKeyHeader
 
 print("  → Loading core dependencies...")
@@ -641,6 +642,11 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI App Setup ---
 app = FastAPI(lifespan=lifespan)
+
+# --- Static Files for Dashboard ---
+_dashboard_static_dir = Path(__file__).parent / "static"
+if _dashboard_static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(_dashboard_static_dir)), name="static")
 
 # Add CORS middleware to allow all origins, methods, and headers
 app.add_middleware(
@@ -1248,6 +1254,115 @@ async def embeddings(
 @app.get("/")
 def read_root():
     return {"Status": "API Key Proxy is running"}
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """
+    Serve the web dashboard for monitoring quota and usage.
+
+    The dashboard provides a visual interface for:
+    - Provider status overview
+    - Credential health and quota usage
+    - Real-time updates with auto-refresh
+    - Cost tracking and token usage
+
+    Authentication is handled client-side using the same PROXY_API_KEY.
+    """
+    html_path = Path(__file__).parent / "static" / "index.html"
+    if not html_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Dashboard not found. Ensure static/index.html exists."
+        )
+    return FileResponse(html_path, media_type="text/html")
+
+
+# --- Dashboard API Endpoints (No Auth Required) ---
+@app.get("/dashboard/api/config")
+async def dashboard_config():
+    """
+    Provides configuration to the dashboard, including the API key.
+    This allows the dashboard to authenticate with other endpoints.
+    """
+    return {
+        "apiKey": PROXY_API_KEY or None,
+        "needsAuth": bool(PROXY_API_KEY),
+    }
+
+
+@app.get("/dashboard/api/quota-stats")
+async def dashboard_quota_stats(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    provider: str = None,
+):
+    """
+    Dashboard endpoint for quota stats - no authentication required.
+    This is safe because it only exposes usage statistics, not credentials.
+    """
+    try:
+        stats = await client.get_quota_stats(provider_filter=provider)
+        return stats
+    except Exception as e:
+        logging.error(f"Failed to get quota stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/dashboard/api/quota-stats")
+async def dashboard_refresh_quota_stats(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+):
+    """
+    Dashboard endpoint to refresh quota stats - no authentication required.
+    """
+    try:
+        data = await request.json()
+        action = data.get("action", "reload")
+        scope = data.get("scope", "all")
+        provider = data.get("provider")
+        credential = data.get("credential")
+
+        if action not in ("reload", "force_refresh"):
+            raise HTTPException(
+                status_code=400,
+                detail="action must be 'reload' or 'force_refresh'",
+            )
+
+        refresh_result = {
+            "action": action,
+            "scope": scope,
+            "provider": provider,
+            "credential": credential,
+        }
+
+        if action == "reload":
+            start_time = time.time()
+            await client.reload_usage_from_disk()
+            refresh_result["duration_ms"] = int((time.time() - start_time) * 1000)
+            refresh_result["success"] = True
+            refresh_result["message"] = "Reloaded usage data from disk"
+
+        elif action == "force_refresh":
+            result = await client.force_refresh_quota(
+                provider=provider if scope in ("provider", "credential") else None,
+                credential=credential if scope == "credential" else None,
+            )
+            refresh_result.update(result)
+            refresh_result["success"] = result["failed_count"] == 0
+
+        stats = await client.get_quota_stats(provider_filter=provider)
+        stats["refresh_result"] = refresh_result
+        stats["data_source"] = "refreshed"
+
+        return stats
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Failed to refresh quota stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/v1/models")

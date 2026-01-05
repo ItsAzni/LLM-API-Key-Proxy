@@ -1,0 +1,153 @@
+/* ==========================================================================
+   Card & Component Styles - Clean, Modern Design
+   ========================================================================== */
+
+/* Clean Card Style (replacing glassmorphism) */
+.card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--card-shadow);
+    transition:
+        transform var(--transition-normal),
+        box-shadow var(--transition-normal);
+}
+
+.card:hover {
+    box-shadow: var(--card-shadow-hover);
+}
+
+/* Glass card now uses clean card style */
+.glass-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--card-shadow);
+    transition:
+        transform var(--transition-normal),
+        box-shadow var(--transition-normal);
+}
+
+.glass-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--card-shadow-hover);
+}
+
+/* Header - Clean, minimal */
+.glass-header {
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--divider);
+    box-shadow: none;
+}
+
+/* Panel (Drawer) */
+.glass-panel {
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--divider);
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.1);
+}
+
+/* Button Styles */
+.glass-button {
+    background: var(--btn-light-bg);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-full);
+    color: var(--text-primary);
+    font-family: var(--font-primary);
+    font-weight: var(--font-medium);
+    font-size: var(--text-sm);
+    padding: var(--space-sm) var(--space-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-xs);
+}
+
+.glass-button:hover {
+    background: var(--divider);
+    border-color: var(--card-border);
+}
+
+.glass-button:active {
+    transform: scale(0.98);
+}
+
+.glass-button.primary {
+    background: var(--btn-dark-bg);
+    border-color: transparent;
+    color: var(--btn-dark-text);
+    font-weight: var(--font-semibold);
+}
+
+.glass-button.primary:hover {
+    opacity: 0.9;
+}
+
+.glass-button.icon-button {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: var(--radius-md);
+}
+
+.glass-button.icon-button .icon {
+    font-size: var(--text-lg);
+    line-height: 1;
+}
+
+/* Input */
+.glass-input {
+    background: var(--bg-primary);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    padding: var(--space-sm) var(--space-md);
+    width: 100%;
+    transition: all var(--transition-fast);
+    outline: none;
+}
+
+.glass-input::placeholder {
+    color: var(--text-muted);
+}
+
+.glass-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+/* Pill Toggle - Like the Current Period / Lifetime toggle */
+.glass-pill {
+    display: inline-flex;
+    background: var(--btn-light-bg);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-full);
+    padding: 3px;
+}
+
+.glass-pill .toggle-option {
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-full);
+    color: var(--text-secondary);
+    font-family: var(--font-primary);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    padding: 6px 16px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.glass-pill .toggle-option:hover {
+    color: var(--text-primary);
+}
+
+.glass-pill .toggle-option.active {
+    background: var(--accent);
+    color: white;
+    box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.3);
+}

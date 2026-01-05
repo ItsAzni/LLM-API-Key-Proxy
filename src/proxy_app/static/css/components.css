@@ -1,0 +1,530 @@
+/* ==========================================================================
+   Components - UI Elements with Warm Editorial Design
+   ========================================================================== */
+
+/* Provider Card */
+.provider-card {
+    padding: var(--space-xl);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.provider-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+}
+
+.provider-name {
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    color: var(--text-primary);
+}
+
+.provider-icon {
+    font-size: var(--text-xl);
+}
+
+/* Credential Count Dots */
+.credential-count {
+    display: flex;
+    gap: var(--space-sm);
+    font-size: var(--text-sm);
+    align-items: center;
+}
+
+.count-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+}
+
+.count-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.count-dot.active { background: var(--status-active); }
+.count-dot.cooldown { background: var(--status-cooldown); }
+.count-dot.exhausted { background: var(--status-exhausted); }
+.count-dot.unknown { background: var(--status-unknown); }
+
+/* Status Badge */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.status-badge.active {
+    background: var(--status-active-bg);
+    color: var(--status-active);
+}
+
+.status-badge.cooldown {
+    background: var(--status-cooldown-bg);
+    color: var(--status-cooldown);
+}
+
+.status-badge.exhausted {
+    background: var(--status-exhausted-bg);
+    color: var(--status-exhausted);
+}
+
+.status-badge.unknown {
+    background: var(--status-unknown-bg);
+    color: var(--status-unknown);
+}
+
+/* Tier Badge */
+.tier-badge {
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    color: var(--accent);
+    border: 1px solid transparent;
+}
+
+/* Quota Progress Bar - Beautiful gradient fills */
+.quota-bar {
+    margin: var(--space-sm) 0;
+}
+
+.quota-bar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: var(--text-sm);
+    margin-bottom: 6px;
+}
+
+.quota-name {
+    color: var(--text-primary);
+    font-weight: var(--font-medium);
+}
+
+.quota-value {
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+}
+
+.quota-bar-track {
+    height: 8px;
+    background: var(--divider);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.quota-bar-fill {
+    height: 100%;
+    background: var(--progress-gradient);
+    border-radius: 4px;
+    transition: width var(--transition-slow) ease-out;
+    min-width: 2px;
+}
+
+.quota-bar-fill.warning {
+    background: var(--progress-warning);
+}
+
+.quota-bar-fill.danger {
+    background: var(--progress-danger);
+}
+
+/* Stats Row */
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-md);
+    padding: var(--space-lg) 0;
+    border-top: 1px solid var(--divider);
+    margin-top: var(--space-sm);
+}
+
+.stat-item {
+    text-align: center;
+}
+
+.stat-value {
+    display: block;
+    font-size: var(--text-xl);
+    font-weight: var(--font-bold);
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
+
+.stat-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: var(--font-medium);
+}
+
+/* Cache Stat */
+.cache-stat {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    font-size: var(--text-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--accent-muted);
+    border-radius: var(--radius-md);
+}
+
+.cache-label {
+    color: var(--text-secondary);
+}
+
+.cache-value {
+    font-family: var(--font-mono);
+    font-weight: var(--font-semibold);
+    color: var(--accent);
+}
+
+/* Credentials List */
+.credentials-list {
+    margin-top: var(--space-md);
+    border-top: 1px solid var(--divider);
+    padding-top: var(--space-md);
+}
+
+.credentials-header {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    margin-bottom: var(--space-sm);
+}
+
+.credential-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-sm);
+    margin: 0 calc(var(--space-sm) * -1);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.credential-item:hover {
+    background: var(--divider);
+}
+
+.credential-identifier {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-primary);
+}
+
+/* Quota Display in credential item */
+.quota-display {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* Cooldown Timer */
+.cooldown-timer {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--status-cooldown);
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 6px;
+    background: var(--status-cooldown-bg);
+    border-radius: var(--radius-sm);
+}
+
+.timer-icon {
+    font-size: var(--text-sm);
+}
+
+/* Show More Button */
+.show-more-btn {
+    width: 100%;
+    margin-top: var(--space-sm);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px dashed var(--divider);
+}
+
+.show-more-btn:hover {
+    border-style: solid;
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* Empty State */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+    padding: var(--space-3xl);
+    text-align: center;
+    grid-column: 1 / -1;
+}
+
+.empty-state .hint {
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+}
+
+/* Loading State */
+.loading-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+    padding: var(--space-3xl);
+    color: var(--text-secondary);
+    grid-column: 1 / -1;
+}
+
+/* Toast */
+.toast {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-sm) var(--space-md);
+    min-width: 280px;
+    max-width: 400px;
+    box-shadow: var(--card-shadow);
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.toast-icon {
+    font-size: var(--text-lg);
+    flex-shrink: 0;
+}
+
+.toast-message {
+    flex: 1;
+    font-size: var(--text-sm);
+}
+
+.toast.success {
+    border-left: 3px solid var(--status-active);
+}
+
+.toast.success .toast-icon {
+    color: var(--status-active);
+}
+
+.toast.error {
+    border-left: 3px solid var(--status-exhausted);
+}
+
+.toast.error .toast-icon {
+    color: var(--status-exhausted);
+}
+
+.toast.warning {
+    border-left: 3px solid var(--status-cooldown);
+}
+
+.toast.warning .toast-icon {
+    color: var(--status-cooldown);
+}
+
+/* Toggle Switch */
+.auto-refresh-toggle {
+    display: flex;
+    align-items: center;
+}
+
+.toggle-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    font-weight: var(--font-medium);
+}
+
+.toggle-label input {
+    display: none;
+}
+
+.toggle-slider {
+    width: 44px;
+    height: 24px;
+    background: var(--divider);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-full);
+    position: relative;
+    transition: all var(--transition-fast);
+}
+
+.toggle-slider::after {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    transition: all var(--transition-fast);
+}
+
+.toggle-label input:checked + .toggle-slider {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.toggle-label input:checked + .toggle-slider::after {
+    background: white;
+    transform: translateX(20px);
+}
+
+.toggle-text {
+    font-weight: var(--font-medium);
+}
+
+/* Quota Groups */
+.quota-groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+/* Drawer Credential Detail */
+.credential-detail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+.detail-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+}
+
+.detail-section {
+    border-top: 1px solid var(--divider);
+    padding-top: var(--space-md);
+}
+
+.detail-section-title {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    margin-bottom: var(--space-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-xs) 0;
+    font-size: var(--text-sm);
+}
+
+.detail-label {
+    color: var(--text-muted);
+}
+
+.detail-value {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
+/* Model List in Drawer */
+.model-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.model-item {
+    padding: var(--space-sm);
+    background: var(--divider);
+    border-radius: var(--radius-md);
+}
+
+.model-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    margin-bottom: var(--space-xs);
+}
+
+.model-stats {
+    display: flex;
+    gap: var(--space-md);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+}
+
+.more-models {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-align: center;
+    margin-top: var(--space-sm);
+}
+
+/* Cooldown list in drawer */
+.cooldown-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.cooldown-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--status-cooldown-bg);
+    border-radius: var(--radius-sm);
+}
+
+.cooldown-item .model-name {
+    font-size: var(--text-xs);
+    margin: 0;
+}
+
+/* Quota group detail in drawer */
+.quota-group-detail {
+    margin-bottom: var(--space-md);
+}

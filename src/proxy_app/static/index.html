@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Proxy Dashboard</title>
+
+    <!-- Fonts: Clean, modern -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/static/css/variables.css">
+    <link rel="stylesheet" href="/static/css/themes.css">
+    <link rel="stylesheet" href="/static/css/glassmorphism.css">
+    <link rel="stylesheet" href="/static/css/layout.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/animations.css">
+</head>
+<body>
+    <!-- Main Dashboard (no auth required) -->
+    <div id="dashboard" class="dashboard-container">
+        <!-- Header -->
+        <header class="glass-header">
+            <div class="header-left">
+                <h1 class="logo">
+                    <span class="logo-icon">&#x26A1;</span>
+                    LLM Proxy
+                </h1>
+                <span class="header-subtitle">Dashboard</span>
+            </div>
+            <div class="header-center">
+                <div class="summary-stats">
+                    <div class="stat-item">
+                        <span class="stat-value" id="total-requests">--</span>
+                        <span class="stat-label">REQUESTS</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="total-tokens">--</span>
+                        <span class="stat-label">TOKENS</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-value" id="total-cost">--</span>
+                        <span class="stat-label">COST</span>
+                    </div>
+                </div>
+            </div>
+            <div class="header-right">
+                <button id="refresh-btn" class="glass-button icon-button" title="Refresh data">
+                    <span class="icon">&#x21BB;</span>
+                </button>
+                <button id="theme-toggle" class="glass-button icon-button" title="Toggle theme">
+                    <span class="icon theme-icon-dark">&#x263E;</span>
+                    <span class="icon theme-icon-light">&#x2600;</span>
+                </button>
+                <div class="auto-refresh-toggle">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="auto-refresh-toggle" checked>
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-text">Auto</span>
+                    </label>
+                </div>
+            </div>
+        </header>
+
+        <!-- View Controls -->
+        <div class="view-controls">
+            <div class="view-toggle glass-pill">
+                <button class="toggle-option active" data-view="current">
+                    Current Period
+                </button>
+                <button class="toggle-option" data-view="global">
+                    Lifetime
+                </button>
+            </div>
+            <div class="data-info">
+                <span class="data-source-label">Source:</span>
+                <span class="data-source" id="data-source">cache</span>
+                <span class="data-age-label">Updated:</span>
+                <span class="data-age" id="data-age">--</span>
+            </div>
+        </div>
+
+        <!-- Provider Cards Grid -->
+        <main class="providers-grid" id="providers-container">
+            <div class="loading-state glass-card">
+                <div class="spinner"></div>
+                <p>Loading providers...</p>
+            </div>
+        </main>
+
+        <!-- Credential Detail Drawer -->
+        <aside id="credential-drawer" class="credential-drawer glass-panel" hidden>
+            <div class="drawer-header">
+                <h2 class="drawer-title">Credential Details</h2>
+                <button class="close-drawer glass-button icon-button" title="Close">
+                    &times;
+                </button>
+            </div>
+            <div class="drawer-content" id="drawer-content">
+                <!-- Populated when credential is selected -->
+            </div>
+        </aside>
+
+        <!-- Drawer Backdrop -->
+        <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Scripts -->
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+/* ==========================================================================
+   Themes - Warm, Editorial Design
+   Inspired by modern editorial sites with warm, organic feel
+   ========================================================================== */
+
+/* Light Theme (Default) - Warm Cream */
+[data-theme="light"] {
+    /* Background - Warm cream/beige */
+    --bg-gradient: #FAF8F5;
+    --bg-primary: #FAF8F5;
+    --bg-secondary: #FFFFFF;
+
+    /* Card Styling - Clean white with soft shadows */
+    --card-bg: #FFFFFF;
+    --card-border: rgba(0, 0, 0, 0.04);
+    --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+    --card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.08);
+
+    /* Text - Warm black */
+    --text-primary: #1a1a1a;
+    --text-secondary: #666666;
+    --text-muted: #999999;
+    --text-inverse: #FFFFFF;
+
+    /* Accent Colors - Coral/Pink gradient */
+    --accent: #7C5CFF;
+    --accent-rgb: 124, 92, 255;
+    --accent-hover: #6B4FE0;
+    --accent-gradient: linear-gradient(135deg, #7C5CFF 0%, #B76CFB 100%);
+    --accent-muted: rgba(124, 92, 255, 0.1);
+
+    /* Highlight - Coral pink for special emphasis */
+    --highlight: #FF6B8A;
+    --highlight-bg: rgba(255, 107, 138, 0.15);
+
+    /* Progress bar gradients */
+    --progress-gradient: linear-gradient(90deg, #7C5CFF 0%, #B76CFB 100%);
+    --progress-warning: linear-gradient(90deg, #F59E0B 0%, #FBBF24 100%);
+    --progress-danger: linear-gradient(90deg, #EF4444 0%, #F87171 100%);
+
+    /* Status Colors */
+    --status-active: #22C55E;
+    --status-active-bg: rgba(34, 197, 94, 0.12);
+    --status-cooldown: #F59E0B;
+    --status-cooldown-bg: rgba(245, 158, 11, 0.12);
+    --status-exhausted: #EF4444;
+    --status-exhausted-bg: rgba(239, 68, 68, 0.12);
+    --status-unknown: #9CA3AF;
+    --status-unknown-bg: rgba(156, 163, 175, 0.12);
+
+    /* Dividers */
+    --divider: rgba(0, 0, 0, 0.06);
+
+    /* Buttons */
+    --btn-dark-bg: #1a1a1a;
+    --btn-dark-text: #FFFFFF;
+    --btn-light-bg: #F5F5F5;
+    --btn-light-text: #1a1a1a;
+
+    /* Scrollbar */
+    --scrollbar-track: rgba(0, 0, 0, 0.03);
+    --scrollbar-thumb: rgba(0, 0, 0, 0.12);
+    --scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
+}
+
+/* Dark Theme - Deep Purple/Blue */
+[data-theme="dark"] {
+    /* Background - Rich dark with purple tint */
+    --bg-gradient: linear-gradient(180deg, #1a1625 0%, #13111a 100%);
+    --bg-primary: #1a1625;
+    --bg-secondary: #231f2e;
+
+    /* Card Styling */
+    --card-bg: rgba(255, 255, 255, 0.05);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+    --card-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.4);
+
+    /* Text */
+    --text-primary: rgba(255, 255, 255, 0.95);
+    --text-secondary: rgba(255, 255, 255, 0.6);
+    --text-muted: rgba(255, 255, 255, 0.4);
+    --text-inverse: #1a1a1a;
+
+    /* Accent Colors - Brighter purple/pink */
+    --accent: #A78BFA;
+    --accent-rgb: 167, 139, 250;
+    --accent-hover: #C4B5FD;
+    --accent-gradient: linear-gradient(135deg, #A78BFA 0%, #F0ABFC 100%);
+    --accent-muted: rgba(167, 139, 250, 0.2);
+
+    /* Highlight */
+    --highlight: #FB7185;
+    --highlight-bg: rgba(251, 113, 133, 0.2);
+
+    /* Progress bar gradients */
+    --progress-gradient: linear-gradient(90deg, #A78BFA 0%, #F0ABFC 100%);
+    --progress-warning: linear-gradient(90deg, #FBBF24 0%, #FCD34D 100%);
+    --progress-danger: linear-gradient(90deg, #F87171 0%, #FCA5A5 100%);
+
+    /* Status Colors */
+    --status-active: #4ADE80;
+    --status-active-bg: rgba(74, 222, 128, 0.15);
+    --status-cooldown: #FBBF24;
+    --status-cooldown-bg: rgba(251, 191, 36, 0.15);
+    --status-exhausted: #F87171;
+    --status-exhausted-bg: rgba(248, 113, 113, 0.15);
+    --status-unknown: #9CA3AF;
+    --status-unknown-bg: rgba(156, 163, 175, 0.15);
+
+    /* Dividers */
+    --divider: rgba(255, 255, 255, 0.08);
+
+    /* Buttons */
+    --btn-dark-bg: #FFFFFF;
+    --btn-dark-text: #1a1a1a;
+    --btn-light-bg: rgba(255, 255, 255, 0.1);
+    --btn-light-text: #FFFFFF;
+
+    /* Scrollbar */
+    --scrollbar-track: rgba(255, 255, 255, 0.03);
+    --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.2);
+}
+
+/* Theme Toggle Icon Visibility */
+[data-theme="dark"] .theme-icon-dark { display: inline; }
+[data-theme="dark"] .theme-icon-light { display: none; }
+[data-theme="light"] .theme-icon-dark { display: none; }
+[data-theme="light"] .theme-icon-light { display: inline; }
