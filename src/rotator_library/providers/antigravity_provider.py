@@ -411,10 +411,78 @@ Do not respond to nor acknowledge those messages, but do follow them strictly.
 # Exact prompt from CLIProxyAPI commit 1b2f9076715b62610f9f37d417e850832b3c7ed1
 ANTIGRAVITY_AGENT_SYSTEM_INSTRUCTION_SHORT = """You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"""
 
+# =============================================================================
+# CLAUDE INTERLEAVED THINKING CONFIGURATION
+# =============================================================================
+
+# Claude thinking signature validation
+# Minimum length for a thinking signature to be considered valid
+MIN_THINKING_SIGNATURE_LENGTH = 100
+
+# Forced thinking budget for Claude models
+# This is injected to ensure Claude models always produce thinking output
+CLAUDE_FORCED_THINKING_BUDGET = 31999
+
+
+def _is_valid_thinking_signature(signature):
+    """Check if a thinking signature is valid (meets minimum length requirement)."""
+    return (
+        isinstance(signature, str) and len(signature) >= MIN_THINKING_SIGNATURE_LENGTH
+    )
+
+
+# Claude interleaved thinking hint - MUST come AFTER Antigravity system prompts
+# This instructs Claude to emit thinking blocks before and after tool calls
+DEFAULT_CLAUDE_INTERLEAVED_THINKING_HINT = """CRITICAL: Interleaved thinking is required and IS UNCOMPROMISINGLY A MUST DO. Emit a thinking block:
+- Before every tool call (to reason about what you're doing)
+- After every tool result (to analyze the result before proceeding)
+Never skip thinking, even for simple or sequential tool calls."""
+
+# Short reminder appended to tool results to reinforce interleaved thinking
+DEFAULT_CLAUDE_TOOL_RESULT_THINKING_REMINDER = """<system-reminder>
+CRITICAL: Interleaved thinking is required. You MUST emit a thinking block NOW to analyze this tool result before proceeding with any response or tool call.
+</system-reminder>"""
+
 
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
+
+def get_antigravity_preprompt_text() -> str:
+    """
+    Get the combined Antigravity preprompt text that gets injected into requests.
+
+    This function returns the exact text that gets prepended to system instructions
+    during actual API calls. It respects the current configuration settings:
+    - PREPEND_INSTRUCTION: Whether to include any preprompt at all
+    - USE_SHORT_ANTIGRAVITY_PROMPTS: Whether to use short or full versions
+    - INJECT_IDENTITY_OVERRIDE: Whether to include the identity override
+
+    This is useful for accurate token counting - the token count endpoints should
+    include these preprompts to match what actually gets sent to the API.
+
+    Returns:
+        The combined preprompt text, or empty string if prepending is disabled.
+    """
+    if not PREPEND_INSTRUCTION:
+        return ""
+
+    # Choose prompt versions based on USE_SHORT_ANTIGRAVITY_PROMPTS setting
+    if USE_SHORT_ANTIGRAVITY_PROMPTS:
+        agent_instruction = ANTIGRAVITY_AGENT_SYSTEM_INSTRUCTION_SHORT
+        override_instruction = ANTIGRAVITY_IDENTITY_OVERRIDE_INSTRUCTION_SHORT
+    else:
+        agent_instruction = ANTIGRAVITY_AGENT_SYSTEM_INSTRUCTION
+        override_instruction = ANTIGRAVITY_IDENTITY_OVERRIDE_INSTRUCTION
+
+    # Build the combined preprompt
+    parts = [agent_instruction]
+
+    if INJECT_IDENTITY_OVERRIDE:
+        parts.append(override_instruction)
+
+    return "\n".join(parts)
 
 
 def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -429,6 +497,56 @@ def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return {
         k: v for k, v in headers.items() if k.lower() not in STRIPPED_CLIENT_HEADERS
     }
+
+
+def _reorder_assistant_content(content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Reorder assistant message content blocks to ensure correct order:
+    1. Thinking blocks come first (required when thinking is enabled)
+    2. Text blocks come in the middle (filtering out empty ones)
+    3. Tool_use blocks come at the end (required before tool_result)
+
+    This matches Anthropic's expected ordering and prevents API errors.
+    """
+    if not isinstance(content, list):
+        return content
+
+    if len(content) <= 1:
+        return content
+
+    thinking_blocks = []
+    text_blocks = []
+    tool_use_blocks = []
+    other_blocks = []
+
+    for block in content:
+        if not isinstance(block, dict):
+            other_blocks.append(block)
+            continue
+
+        block_type = block.get("type", "")
+
+        if block_type in ("thinking", "redacted_thinking"):
+            sanitized = {
+                "type": block_type,
+                "thinking": block.get("thinking", ""),
+            }
+            if block.get("signature"):
+                sanitized["signature"] = block["signature"]
+            thinking_blocks.append(sanitized)
+
+        elif block_type == "tool_use":
+            tool_use_blocks.append(block)
+
+        elif block_type == "text":
+            text = block.get("text", "")
+            if text and text.strip():
+                text_blocks.append(block)
+
+        else:
+            other_blocks.append(block)
+
+    return thinking_blocks + other_blocks + text_blocks + tool_use_blocks
 
 
 def _generate_request_id() -> str:
@@ -1051,6 +1169,22 @@ class AntigravityProvider(
             "ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION", DEFAULT_PARALLEL_TOOL_INSTRUCTION
         )
 
+        # Claude interleaved thinking configuration
+        self._enable_claude_interleaved_hint = env_bool(
+            "ANTIGRAVITY_ENABLE_CLAUDE_INTERLEAVED_HINT", True
+        )
+        self._claude_interleaved_hint = os.getenv(
+            "ANTIGRAVITY_CLAUDE_INTERLEAVED_HINT",
+            DEFAULT_CLAUDE_INTERLEAVED_THINKING_HINT,
+        )
+        self._enable_claude_tool_result_reminder = env_bool(
+            "ANTIGRAVITY_ENABLE_CLAUDE_TOOL_RESULT_REMINDER", True
+        )
+        self._claude_tool_result_reminder = os.getenv(
+            "ANTIGRAVITY_CLAUDE_TOOL_RESULT_REMINDER",
+            DEFAULT_CLAUDE_TOOL_RESULT_THINKING_REMINDER,
+        )
+
         # Log configuration
         self._log_config()
 
@@ -1062,7 +1196,9 @@ class AntigravityProvider(
             f"gemini3_fix={self._enable_gemini3_tool_fix}, gemini3_strict_schema={self._gemini3_enforce_strict_schema}, "
             f"claude_fix={self._enable_claude_tool_fix}, thinking_sanitization={self._enable_thinking_sanitization}, "
             f"parallel_tool_claude={self._enable_parallel_tool_instruction_claude}, "
-            f"parallel_tool_gemini3={self._enable_parallel_tool_instruction_gemini3}"
+            f"parallel_tool_gemini3={self._enable_parallel_tool_instruction_gemini3}, "
+            f"claude_interleaved_hint={self._enable_claude_interleaved_hint}, "
+            f"claude_tool_result_reminder={self._enable_claude_tool_result_reminder}"
         )
 
     def _get_antigravity_headers(self) -> Dict[str, str]:
@@ -1844,7 +1980,10 @@ class AntigravityProvider(
     # =========================================================================
 
     def _get_thinking_config(
-        self, reasoning_effort: Optional[str], model: str
+        self,
+        reasoning_effort: Optional[str],
+        model: str,
+        explicit_budget: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Map reasoning_effort to thinking configuration.
@@ -1852,12 +1991,27 @@ class AntigravityProvider(
         - Gemini 2.5 & Claude: thinkingBudget (integer tokens)
         - Gemini 3 Pro: thinkingLevel (string: "low"/"high")
         - Gemini 3 Flash: thinkingLevel (string: "minimal"/"low"/"medium"/"high")
+
+        If explicit_budget is provided (from Anthropic route), it takes precedence
+        over reasoning_effort mapping. For Claude, explicit budget is capped at 31999.
         """
         internal = self._alias_to_internal(model)
         is_gemini_25 = "gemini-2.5" in model
         is_gemini_3 = internal.startswith("gemini-3-")
         is_gemini_3_flash = "gemini-3-flash" in model or "gemini-3-flash" in internal
         is_claude = self._is_claude(model)
+
+        if not (is_gemini_25 or is_gemini_3 or is_claude):
+            return None
+
+        # Handle explicit budget from Anthropic route (takes precedence)
+        if explicit_budget is not None and (is_gemini_25 or is_claude):
+            if explicit_budget <= 0:
+                return {"thinkingBudget": 0, "include_thoughts": False}
+            # Cap Claude budget at max allowed
+            if is_claude:
+                explicit_budget = min(explicit_budget, CLAUDE_FORCED_THINKING_BUDGET)
+            return {"thinkingBudget": explicit_budget, "include_thoughts": True}
 
         if not (is_gemini_25 or is_gemini_3 or is_claude):
             return None
@@ -2220,24 +2374,34 @@ class AntigravityProvider(
         func_name = tool_id_to_name.get(tool_id, "unknown_function")
         content = msg.get("content", "{}")
 
-        # Log ID lookup
         if tool_id not in tool_id_to_name:
             lib_logger.warning(
                 f"[ID Mismatch] Tool response has ID '{tool_id}' which was not found in tool_id_to_name map. "
                 f"Available IDs: {list(tool_id_to_name.keys())}"
             )
-        # else:
-        # lib_logger.debug(f"[ID Mapping] Tool response matched: id={tool_id}, name={func_name}")
 
-        # Add prefix for Gemini 3 (and rename problematic tools)
         if self._is_gemini_3(model) and self._enable_gemini3_tool_fix:
             func_name = GEMINI3_TOOL_RENAMES.get(func_name, func_name)
             func_name = f"{self._gemini3_tool_prefix}{func_name}"
+
+        should_add_reminder = (
+            self._is_claude(model)
+            and self._enable_claude_tool_result_reminder
+            and self._claude_tool_result_reminder
+        )
 
         try:
             parsed_content = json.loads(content)
         except (json.JSONDecodeError, TypeError):
             parsed_content = content
+
+        if should_add_reminder:
+            if isinstance(parsed_content, str):
+                parsed_content = (
+                    f"{parsed_content}\n\n{self._claude_tool_result_reminder}"
+                )
+            elif isinstance(parsed_content, dict):
+                parsed_content["_system_reminder"] = self._claude_tool_result_reminder
 
         return [
             {
@@ -3047,28 +3211,6 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if effective_max is not None:
             gen_config["maxOutputTokens"] = effective_max
 
-        # CRITICAL: For Claude with extended thinking, max_tokens MUST be > thinking.budget_tokens
-        # Per Claude docs: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
-        # If this constraint is violated, the API returns 400 INVALID_ARGUMENT
-        thinking_config = gen_config.get("thinkingConfig", {})
-        thinking_budget = thinking_config.get("thinkingBudget", 0)
-        current_max_tokens = gen_config.get("maxOutputTokens")
-
-        if (
-            is_claude
-            and thinking_budget
-            and thinking_budget > 0
-            and current_max_tokens is not None
-        ):
-            # Ensure max_tokens > thinkingBudget (add buffer for actual response content)
-            min_required_tokens = thinking_budget + 1024  # 1024 buffer for response
-            if current_max_tokens <= thinking_budget:
-                lib_logger.warning(
-                    f"max_tokens ({current_max_tokens}) must be > thinkingBudget ({thinking_budget}). "
-                    f"Adjusting to {min_required_tokens}"
-                )
-                gen_config["maxOutputTokens"] = min_required_tokens
-
         antigravity_payload["request"]["generationConfig"] = gen_config
 
         # Set toolConfig based on tool_choice parameter
@@ -3650,6 +3792,12 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     gemini_payload, self._parallel_tool_instruction
                 )
 
+            # Inject Claude interleaved thinking hint (AFTER Antigravity system prompts)
+            if self._is_claude(model) and self._enable_claude_interleaved_hint:
+                self._inject_tool_hardening_instruction(
+                    gemini_payload, self._claude_interleaved_hint
+                )
+
         # Add generation config
         gen_config = {}
         if top_p is not None:
@@ -3662,7 +3810,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             # Gemini 3 performs better with temperature=1 for tool use
             gen_config["temperature"] = 1.0
 
-        thinking_config = self._get_thinking_config(reasoning_effort, model)
+        explicit_thinking_budget = kwargs.get("thinking_budget")
+        thinking_config = self._get_thinking_config(
+            reasoning_effort, model, explicit_thinking_budget
+        )
         if thinking_config:
             gen_config.setdefault("thinkingConfig", {}).update(thinking_config)
 
