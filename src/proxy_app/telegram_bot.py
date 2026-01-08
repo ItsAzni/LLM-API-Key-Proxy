@@ -19,9 +19,14 @@ Setup:
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -29,8 +34,15 @@ from dotenv import load_dotenv
 
 # Telegram imports
 try:
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+    from telegram.ext import (
+        Application,
+        CallbackQueryHandler,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        filters,
+    )
     from telegram.constants import ParseMode
 except ImportError:
     print("Error: python-telegram-bot not installed.")
@@ -46,6 +58,131 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# Silence httpx INFO logs (noisy getUpdates polling)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# =============================================================================
+# Session Management (In-Memory)
+# =============================================================================
+
+
+@dataclass
+class Message:
+    """A single message in a conversation."""
+
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class Session:
+    """A chat session with message history."""
+
+    id: str
+    name: str
+    messages: List[Message] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def add_message(self, role: str, content: str) -> None:
+        """Add a message to the session."""
+        self.messages.append(Message(role=role, content=content))
+        self.updated_at = time.time()
+
+    def get_messages_for_api(self) -> List[Dict[str, str]]:
+        """Get messages in OpenAI API format."""
+        return [{"role": m.role, "content": m.content} for m in self.messages]
+
+    def clear(self) -> None:
+        """Clear all messages."""
+        self.messages = []
+        self.updated_at = time.time()
+
+
+@dataclass
+class UserState:
+    """State for a single user."""
+
+    user_id: int
+    sessions: Dict[str, Session] = field(default_factory=dict)
+    current_session_id: Optional[str] = None
+    selected_model: Optional[str] = None
+
+    def get_or_create_session(self) -> Session:
+        """Get current session or create a new one."""
+        if self.current_session_id and self.current_session_id in self.sessions:
+            return self.sessions[self.current_session_id]
+        return self.create_new_session()
+
+    def create_new_session(self, name: Optional[str] = None) -> Session:
+        """Create a new session and set it as current."""
+        session_id = str(uuid.uuid4())[:8]
+        session_name = name or f"Chat {len(self.sessions) + 1}"
+        session = Session(id=session_id, name=session_name)
+        self.sessions[session_id] = session
+        self.current_session_id = session_id
+        return session
+
+    def switch_session(self, session_id: str) -> Optional[Session]:
+        """Switch to a different session."""
+        if session_id in self.sessions:
+            self.current_session_id = session_id
+            return self.sessions[session_id]
+        return None
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session."""
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            if self.current_session_id == session_id:
+                self.current_session_id = None
+            return True
+        return False
+
+
+# Global user state storage
+USER_STATES: Dict[int, UserState] = {}
+
+
+def get_user_state(user_id: int) -> UserState:
+    """Get or create user state."""
+    if user_id not in USER_STATES:
+        USER_STATES[user_id] = UserState(user_id=user_id)
+    return USER_STATES[user_id]
+
+
+# =============================================================================
+# System Prompt Loading
+# =============================================================================
+
+SYSTEM_PROMPT: Optional[str] = None
+
+
+def load_system_prompt() -> str:
+    """Load system prompt from prompts/generic_prompt.md."""
+    global SYSTEM_PROMPT
+    if SYSTEM_PROMPT is not None:
+        return SYSTEM_PROMPT
+
+    # Try multiple paths
+    paths_to_try = [
+        Path(__file__).parent.parent.parent / "prompts" / "generic_prompt.md",
+        Path("prompts/generic_prompt.md"),
+        Path(__file__).parent / "prompts" / "generic_prompt.md",
+    ]
+
+    for path in paths_to_try:
+        if path.exists():
+            SYSTEM_PROMPT = path.read_text(encoding="utf-8")
+            logger.info(f"Loaded system prompt from {path}")
+            return SYSTEM_PROMPT
+
+    logger.warning("System prompt not found, using default")
+    SYSTEM_PROMPT = "You are a helpful AI assistant."
+    return SYSTEM_PROMPT
 
 
 # =============================================================================
@@ -288,6 +425,95 @@ async def post_refresh_action(
         return {"error": str(e)}
 
 
+def get_proxy_base_url() -> str:
+    host = CONFIG["proxy_host"]
+    port = CONFIG["proxy_port"]
+    scheme = CONFIG["proxy_scheme"]
+
+    if not scheme:
+        if (
+            host in ("localhost", "127.0.0.1", "::1")
+            or host.startswith("192.168.")
+            or host.startswith("10.")
+        ):
+            scheme = "http"
+        else:
+            scheme = "https"
+
+    return f"{scheme}://{host}:{port}"
+
+
+def get_auth_headers() -> Dict[str, str]:
+    api_key = CONFIG["proxy_api_key"]
+    if api_key:
+        return {"Authorization": f"Bearer {api_key}"}
+    return {}
+
+
+async def fetch_models() -> Optional[Dict[str, Any]]:
+    base_url = get_proxy_base_url()
+    url = f"{base_url}/v1/models"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=get_auth_headers())
+
+            if response.status_code == 401:
+                return {"error": "Authentication failed. Check PROXY_API_KEY."}
+            elif response.status_code != 200:
+                return {"error": f"HTTP {response.status_code}: {response.text[:100]}"}
+
+            return response.json()
+
+    except httpx.ConnectError:
+        return {"error": "Connection failed. Is the proxy running?"}
+    except httpx.TimeoutException:
+        return {"error": "Request timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def send_chat_completion(
+    model: str,
+    messages: List[Dict[str, str]],
+    stream: bool = True,
+) -> Any:
+    base_url = get_proxy_base_url()
+    url = f"{base_url}/v1/chat/completions"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    }
+
+    headers = get_auth_headers()
+    headers["Content-Type"] = "application/json"
+
+    if stream:
+        return httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0))
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.post(url, headers=headers, json=payload)
+
+                if response.status_code == 401:
+                    return {"error": "Authentication failed."}
+                elif response.status_code != 200:
+                    return {
+                        "error": f"HTTP {response.status_code}: {response.text[:200]}"
+                    }
+
+                return response.json()
+
+        except httpx.ConnectError:
+            return {"error": "Connection failed. Is the proxy running?"}
+        except httpx.TimeoutException:
+            return {"error": "Request timed out."}
+        except Exception as e:
+            return {"error": str(e)}
+
+
 # =============================================================================
 # Authorization
 # =============================================================================
@@ -483,11 +709,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 Available commands:
 
+*Quota Commands:*
 /quota \\- Summary of all providers
 /quota \\[provider\\] \\- Details for a provider
 /refresh \\- Force refresh quota data
 
-Example: `/quota antigravity`
+*Chat Commands:*
+/models \\- List available models
+/model \\[name\\] \\- View or set model
+/new \\[name\\] \\- Start new chat session
+/sessions \\- List your sessions
+/session \\[id\\] \\- Switch session
+/delete \\[id\\] \\- Delete a session
+/clear \\- Clear current session
+
+Just send a message to chat with the LLM\\!
 """
     await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN_V2)
 
@@ -515,20 +751,35 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if provider:
             message = format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
         else:
             message = format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons for antigravity
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
 
+        reply_markup = InlineKeyboardMarkup(keyboard)
         chunks = chunk_message(message)
 
         try:
-            await loading_msg.edit_text(chunks[0], parse_mode=ParseMode.MARKDOWN_V2)
+            await loading_msg.edit_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
             for chunk in chunks[1:]:
                 await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
             plain_chunks = chunk_message(
                 message.replace("*", "").replace("`", "").replace("\\", "")
             )
-            await loading_msg.edit_text(plain_chunks[0])
+            await loading_msg.edit_text(plain_chunks[0], reply_markup=reply_markup)
             for chunk in plain_chunks[1:]:
                 await update.message.reply_text(chunk)
 
@@ -599,9 +850,526 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await loading_msg.edit_text(f"❌ Error: {str(e)}")
 
 
+async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle refresh button callback."""
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        await query.edit_message_text("⛔ Unauthorized.")
+        return
+
+    # Parse callback data: "refresh:<provider>" or "refresh:all"
+    data = query.data or ""
+    if not data.startswith("refresh:"):
+        return
+
+    provider = data[8:]  # Remove "refresh:" prefix
+    if provider == "all":
+        provider = None
+        scope = "all"
+    else:
+        scope = "provider"
+
+    # Update message to show loading
+    await query.edit_message_text("🔄 Refreshing quota data...")
+
+    try:
+        result = await post_refresh_action("force_refresh", scope, provider)
+
+        if result and "error" in result:
+            await query.edit_message_text(f"❌ {result['error']}")
+            return
+
+        refresh_info = ""
+        if result and result.get("refresh_result"):
+            rr = result["refresh_result"]
+            creds = rr.get("credentials_refreshed", 0)
+            duration = rr.get("duration_ms", 0)
+            refresh_info = f"✅ Refreshed {creds} credentials in {duration}ms\n\n"
+
+        # Fetch and show updated stats
+        await asyncio.sleep(0.5)
+        stats = await fetch_quota_stats(provider)
+        if stats is None:
+            stats = {"error": "Failed to fetch stats"}
+
+        if provider:
+            message = refresh_info + format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
+        else:
+            message = refresh_info + format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        chunks = chunk_message(message)
+        try:
+            await query.edit_message_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
+            # Send additional chunks without buttons
+            if query.message:
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
+            plain_chunks = chunk_message(plain_message)
+            await query.edit_message_text(plain_chunks[0], reply_markup=reply_markup)
+            if query.message:
+                for chunk in plain_chunks[1:]:
+                    await query.message.reply_text(chunk)
+
+    except Exception as e:
+        logger.exception("Error in refresh callback")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+
+
+async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle view button callback for navigating between quota views."""
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        await query.edit_message_text("⛔ Unauthorized.")
+        return
+
+    # Parse callback data: "view:<provider>" or "view:summary"
+    data = query.data or ""
+    if not data.startswith("view:"):
+        return
+
+    view_target = data[5:]  # Remove "view:" prefix
+    provider = None if view_target == "summary" else view_target
+
+    # Update message to show loading
+    await query.edit_message_text("⏳ Fetching quota stats...")
+
+    try:
+        stats = await fetch_quota_stats(provider)
+        if stats is None:
+            stats = {"error": "Failed to fetch stats"}
+
+        if provider:
+            message = format_provider_detail(provider, stats)
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
+            ]
+        else:
+            message = format_summary_message(stats)
+            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            # Add provider-specific buttons
+            providers = stats.get("providers", {})
+            if "antigravity" in providers:
+                keyboard.append([
+                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
+                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
+                ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        chunks = chunk_message(message)
+        try:
+            await query.edit_message_text(
+                chunks[0], parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup
+            )
+            if query.message:
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
+            plain_chunks = chunk_message(plain_message)
+            await query.edit_message_text(plain_chunks[0], reply_markup=reply_markup)
+            if query.message:
+                for chunk in plain_chunks[1:]:
+                    await query.message.reply_text(chunk)
+
+    except Exception as e:
+        logger.exception("Error in view callback")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
     await start_command(update, context)
+
+
+# =============================================================================
+# LLM Chat Commands
+# =============================================================================
+
+
+async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    loading_msg = await update.message.reply_text("🔍 Fetching available models...")
+
+    result = await fetch_models()
+
+    if result is None:
+        await loading_msg.edit_text("❌ Failed to fetch models.")
+        return
+
+    if "error" in result:
+        await loading_msg.edit_text(f"❌ {result['error']}")
+        return
+
+    models_data = result.get("data", [])
+    if not models_data:
+        await loading_msg.edit_text("No models available.")
+        return
+
+    model_ids = sorted([m.get("id", "unknown") for m in models_data])
+
+    lines = ["*Available Models:*\n"]
+    for model_id in model_ids:
+        lines.append(f"• `{model_id}`")
+
+    lines.append(f"\n_Total: {len(model_ids)} models_")
+    lines.append("\nUse `/model <name>` to select a model.")
+
+    text = "\n".join(lines)
+
+    chunks = chunk_message(text)
+    await loading_msg.edit_text(chunks[0], parse_mode="Markdown")
+    for chunk in chunks[1:]:
+        await update.message.reply_text(chunk, parse_mode="Markdown")
+
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+    args = context.args or []
+
+    if not args:
+        current = user_state.selected_model or "Not selected"
+        await update.message.reply_text(
+            f"*Current model:* `{current}`\n\n"
+            "Use `/model <name>` to select a model.\n"
+            "Use `/models` to see available models.",
+            parse_mode="Markdown",
+        )
+        return
+
+    model_name = args[0]
+    user_state.selected_model = model_name
+    await update.message.reply_text(
+        f"✅ Model set to: `{model_name}`", parse_mode="Markdown"
+    )
+
+
+async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+    args = context.args or []
+    name = " ".join(args) if args else None
+
+    session = user_state.create_new_session(name)
+    await update.message.reply_text(
+        f"✅ New session created: *{session.name}* (`{session.id}`)",
+        parse_mode="Markdown",
+    )
+
+
+async def sessions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+
+    if not user_state.sessions:
+        await update.message.reply_text(
+            "No sessions yet. Start chatting or use `/new` to create one.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["*Your Sessions:*\n"]
+    for sid, session in user_state.sessions.items():
+        is_current = "→ " if sid == user_state.current_session_id else "  "
+        msg_count = len(session.messages)
+        lines.append(f"{is_current}`{sid}` - {session.name} ({msg_count} msgs)")
+
+    lines.append("\nUse `/session <id>` to switch.")
+    lines.append("Use `/delete <id>` to remove a session.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def session_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+    args = context.args or []
+
+    if not args:
+        current = user_state.current_session_id or "None"
+        await update.message.reply_text(
+            f"*Current session:* `{current}`\n\nUse `/session <id>` to switch.",
+            parse_mode="Markdown",
+        )
+        return
+
+    session_id = args[0]
+    session = user_state.switch_session(session_id)
+
+    if session:
+        await update.message.reply_text(
+            f"✅ Switched to: *{session.name}* (`{session.id}`)",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Session `{session_id}` not found. Use `/sessions` to see available.",
+            parse_mode="Markdown",
+        )
+
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+    args = context.args or []
+
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/delete <session_id>`", parse_mode="Markdown"
+        )
+        return
+
+    session_id = args[0]
+    if user_state.delete_session(session_id):
+        await update.message.reply_text(
+            f"✅ Deleted session `{session_id}`", parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Session `{session_id}` not found.", parse_mode="Markdown"
+        )
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    user_state = get_user_state(user.id)
+
+    if (
+        user_state.current_session_id
+        and user_state.current_session_id in user_state.sessions
+    ):
+        session = user_state.sessions[user_state.current_session_id]
+        session.clear()
+        await update.message.reply_text(
+            f"✅ Cleared history for *{session.name}*", parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("No active session to clear.")
+
+
+# =============================================================================
+# Chat Message Handler
+# =============================================================================
+
+
+async def stream_llm_response(
+    model: str,
+    messages: List[Dict[str, str]],
+    update: Update,
+    response_msg: Any,
+) -> Optional[str]:
+    base_url = get_proxy_base_url()
+    url = f"{base_url}/v1/chat/completions"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+    }
+
+    headers = get_auth_headers()
+    headers["Content-Type"] = "application/json"
+
+    full_response = ""
+    last_edit_time = 0.0
+    edit_interval = 1.0
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=30.0)
+        ) as client:
+            async with client.stream(
+                "POST", url, headers=headers, json=payload
+            ) as response:
+                if response.status_code == 401:
+                    await response_msg.edit_text("❌ Authentication failed.")
+                    return None
+                elif response.status_code != 200:
+                    error_text = await response.aread()
+                    await response_msg.edit_text(
+                        f"❌ HTTP {response.status_code}: {error_text[:200].decode()}"
+                    )
+                    return None
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                full_response += content
+                                now = time.time()
+                                if now - last_edit_time >= edit_interval:
+                                    display = (
+                                        full_response[:4000] + "..."
+                                        if len(full_response) > 4000
+                                        else full_response
+                                    )
+                                    try:
+                                        await response_msg.edit_text(display or "...")
+                                    except Exception:
+                                        pass
+                                    last_edit_time = now
+                        except json.JSONDecodeError:
+                            continue
+
+        return full_response
+
+    except httpx.ConnectError:
+        await response_msg.edit_text("❌ Connection failed. Is the proxy running?")
+        return None
+    except httpx.TimeoutException:
+        await response_msg.edit_text("❌ Request timed out.")
+        return None
+    except Exception as e:
+        logger.exception("Streaming error")
+        await response_msg.edit_text(f"❌ Error: {str(e)[:200]}")
+        return None
+
+
+async def chat_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        return
+
+    if update.message is None:
+        return
+
+    user_text = update.message.text
+    if not user_text:
+        return
+
+    user_state = get_user_state(user.id)
+
+    if not user_state.selected_model:
+        await update.message.reply_text(
+            "⚠️ No model selected. Use `/models` to see available models and `/model <name>` to select one.",
+            parse_mode="Markdown",
+        )
+        return
+
+    session = user_state.get_or_create_session()
+    session.add_message("user", user_text)
+
+    system_prompt = load_system_prompt()
+    api_messages = [{"role": "system", "content": system_prompt}]
+    api_messages.extend(session.get_messages_for_api())
+
+    response_msg = await update.message.reply_text("⏳ Thinking...")
+
+    full_response = await stream_llm_response(
+        model=user_state.selected_model,
+        messages=api_messages,
+        update=update,
+        response_msg=response_msg,
+    )
+
+    if full_response:
+        session.add_message("assistant", full_response)
+
+        if len(full_response) > 4000:
+            chunks = chunk_message(full_response)
+            await response_msg.edit_text(chunks[0])
+            for chunk in chunks[1:]:
+                await update.message.reply_text(chunk)
+        else:
+            await response_msg.edit_text(full_response)
 
 
 # =============================================================================
@@ -639,6 +1407,24 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("quota", quota_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
+
+    # Callback handlers for inline buttons
+    application.add_handler(CallbackQueryHandler(refresh_callback, pattern=r"^refresh:"))
+    application.add_handler(CallbackQueryHandler(view_callback, pattern=r"^view:"))
+
+    # LLM Chat handlers
+    application.add_handler(CommandHandler("models", models_command))
+    application.add_handler(CommandHandler("model", model_command))
+    application.add_handler(CommandHandler("new", new_command))
+    application.add_handler(CommandHandler("sessions", sessions_command))
+    application.add_handler(CommandHandler("session", session_command))
+    application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("clear", clear_command))
+
+    # Message handler for chat (must be last - catches all text messages)
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message_handler)
+    )
 
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
