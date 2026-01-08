@@ -921,14 +921,17 @@ async def chat_completions(
         reasoning_effort = request_data.get("reasoning_effort") or generation_cfg.get(
             "reasoning_effort"
         )
+        thinking_budget = request_data.get("thinking_budget") or generation_cfg.get(
+            "thinking_budget"
+        )
 
         # Auto-enable full thinking budget for Opus models
         # This ensures Opus always gets maximum thinking capacity (no // 4 reduction)
         if model and "opus" in model.lower():
             if not reasoning_effort:
                 request_data["reasoning_effort"] = "high"
-            if not custom_reasoning_budget:
-                request_data["custom_reasoning_budget"] = True
+            if not thinking_budget:
+                request_data["thinking_budget"] = 31999
 
         logging.getLogger("rotator_library").debug(
             f"Handling reasoning parameters: model={model}, reasoning_effort={reasoning_effort}"
