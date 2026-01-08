@@ -1294,6 +1294,10 @@ class UsageManager:
             self._normalize_model(available_keys[0], model) if available_keys else model
         )
 
+        # Track consecutive "all on cooldown" iterations for optimistic reset
+        consecutive_cooldown_waits = 0
+        OPTIMISTIC_RESET_THRESHOLD = 3  # Trigger reset after this many consecutive waits
+
         # This loop continues as long as the global deadline has not been met.
         while time.time() < deadline:
             now = time.time()
@@ -1435,11 +1439,26 @@ class UsageManager:
                     all_potential_keys.extend(keys_list)
 
                 if not all_potential_keys:
+                    consecutive_cooldown_waits += 1
+
+                    # Try optimistic reset after consecutive cooldown waits
+                    if consecutive_cooldown_waits >= OPTIMISTIC_RESET_THRESHOLD:
+                        cleared = await self._optimistic_reset_transient_cooldowns(
+                            available_keys, model
+                        )
+                        if cleared > 0:
+                            consecutive_cooldown_waits = 0  # Reset counter after clearing
+                            continue  # Immediately re-evaluate with fresh state
+
                     lib_logger.warning(
-                        "No keys are eligible (all on cooldown or filtered out). Waiting before re-evaluating."
+                        f"No keys are eligible (all on cooldown or filtered out). "
+                        f"Waiting before re-evaluating. (consecutive waits: {consecutive_cooldown_waits})"
                     )
                     await asyncio.sleep(1)
                     continue
+
+                # Keys are available, reset the cooldown wait counter
+                consecutive_cooldown_waits = 0
 
                 # Wait for the highest priority key with lowest usage
                 best_priority = min(priority_groups.keys())
@@ -1576,11 +1595,26 @@ class UsageManager:
 
                 all_potential_keys = tier1_keys + tier2_keys
                 if not all_potential_keys:
+                    consecutive_cooldown_waits += 1
+
+                    # Try optimistic reset after consecutive cooldown waits
+                    if consecutive_cooldown_waits >= OPTIMISTIC_RESET_THRESHOLD:
+                        cleared = await self._optimistic_reset_transient_cooldowns(
+                            available_keys, model
+                        )
+                        if cleared > 0:
+                            consecutive_cooldown_waits = 0  # Reset counter after clearing
+                            continue  # Immediately re-evaluate with fresh state
+
                     lib_logger.warning(
-                        "No keys are eligible (all on cooldown). Waiting before re-evaluating."
+                        f"No keys are eligible (all on cooldown). "
+                        f"Waiting before re-evaluating. (consecutive waits: {consecutive_cooldown_waits})"
                     )
                     await asyncio.sleep(1)
                     continue
+
+                # Keys are available, reset the cooldown wait counter
+                consecutive_cooldown_waits = 0
 
                 # Wait on the condition of the key with the lowest current usage.
                 best_wait_key = min(all_potential_keys, key=lambda x: x[1])[0]
@@ -1604,6 +1638,86 @@ class UsageManager:
         raise NoAvailableKeysError(
             f"Could not acquire a key for model {model} within the global time budget."
         )
+
+    async def _optimistic_reset_transient_cooldowns(
+        self, keys: List[str], model: str, max_cooldown_seconds: float = 300
+    ) -> int:
+        """
+        Optimistically clear transient rate limit cooldowns for a model.
+
+        This is a recovery mechanism for when all keys appear stuck on cooldowns
+        due to transient 429s (per-minute throttling, API load spikes, etc.).
+
+        Only clears cooldowns that are:
+        1. For the specific model (or its quota group)
+        2. NOT backed by quota_reset_ts (i.e., not genuine quota exhaustion)
+        3. Set to expire within max_cooldown_seconds (default 5 minutes)
+
+        This prevents clearing genuine quota exhaustion cooldowns (which are
+        typically hours long and have quota_reset_ts set).
+
+        Args:
+            keys: List of credential identifiers to check
+            model: Model name (will be normalized)
+            max_cooldown_seconds: Only clear cooldowns expiring within this time
+
+        Returns:
+            Number of cooldowns cleared
+        """
+        if not keys:
+            return 0
+
+        # Normalize model name
+        normalized_model = self._normalize_model(keys[0], model) if keys else model
+        now_ts = time.time()
+        cleared_count = 0
+
+        async with self._data_lock:
+            for key in keys:
+                key_data = self._usage_data.get(key, {})
+                model_cooldowns = key_data.get("model_cooldowns", {})
+                models_data = key_data.get("models", {})
+
+                # Get cooldown for this model
+                cooldown_until = model_cooldowns.get(normalized_model)
+                if cooldown_until is None or cooldown_until <= now_ts:
+                    continue  # No active cooldown or already expired
+
+                # Check if this is a quota-based cooldown (has quota_reset_ts set)
+                model_data = models_data.get(normalized_model, {})
+                quota_reset_ts = model_data.get("quota_reset_ts")
+
+                # Skip if backed by quota_reset_ts and matches cooldown time (genuine quota exhaustion)
+                if quota_reset_ts and abs(cooldown_until - quota_reset_ts) < 60:
+                    lib_logger.debug(
+                        f"[OptimisticReset] Skipping {mask_credential(key)} - quota-based cooldown"
+                    )
+                    continue
+
+                # Check if cooldown is within the transient window
+                remaining_seconds = cooldown_until - now_ts
+                if remaining_seconds > max_cooldown_seconds:
+                    lib_logger.debug(
+                        f"[OptimisticReset] Skipping {mask_credential(key)} - "
+                        f"cooldown too long ({remaining_seconds:.0f}s > {max_cooldown_seconds}s)"
+                    )
+                    continue
+
+                # Clear this transient cooldown
+                del model_cooldowns[normalized_model]
+                cleared_count += 1
+                lib_logger.info(
+                    f"[OptimisticReset] Cleared transient cooldown for {mask_credential(key)} "
+                    f"model={normalized_model} (was {remaining_seconds:.0f}s remaining)"
+                )
+
+        if cleared_count > 0:
+            lib_logger.warning(
+                f"[OptimisticReset] Cleared {cleared_count} transient cooldown(s) for model {model}. "
+                f"Retrying with fresh state..."
+            )
+
+        return cleared_count
 
     async def release_key(self, key: str, model: str):
         """Releases a key's lock for a specific model and notifies waiting tasks."""
