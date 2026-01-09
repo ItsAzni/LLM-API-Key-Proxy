@@ -286,7 +286,40 @@ def ollama_to_openai_request(
         if "stop" in request.options:
             openai_request["stop"] = request.options["stop"]
 
+    # Enable thinking for Opus models with max budget (31999)
+    # This matches the Anthropic endpoints behavior
+    if _is_opus_model(model_id):
+        openai_request["reasoning_effort"] = "high"
+        openai_request["thinking_budget"] = 31999
+
     return openai_request
+
+
+def _is_opus_model(model_name: str) -> bool:
+    """
+    Check if a model name refers to a Claude Opus model.
+
+    Uses specific pattern matching to avoid false positives with model names
+    that might contain "opus" as part of another word.
+
+    Args:
+        model_name: The model name to check
+
+    Returns:
+        True if the model is a Claude Opus model, False otherwise
+    """
+    model_lower = model_name.lower()
+    # Match Claude Opus models specifically:
+    # - "claude-opus-4-5", "claude-4-opus", "claude_opus"
+    # - "opus-4", "opus-4.5", "opus4" (standalone with version)
+    # - "antigravity/claude-opus-4-5"
+    # Avoid matching things like "magnum-opus" or other non-Claude models
+    opus_patterns = [
+        r"claude[-_]?opus",  # "claude-opus", "claude_opus", "claudeopus"
+        r"opus[-_]?\d",  # "opus-4", "opus_4", "opus4" (with version number)
+        r"\d[-_]?opus(?:[-_]|$)",  # "4-opus", "4_opus" at word boundary
+    ]
+    return any(re.search(pattern, model_lower) for pattern in opus_patterns)
 
 
 def openai_to_ollama_chunk(
