@@ -1717,7 +1717,8 @@ async def ollama_show_model(
 
     # Get model info for context length and capabilities
     context_length = 128000
-    capabilities = ["completion"]
+    # Default to all capabilities since most proxy models support these
+    capabilities = ["completion", "vision", "tools"]
 
     model_info_service = (
         request.app.state.model_info_service
@@ -1730,7 +1731,9 @@ async def ollama_show_model(
         if info:
             if info.limits and info.limits.context_window:
                 context_length = info.limits.context_window
+            # Only override if we have explicit capability info
             if info.capabilities:
+                capabilities = ["completion"]
                 if info.capabilities.vision:
                     capabilities.append("vision")
                 if info.capabilities.function_calling or info.capabilities.tool_choice:

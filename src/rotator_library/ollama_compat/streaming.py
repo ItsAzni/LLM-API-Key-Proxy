@@ -129,20 +129,24 @@ async def ollama_streaming_wrapper(
             # Extract content
             content = delta.get("content", "")
 
-            # Extract thinking/reasoning content
+            # Extract thinking/reasoning content from various provider formats
             thinking = None
+
+            # OpenAI/Anthropic style: reasoning or reasoning_content field
             reasoning = delta.get("reasoning") or delta.get("reasoning_content")
-            if reasoning:
+            if isinstance(reasoning, str) and len(reasoning) > 0:
                 thinking = reasoning
                 accumulated_thinking += reasoning
 
-            # Handle Google Gemini's extra_content format for thinking
+            # Google Gemini API: extra_content.google.thought is a boolean flag
+            # When true, the content field contains the thinking (with <thought> tags)
             extra_content = delta.get("extra_content", {})
             google_thought = extra_content.get("google", {}).get("thought")
-            if google_thought:
+            if google_thought is True:
+                # Content contains thinking text with <thought> tags
                 thinking = content.replace("<thought>", "").replace("</thought>", "")
                 accumulated_thinking += thinking
-                content = ""
+                content = ""  # Clear content since it was actually thinking
 
             # Handle tool calls
             tool_calls_delta = delta.get("tool_calls", [])
@@ -164,9 +168,25 @@ async def ollama_streaming_wrapper(
                     if func.get("arguments"):
                         accumulated_tool_calls[index]["arguments"] += func["arguments"]
 
-            # Emit chunk if we have content or thinking
-            if content or thinking:
-                ollama_chunk = {
+            # Emit chunks - send thinking and content separately (Raycast expectation)
+            # When there's thinking, send it with empty content
+            if thinking:
+                thinking_chunk = {
+                    "model": model_name,
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "thinking": thinking,
+                    },
+                    "done": False,
+                }
+                yield json.dumps(thinking_chunk) + "\n"
+                last_yield_time = datetime.utcnow()
+
+            # When there's content (and it's not thinking), send it without thinking field
+            if content:
+                content_chunk = {
                     "model": model_name,
                     "created_at": datetime.utcnow().isoformat() + "Z",
                     "message": {
@@ -175,11 +195,7 @@ async def ollama_streaming_wrapper(
                     },
                     "done": False,
                 }
-
-                if thinking:
-                    ollama_chunk["message"]["thinking"] = thinking
-
-                yield json.dumps(ollama_chunk) + "\n"
+                yield json.dumps(content_chunk) + "\n"
                 last_yield_time = datetime.utcnow()
 
             # Send periodic pings to keep connection alive
