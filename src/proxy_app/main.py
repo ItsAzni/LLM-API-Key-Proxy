@@ -1655,6 +1655,26 @@ def _resolve_ollama_model(display_name: str, registry: Dict[str, str]) -> Option
     return None
 
 
+@app.get("/api/version")
+async def ollama_version():
+    """
+    Ollama-compatible endpoint to return version info.
+    Required for remote Ollama host detection by Raycast.
+
+    No authentication required (matches Ollama behavior).
+    """
+    return {"version": "0.5.4"}
+
+
+@app.get("/")
+async def ollama_root():
+    """
+    Root endpoint for Ollama compatibility.
+    Some clients check this to verify Ollama is running.
+    """
+    return "Ollama is running"
+
+
 @app.get("/api/tags")
 async def ollama_list_models(
     request: Request,
