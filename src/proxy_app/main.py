@@ -1736,7 +1736,7 @@ async def ollama_show_model(
                 capabilities = ["completion"]
                 if info.capabilities.vision:
                     capabilities.append("vision")
-                if info.capabilities.function_calling or info.capabilities.tool_choice:
+                if info.capabilities.tools or info.capabilities.functions:
                     capabilities.append("tools")
 
     return OllamaShowResponse(
