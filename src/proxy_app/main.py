@@ -108,7 +108,7 @@ with _console.status("[dim]Loading core dependencies...", spinner="dots"):
     from dotenv import load_dotenv
     import colorlog
     import json
-    from typing import AsyncGenerator, Any, List, Optional, Union
+    from typing import AsyncGenerator, Any, Dict, List, Optional, Union
     from pydantic import BaseModel, ConfigDict, Field
 
     # --- Early Log Level Configuration ---
@@ -218,6 +218,18 @@ class EnrichedModelList(BaseModel):
 from rotator_library.anthropic_compat import (
     AnthropicMessagesRequest,
     AnthropicCountTokensRequest,
+)
+
+# --- Ollama API Models (imported from library) ---
+from rotator_library.ollama_compat import (
+    OllamaChatRequest,
+    OllamaShowRequest,
+    ollama_to_openai_request,
+    ollama_streaming_wrapper,
+    generate_model_display_name,
+    OllamaModelInfo,
+    OllamaModelDetails,
+    OllamaShowResponse,
 )
 
 
@@ -1585,6 +1597,235 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
     except Exception as e:
         logging.error(f"Cost estimate failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# OLLAMA API ENDPOINTS (for Raycast compatibility)
+# =============================================================================
+
+# Cache for Ollama model registry (display_name -> model_id)
+_ollama_model_registry: Dict[str, str] = {}
+_ollama_model_registry_updated: float = 0
+_OLLAMA_REGISTRY_TTL = 300  # 5 minutes
+
+
+async def _get_ollama_model_registry(
+    client: RotatingClient, request: Request
+) -> Dict[str, str]:
+    """
+    Get or refresh the Ollama model registry.
+    Maps display names to internal model IDs.
+    """
+    global _ollama_model_registry, _ollama_model_registry_updated
+
+    now = time.time()
+    if _ollama_model_registry and (now - _ollama_model_registry_updated) < _OLLAMA_REGISTRY_TTL:
+        return _ollama_model_registry
+
+    # Refresh the registry
+    model_ids = await client.get_all_available_models(grouped=False)
+
+    new_registry = {}
+    for model_id in model_ids:
+        display_name = generate_model_display_name(model_id)
+        new_registry[display_name] = model_id
+        # Also allow lookup by model_id directly
+        new_registry[model_id] = model_id
+
+    _ollama_model_registry = new_registry
+    _ollama_model_registry_updated = now
+
+    return _ollama_model_registry
+
+
+def _resolve_ollama_model(display_name: str, registry: Dict[str, str]) -> Optional[str]:
+    """
+    Resolve a display name or model ID to an internal model ID.
+    """
+    # Direct match
+    if display_name in registry:
+        return registry[display_name]
+
+    # Case-insensitive match
+    lower_name = display_name.lower()
+    for name, model_id in registry.items():
+        if name.lower() == lower_name:
+            return model_id
+
+    return None
+
+
+@app.get("/api/tags")
+async def ollama_list_models(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+):
+    """
+    Ollama-compatible endpoint to list available models.
+    Used by Raycast AI to discover models.
+
+    No authentication required (matches Ollama behavior).
+    """
+    model_ids = await client.get_all_available_models(grouped=False)
+
+    # Get model info service for capabilities/context length
+    model_info_service = (
+        request.app.state.model_info_service
+        if hasattr(request.app.state, "model_info_service")
+        else None
+    )
+
+    models = []
+    for model_id in model_ids:
+        display_name = generate_model_display_name(model_id)
+
+        # Try to get context length from model info service
+        context_length = 128000  # Default
+        if model_info_service and model_info_service.is_ready:
+            info = model_info_service.get_model_info(model_id)
+            if info and info.limits and info.limits.context_window:
+                context_length = info.limits.context_window
+
+        models.append(
+            OllamaModelInfo(
+                name=display_name,
+                model=model_id,
+                details=OllamaModelDetails(),
+            ).model_dump()
+        )
+
+    return {"models": models}
+
+
+@app.post("/api/show")
+async def ollama_show_model(
+    request: Request,
+    body: OllamaShowRequest,
+    client: RotatingClient = Depends(get_rotating_client),
+):
+    """
+    Ollama-compatible endpoint to get model details.
+    Used by Raycast AI to check model capabilities.
+
+    No authentication required (matches Ollama behavior).
+    """
+    registry = await _get_ollama_model_registry(client, request)
+    model_id = _resolve_ollama_model(body.model, registry)
+
+    if not model_id:
+        raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+
+    # Get model info for context length and capabilities
+    context_length = 128000
+    capabilities = ["completion"]
+
+    model_info_service = (
+        request.app.state.model_info_service
+        if hasattr(request.app.state, "model_info_service")
+        else None
+    )
+
+    if model_info_service and model_info_service.is_ready:
+        info = model_info_service.get_model_info(model_id)
+        if info:
+            if info.limits and info.limits.context_window:
+                context_length = info.limits.context_window
+            if info.capabilities:
+                if info.capabilities.vision:
+                    capabilities.append("vision")
+                if info.capabilities.function_calling or info.capabilities.tool_choice:
+                    capabilities.append("tools")
+
+    return OllamaShowResponse(
+        modelfile=f"FROM {generate_model_display_name(model_id)}",
+        parameters='stop "<|eot_id|>"',
+        template="{{ .Prompt }}",
+        details=OllamaModelDetails(),
+        model_info={
+            "general.architecture": "llama",
+            "general.file_type": 2,
+            "general.parameter_count": 7000000000,
+            "llama.context_length": context_length,
+            "llama.embedding_length": 4096,
+            "tokenizer.ggml.model": "gpt2",
+        },
+        capabilities=capabilities,
+    ).model_dump()
+
+
+@app.post("/api/chat")
+async def ollama_chat(
+    request: Request,
+    body: OllamaChatRequest,
+    client: RotatingClient = Depends(get_rotating_client),
+):
+    """
+    Ollama-compatible chat completion endpoint.
+    Used by Raycast AI for chat interactions.
+
+    Translates Ollama format to OpenAI format, uses the RotatingClient,
+    then translates back to Ollama streaming format (NDJSON).
+
+    No authentication required (matches Ollama behavior).
+    """
+    # Resolve model name to internal ID
+    registry = await _get_ollama_model_registry(client, request)
+    model_id = _resolve_ollama_model(body.model, registry)
+
+    if not model_id:
+        raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+
+    # Translate to OpenAI format
+    openai_request = ollama_to_openai_request(body, model_id)
+
+    # Get display name for response
+    display_name = generate_model_display_name(model_id)
+
+    # Log the request
+    log_request_to_console(
+        url=str(request.url),
+        headers=dict(request.headers),
+        client_info=(
+            request.client.host if request.client else "unknown",
+            request.client.port if request.client else 0,
+        ),
+        request_data={"model": model_id, "ollama_model": body.model, "stream": body.stream},
+    )
+
+    if body.stream:
+        # Streaming response
+        openai_stream = client.acompletion(request=request, **openai_request)
+
+        async def is_disconnected():
+            return await request.is_disconnected()
+
+        ollama_stream = ollama_streaming_wrapper(
+            openai_stream, display_name, is_disconnected
+        )
+
+        return StreamingResponse(
+            ollama_stream,
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Transfer-Encoding": "chunked",
+            },
+        )
+    else:
+        # Non-streaming response
+        openai_request["stream"] = False
+        response = await client.acompletion(request=request, **openai_request)
+
+        # Convert to Ollama format
+        from rotator_library.ollama_compat.translator import openai_to_ollama_response
+
+        ollama_response = openai_to_ollama_response(
+            response.model_dump() if hasattr(response, "model_dump") else response,
+            display_name,
+        )
+
+        return JSONResponse(content=ollama_response.model_dump())
 
 
 if __name__ == "__main__":
