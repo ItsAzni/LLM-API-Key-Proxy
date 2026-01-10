@@ -2661,6 +2661,8 @@ class RotatingClient:
                         "total_requests_max": 0,
                         # Tier breakdown: tier_name -> {"total": N, "active": M}
                         "tiers": {},
+                        # Earliest reset time across all credentials
+                        "next_reset_timestamp": None,
                     }
 
                     # Calculate per-credential quota for this group
@@ -2715,6 +2717,15 @@ class RotatingClient:
                             group_stats["total_requests_used"] += req_count
                             group_stats["total_requests_max"] += max_req
 
+                            # Track earliest reset time across all credentials
+                            reset_ts = model_stats.get("quota_reset_ts")
+                            if reset_ts:
+                                if (
+                                    group_stats["next_reset_timestamp"] is None
+                                    or reset_ts < group_stats["next_reset_timestamp"]
+                                ):
+                                    group_stats["next_reset_timestamp"] = reset_ts
+
                             if baseline is not None:
                                 remaining_pct = int(baseline * 100)
                                 group_stats["total_remaining_pcts"].append(
@@ -2743,6 +2754,20 @@ class RotatingClient:
                         )
                     else:
                         group_stats["total_remaining_pct"] = None
+
+                    # Convert reset timestamp to ISO format
+                    if group_stats["next_reset_timestamp"]:
+                        try:
+                            from datetime import datetime, timezone
+
+                            group_stats["next_reset_time_iso"] = datetime.fromtimestamp(
+                                group_stats["next_reset_timestamp"], tz=timezone.utc
+                            ).isoformat()
+                        except (ValueError, OSError):
+                            group_stats["next_reset_time_iso"] = None
+                    else:
+                        group_stats["next_reset_time_iso"] = None
+                    del group_stats["next_reset_timestamp"]
 
                     prov_stats["quota_groups"][group_name] = group_stats
 
