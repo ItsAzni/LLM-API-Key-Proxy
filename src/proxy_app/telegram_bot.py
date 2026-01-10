@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -273,6 +274,19 @@ def format_cooldown(seconds: int) -> str:
         hours = seconds // 3600
         mins = (seconds % 3600) // 60
         return f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+
+
+def format_reset_time(iso_time: Optional[str]) -> str:
+    """Format ISO time string for display."""
+    if not iso_time:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+        # Convert to local time
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%b %d %H:%M")
+    except (ValueError, AttributeError):
+        return iso_time[:16] if iso_time else ""
 
 
 def escape_markdown(text: str) -> str:
@@ -576,12 +590,16 @@ def format_summary_message(stats: Dict[str, Any]) -> str:
             total_used = group_stats.get("total_requests_used", 0)
             total_max = group_stats.get("total_requests_max", 0)
             total_pct = group_stats.get("total_remaining_pct")
+            # Get earliest reset time across all credentials in this group
+            reset_time = format_reset_time(group_stats.get("next_reset_time_iso"))
 
             bar = create_progress_bar(total_pct)
             pct_str = f"{total_pct}%" if total_pct is not None else "?"
 
             lines.append(f"   `{group_name}: {total_used}/{total_max} {pct_str}`")
-            lines.append(f"   `{bar}`")
+            # Show reset time if available
+            reset_str = f" ⏰ {reset_time}" if reset_time else ""
+            lines.append(f"   `{bar}`{reset_str}")
 
         lines.append(
             f"   📈 {total_requests} reqs | {format_tokens(input_total)}/{format_tokens(output)} tok | {cost}"
@@ -667,6 +685,7 @@ def format_provider_detail(provider: str, stats: Dict[str, Any]) -> str:
                 requests_used = group_stats.get("requests_used", 0)
                 requests_max = group_stats.get("requests_max")
                 is_exhausted = group_stats.get("is_exhausted", False)
+                reset_time = format_reset_time(group_stats.get("reset_time_iso"))
 
                 display = (
                     f"{requests_used}/{requests_max}"
@@ -684,7 +703,9 @@ def format_provider_detail(provider: str, stats: Dict[str, Any]) -> str:
                     emoji = "🟢"
 
                 lines.append(f"   {emoji} `{group_name}: {display} {pct_str}`")
-                lines.append(f"      `{bar}`")
+                # Show reset time if available
+                reset_str = f" ⏰ {reset_time}" if reset_time else ""
+                lines.append(f"      `{bar}`{reset_str}")
 
         lines.append("")
 
