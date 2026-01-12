@@ -27,6 +27,7 @@ import {
   getCredentialStatusIcon,
   getCredentialStatusText,
   getProgressColor,
+  getProgressIcon,
 } from "./utils";
 
 export default function QuotaCommand() {
@@ -364,10 +365,7 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
                   <List.Item.Detail.Metadata.Label
                     title={groupName}
                     text={`${group.total_requests_used}/${group.total_requests_max} (${group.total_remaining_pct ?? "?"}% remaining)`}
-                    icon={{
-                      source: Icon.CircleProgress,
-                      tintColor: getProgressColor(group.total_remaining_pct),
-                    }}
+                    icon={getProgressIcon(group.total_remaining_pct)}
                   />
                   {group.next_reset_time_iso && (
                     <List.Item.Detail.Metadata.Label
@@ -434,7 +432,7 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
                 title={cred.email || cred.identifier}
                 text={`${statusText}${quotaText}${resetText}`}
                 icon={lowestPct !== null
-                  ? { source: Icon.CircleProgress, tintColor: getProgressColor(lowestPct) }
+                  ? getProgressIcon(lowestPct)
                   : getCredentialStatusIcon(cred)
                 }
               />

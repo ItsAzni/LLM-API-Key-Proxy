@@ -155,3 +155,28 @@ export function getProgressColor(remaining: number | null): Color {
     return Color.Green;
   }
 }
+
+/**
+ * Get the appropriate progress circle icon based on percentage.
+ * Uses Raycast's built-in progress icons that visually show fill level.
+ */
+export function getProgressIcon(remaining: number | null): Image.ImageLike {
+  const color = getProgressColor(remaining);
+
+  if (remaining === null) {
+    return { source: Icon.Circle, tintColor: color };
+  }
+
+  // Map percentage to the closest progress icon
+  if (remaining >= 88) {
+    return { source: Icon.CircleProgress100, tintColor: color };
+  } else if (remaining >= 63) {
+    return { source: Icon.CircleProgress75, tintColor: color };
+  } else if (remaining >= 38) {
+    return { source: Icon.CircleProgress50, tintColor: color };
+  } else if (remaining >= 13) {
+    return { source: Icon.CircleProgress25, tintColor: color };
+  } else {
+    return { source: Icon.Circle, tintColor: color };
+  }
+}
