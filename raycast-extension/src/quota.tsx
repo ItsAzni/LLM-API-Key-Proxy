@@ -404,35 +404,42 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
 
           {/* Credentials */}
           <List.Item.Detail.Metadata.Label title="Credentials" />
-          {stats.credentials.map((cred) => (
-            <React.Fragment key={cred.identifier}>
+          {stats.credentials.map((cred) => {
+            // Get the primary/lowest remaining quota across all model groups
+            const modelGroups = cred.model_groups ? Object.entries(cred.model_groups) : [];
+            let lowestPct: number | null = null;
+            let earliestReset: string | undefined = undefined;
+
+            for (const [_, group] of modelGroups) {
+              if (group.remaining_pct !== null) {
+                if (lowestPct === null || group.remaining_pct < lowestPct) {
+                  lowestPct = group.remaining_pct;
+                }
+              }
+              if (group.reset_time_iso) {
+                if (!earliestReset || group.reset_time_iso < earliestReset) {
+                  earliestReset = group.reset_time_iso;
+                }
+              }
+            }
+
+            // Build display text with quota info
+            const statusText = `${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""}`;
+            const quotaText = lowestPct !== null ? ` • ${lowestPct}%` : "";
+            const resetText = earliestReset ? ` • ${formatResetTime(earliestReset)}` : "";
+
+            return (
               <List.Item.Detail.Metadata.Label
+                key={cred.identifier}
                 title={cred.email || cred.identifier}
-                text={`${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""} - ${cred.requests} reqs`}
-                icon={getCredentialStatusIcon(cred)}
+                text={`${statusText}${quotaText}${resetText}`}
+                icon={lowestPct !== null
+                  ? { source: Icon.CircleProgress, tintColor: getProgressColor(lowestPct) }
+                  : getCredentialStatusIcon(cred)
+                }
               />
-              {/* Show quota info for each model group */}
-              {cred.model_groups && Object.entries(cred.model_groups).map(([groupName, group]) => (
-                <React.Fragment key={groupName}>
-                  <List.Item.Detail.Metadata.Label
-                    title={`  ↳ ${groupName}`}
-                    text={`${group.requests_used}/${group.requests_max ?? "?"} (${group.remaining_pct ?? "?"}%)`}
-                    icon={{
-                      source: Icon.CircleProgress,
-                      tintColor: getProgressColor(group.remaining_pct),
-                    }}
-                  />
-                  {group.reset_time_iso && (
-                    <List.Item.Detail.Metadata.Label
-                      title="      ↳ Resets"
-                      text={formatResetTime(group.reset_time_iso)}
-                      icon={Icon.Clock}
-                    />
-                  )}
-                </React.Fragment>
-              ))}
-            </React.Fragment>
-          ))}
+            );
+          })}
         </List.Item.Detail.Metadata>
       }
     />
