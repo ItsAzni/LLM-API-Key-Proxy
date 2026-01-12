@@ -404,13 +404,34 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
 
           {/* Credentials */}
           <List.Item.Detail.Metadata.Label title="Credentials" />
-          {stats.credentials.map((cred, idx) => (
-            <List.Item.Detail.Metadata.Label
-              key={cred.identifier}
-              title={cred.email || cred.identifier}
-              text={`${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""} - ${cred.requests} reqs`}
-              icon={getCredentialStatusIcon(cred)}
-            />
+          {stats.credentials.map((cred) => (
+            <React.Fragment key={cred.identifier}>
+              <List.Item.Detail.Metadata.Label
+                title={cred.email || cred.identifier}
+                text={`${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""} - ${cred.requests} reqs`}
+                icon={getCredentialStatusIcon(cred)}
+              />
+              {/* Show quota info for each model group */}
+              {cred.model_groups && Object.entries(cred.model_groups).map(([groupName, group]) => (
+                <React.Fragment key={groupName}>
+                  <List.Item.Detail.Metadata.Label
+                    title={`  ↳ ${groupName}`}
+                    text={`${group.requests_used}/${group.requests_max ?? "?"} (${group.remaining_pct ?? "?"}%)`}
+                    icon={{
+                      source: Icon.CircleProgress,
+                      tintColor: getProgressColor(group.remaining_pct),
+                    }}
+                  />
+                  {group.reset_time_iso && (
+                    <List.Item.Detail.Metadata.Label
+                      title="      ↳ Resets"
+                      text={formatResetTime(group.reset_time_iso)}
+                      icon={Icon.Clock}
+                    />
+                  )}
+                </React.Fragment>
+              ))}
+            </React.Fragment>
           ))}
         </List.Item.Detail.Metadata>
       }
