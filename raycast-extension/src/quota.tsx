@@ -416,10 +416,10 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
             const modelGroups = cred.model_groups ? Object.entries(cred.model_groups) : [];
             let lowestPct: number | null = null;
             let earliestReset: string | undefined = undefined;
-            let totalUsed = 0;
-            let totalMax = 0;
+            let claudeUsed = 0;
+            let claudeMax = 0;
 
-            for (const [_, group] of modelGroups) {
+            for (const [groupName, group] of modelGroups) {
               if (group.remaining_pct !== null) {
                 if (lowestPct === null || group.remaining_pct < lowestPct) {
                   lowestPct = group.remaining_pct;
@@ -430,14 +430,16 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
                   earliestReset = group.reset_time_iso;
                 }
               }
-              // Aggregate request counts
-              totalUsed += group.requests_used || 0;
-              totalMax += group.requests_max || 0;
+              // Only count Claude requests
+              if (groupName.toLowerCase() === "claude") {
+                claudeUsed = group.requests_used || 0;
+                claudeMax = group.requests_max || 0;
+              }
             }
 
             // Build display text with quota info
             const statusText = `${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""}`;
-            const requestsText = totalMax > 0 ? ` • ${totalUsed}/${totalMax}` : "";
+            const requestsText = claudeMax > 0 ? ` • ${claudeUsed}/${claudeMax}` : "";
             const quotaText = lowestPct !== null ? ` • ${lowestPct}%` : "";
             const resetText = earliestReset ? ` • ${formatResetTime(earliestReset)}` : "";
 
