@@ -45,6 +45,12 @@ export interface ProviderStats {
   approx_cost: number | null;
   quota_groups?: Record<string, QuotaGroup>;
   credentials: CredentialStats[];
+  // Global/lifetime stats
+  global?: {
+    total_requests: number;
+    tokens: TokenStats;
+    approx_cost: number | null;
+  };
 }
 
 export interface Summary {
@@ -54,9 +60,18 @@ export interface Summary {
   approx_total_cost: number | null;
 }
 
+export interface GlobalSummary {
+  total_providers: number;
+  total_credentials: number;
+  total_requests: number;
+  tokens: TokenStats;
+  approx_total_cost: number | null;
+}
+
 export interface QuotaStats {
   providers: Record<string, ProviderStats>;
   summary: Summary;
+  global_summary?: GlobalSummary;
   timestamp: number;
   data_source: string;
 }

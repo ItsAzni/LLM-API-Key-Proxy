@@ -9,7 +9,7 @@ import {
   openExtensionPreferences,
 } from "@raycast/api";
 import { useFetch } from "@raycast/utils";
-import { useState } from "react";
+import React, { useState } from "react";
 import {
   QuotaStats,
   QuotaStatsWithRefresh,
@@ -172,23 +172,45 @@ export default function QuotaCommand() {
                 <List.Item.Detail
                   metadata={
                     <List.Item.Detail.Metadata>
+                      <List.Item.Detail.Metadata.Label title="Current Session" />
                       <List.Item.Detail.Metadata.Label
-                        title="Total Credentials"
+                        title="Credentials"
                         text={data.summary.total_credentials.toString()}
                       />
                       <List.Item.Detail.Metadata.Label
-                        title="Total Requests"
+                        title="Requests"
                         text={data.summary.total_requests.toString()}
                       />
                       <List.Item.Detail.Metadata.Label
-                        title="Total Tokens"
+                        title="Tokens"
                         text={formatTokenStats(data.summary.tokens)}
                       />
                       <List.Item.Detail.Metadata.Label
-                        title="Total Cost"
+                        title="Cost"
                         text={formatCost(data.summary.approx_total_cost)}
                       />
                       <List.Item.Detail.Metadata.Separator />
+
+                      {/* Global/Lifetime Stats */}
+                      {data.global_summary && (
+                        <>
+                          <List.Item.Detail.Metadata.Label title="Lifetime Total" />
+                          <List.Item.Detail.Metadata.Label
+                            title="All-time Requests"
+                            text={data.global_summary.total_requests.toString()}
+                          />
+                          <List.Item.Detail.Metadata.Label
+                            title="All-time Tokens"
+                            text={formatTokenStats(data.global_summary.tokens)}
+                          />
+                          <List.Item.Detail.Metadata.Label
+                            title="All-time Cost"
+                            text={formatCost(data.global_summary.approx_total_cost)}
+                          />
+                          <List.Item.Detail.Metadata.Separator />
+                        </>
+                      )}
+
                       <List.Item.Detail.Metadata.Label
                         title="Data Source"
                         text={data.data_source}
@@ -249,16 +271,35 @@ function ProviderListItem({
   onRefresh: () => void;
   onForceRefresh: () => void;
 }) {
+  // Get the primary quota group's remaining percentage for display
+  const quotaGroups = stats.quota_groups ? Object.entries(stats.quota_groups) : [];
+  const primaryQuota = quotaGroups.length > 0 ? quotaGroups[0][1] : null;
+  const remainingPct = primaryQuota?.total_remaining_pct;
+  const nextReset = primaryQuota?.next_reset_time_iso;
+
+  // Build accessories with quota info - using tag for colored percentage
+  const accessories: List.Item.Accessory[] = [
+    { text: `${stats.active_count}/${stats.credential_count}` },
+  ];
+
+  // Add remaining quota percentage if available (as colored tag)
+  if (remainingPct !== null && remainingPct !== undefined) {
+    accessories.push({
+      tag: { value: `${remainingPct}%`, color: getProgressColor(remainingPct) },
+    });
+  }
+
+  // Add next reset time if available
+  if (nextReset) {
+    accessories.push({ text: formatResetTime(nextReset) });
+  }
+
   return (
     <List.Item
       title={name.charAt(0).toUpperCase() + name.slice(1)}
       subtitle={getProviderStatusText(stats)}
       icon={getProviderStatusIcon(stats)}
-      accessories={[
-        { text: `${stats.active_count}/${stats.credential_count}` },
-        { text: `${stats.total_requests} reqs` },
-        { text: formatCost(stats.approx_cost) },
-      ]}
+      accessories={accessories}
       detail={<ProviderDetail name={name} stats={stats} />}
       actions={
         <ActionPanel>
@@ -319,25 +360,44 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
             <>
               <List.Item.Detail.Metadata.Label title="Quota Groups" />
               {Object.entries(stats.quota_groups).map(([groupName, group]) => (
-                <List.Item.Detail.Metadata.Label
-                  key={groupName}
-                  title={groupName}
-                  text={`${group.total_requests_used}/${group.total_requests_max} (${group.total_remaining_pct ?? "?"}%)`}
-                  icon={{
-                    source: Icon.CircleProgress,
-                    tintColor: getProgressColor(group.total_remaining_pct),
-                  }}
-                />
-              ))}
-              {Object.entries(stats.quota_groups).some(([_, g]) => g.next_reset_time_iso) && (
-                <List.Item.Detail.Metadata.Label
-                  title="Next Reset"
-                  text={formatResetTime(
-                    Object.values(stats.quota_groups).find((g) => g.next_reset_time_iso)
-                      ?.next_reset_time_iso
+                <React.Fragment key={groupName}>
+                  <List.Item.Detail.Metadata.Label
+                    title={groupName}
+                    text={`${group.total_requests_used}/${group.total_requests_max} (${group.total_remaining_pct ?? "?"}% remaining)`}
+                    icon={{
+                      source: Icon.CircleProgress,
+                      tintColor: getProgressColor(group.total_remaining_pct),
+                    }}
+                  />
+                  {group.next_reset_time_iso && (
+                    <List.Item.Detail.Metadata.Label
+                      title={`  ↳ Resets`}
+                      text={formatResetTime(group.next_reset_time_iso)}
+                      icon={Icon.Clock}
+                    />
                   )}
-                />
-              )}
+                </React.Fragment>
+              ))}
+              <List.Item.Detail.Metadata.Separator />
+            </>
+          )}
+
+          {/* Global/Lifetime Stats */}
+          {stats.global && (
+            <>
+              <List.Item.Detail.Metadata.Label title="Lifetime Stats" />
+              <List.Item.Detail.Metadata.Label
+                title="All-time Requests"
+                text={stats.global.total_requests.toString()}
+              />
+              <List.Item.Detail.Metadata.Label
+                title="All-time Tokens"
+                text={formatTokenStats(stats.global.tokens)}
+              />
+              <List.Item.Detail.Metadata.Label
+                title="All-time Cost"
+                text={formatCost(stats.global.approx_cost)}
+              />
               <List.Item.Detail.Metadata.Separator />
             </>
           )}
