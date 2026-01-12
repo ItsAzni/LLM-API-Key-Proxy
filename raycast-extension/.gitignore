@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Raycast
+.raycast/
+
+# Lock files (optional - bun.lockb can be committed)
+# bun.lockb
+
+# OS files
+.DS_Store
