@@ -8,7 +8,7 @@ import {
   Toast,
   openExtensionPreferences,
 } from "@raycast/api";
-import { useFetch } from "@raycast/utils";
+import { useCachedPromise } from "@raycast/utils";
 import React, { useState } from "react";
 import {
   QuotaStats,
@@ -39,10 +39,19 @@ export default function QuotaCommand() {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
-  const { data, isLoading, revalidate, error } = useFetch<QuotaStats>(
-    `${proxyUrl}/v1/quota-stats`,
+  // Fetch function - only called when explicitly triggered
+  async function fetchQuotaStats(): Promise<QuotaStats> {
+    const response = await fetch(`${proxyUrl}/v1/quota-stats`, { headers });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    return response.json();
+  }
+
+  const { data, isLoading, revalidate, error } = useCachedPromise(
+    fetchQuotaStats,
+    [],
     {
-      headers,
       keepPreviousData: true,
     }
   );
