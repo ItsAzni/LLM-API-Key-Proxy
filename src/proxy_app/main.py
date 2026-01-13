@@ -1648,6 +1648,10 @@ async def _get_ollama_model_registry(
         new_registry[display_name] = model_id
         # Also allow lookup by model_id directly
         new_registry[model_id] = model_id
+        # Also allow lookup by raw model name (without provider prefix)
+        if "/" in model_id:
+            raw_name = model_id.split("/", 1)[1]
+            new_registry[raw_name] = model_id
 
     _ollama_model_registry = new_registry
     _ollama_model_registry_updated = now
