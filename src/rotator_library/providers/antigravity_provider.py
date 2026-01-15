@@ -1912,6 +1912,10 @@ class AntigravityProvider(
                     if "functionResponse" in part:
                         has_content = True
                         break
+                    # Check for inline data (images, PDFs, etc.)
+                    if "inlineData" in part:
+                        has_content = True
+                        break
 
             if has_content:
                 cleaned.append(msg)
@@ -2609,6 +2613,187 @@ class AntigravityProvider(
             lib_logger.warning(f"Failed to parse image URL: {e}")
             return None
 
+    async def _extract_pdf_with_gemini(
+        self,
+        client: httpx.AsyncClient,
+        pdf_base64: str,
+        mime_type: str,
+        credential_path: str,
+    ) -> Optional[str]:
+        """
+        Extract text from a PDF using Gemini.
+
+        Uses gemini-3-flash for fast PDF text extraction and figure summaries.
+        This allows Claude models to process PDF content that they can't
+        natively handle via Antigravity.
+
+        Args:
+            client: HTTP client for making requests
+            pdf_base64: Base64-encoded PDF data
+            mime_type: MIME type (usually application/pdf)
+            credential_path: Path to OAuth credential for Gemini
+
+        Returns:
+            Extracted text from the PDF, or None if extraction failed
+        """
+        try:
+            # Use a fast Gemini model for extraction
+            extraction_model = "gemini-3-flash"
+
+            # Get access token
+            token = await self.get_valid_token(credential_path)
+
+            # Get project ID for this credential
+            project_id = await self._discover_project_id(credential_path, token, {})
+            if not project_id:
+                lib_logger.warning("[PDF Extract] Failed to get project ID for Gemini")
+                return None
+
+            # Build extraction request
+            extraction_payload = {
+                "project": project_id,
+                "userAgent": "antigravity",
+                "requestType": "agent",
+                "requestId": _generate_request_id(),
+                "model": extraction_model,
+                "request": {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": mime_type,
+                                        "data": pdf_base64,
+                                    }
+                                },
+                                {
+                                    "text": "Extract and return ALL text content from this PDF document. Include all sections, headers, paragraphs, lists, tables (as text), and any other textual content. Preserve the document structure with appropriate line breaks. Also describe every figure, diagram, chart, table graphic, or photo in 1-3 sentences, including captions, axes, and key values; insert these descriptions inline as [FIGURE] ... . Do not summarize - provide the complete text."
+                                },
+                            ],
+                        }
+                    ],
+                    "generationConfig": {
+                        "maxOutputTokens": 32000,
+                    },
+                },
+            }
+
+            # Build headers (same as main request)
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                **ANTIGRAVITY_HEADERS,
+            }
+
+            # Make non-streaming request using generateContent endpoint
+            base_url = self._get_base_url()
+            url = f"{base_url}:generateContent"
+            response = await client.post(
+                url,
+                json=extraction_payload,
+                headers=headers,
+                timeout=120.0,
+            )
+            response.raise_for_status()
+
+            # Parse response
+            result = response.json()
+            result = self._unwrap_response(result)
+            candidates = result.get("candidates", [])
+            if not candidates:
+                return None
+
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            for part in parts:
+                if "text" in part:
+                    extracted_text = part["text"]
+                    lib_logger.info(
+                        f"[PDF Extract] Successfully extracted {len(extracted_text)} chars from PDF"
+                    )
+                    return extracted_text
+
+            lib_logger.warning("[PDF Extract] No text content in Gemini response")
+            return None
+
+        except Exception as e:
+            lib_logger.warning(f"[PDF Extract] Failed to extract PDF text: {e}")
+            return None
+
+    async def _preprocess_pdfs_for_claude(
+        self,
+        client: httpx.AsyncClient,
+        messages: List[Dict[str, Any]],
+        credential_path: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Preprocess messages to extract PDF content using Gemini for Claude.
+
+        Scans messages for PDF content (base64 data URLs with application/pdf
+        mime type), extracts text using Gemini, and replaces the PDF data with
+        the extracted text.
+        """
+        modified_messages = []
+
+        for msg in messages:
+            content = msg.get("content")
+
+            if not isinstance(content, list):
+                modified_messages.append(msg)
+                continue
+
+            modified_content = []
+            for block in content:
+                if not isinstance(block, dict):
+                    modified_content.append(block)
+                    continue
+
+                # Check for PDF in image_url blocks
+                if block.get("type") == "image_url":
+                    url = block.get("image_url", {}).get("url", "")
+                    if url.startswith("data:") and "application/pdf" in url:
+                        modified_content.append(
+                            await self._process_pdf_block(client, url, credential_path)
+                        )
+                        continue
+
+                modified_content.append(block)
+
+            # Only create new message dict if content was modified
+            if modified_content != content:
+                modified_msg = dict(msg)
+                modified_msg["content"] = modified_content
+                modified_messages.append(modified_msg)
+            else:
+                modified_messages.append(msg)
+
+        return modified_messages
+
+    async def _process_pdf_block(
+        self,
+        client: httpx.AsyncClient,
+        data_url: str,
+        credential_path: str,
+    ) -> Dict[str, Any]:
+        """Extract text from a PDF data URL and return a text block."""
+        try:
+            header, pdf_base64 = data_url.split(",", 1)
+            mime_type = header.split(":")[1].split(";")[0]
+
+            extracted_text = await self._extract_pdf_with_gemini(
+                client, pdf_base64, mime_type, credential_path
+            )
+
+            if extracted_text:
+                lib_logger.info("[PDF Preprocess] Replaced PDF with extracted text")
+                return {"type": "text", "text": f"[PDF Content Extracted]\n\n{extracted_text}"}
+
+            return {"type": "text", "text": "[PDF Content - Text extraction failed. The PDF could not be read.]"}
+        except Exception as e:
+            lib_logger.warning(f"[PDF Preprocess] Error processing PDF: {e}")
+            return {"type": "text", "text": "[PDF Content - Processing error]"}
+
     def _transform_user_message(self, content: Any) -> List[Dict[str, Any]]:
         """Transform user message content to Gemini parts."""
         return self._parse_content_parts(content)
@@ -2769,7 +2954,14 @@ class AntigravityProvider(
     def _transform_tool_message(
         self, msg: Dict[str, Any], model: str, tool_id_to_name: Dict[str, str]
     ) -> List[Dict[str, Any]]:
-        """Transform tool response message."""
+        """Transform tool response message.
+
+        For Gemini models: Converts multimodal content (images, PDFs) from image_url
+        format to Gemini's native inlineData format for proper processing.
+
+        For Claude models: Passes content as-is since Claude via Antigravity
+        doesn't support PDF/image as inlineData in tool responses.
+        """
         tool_id = msg.get("tool_call_id", "")
         func_name = tool_id_to_name.get(tool_id, "unknown_function")
         content = msg.get("content", "{}")
@@ -2784,11 +2976,60 @@ class AntigravityProvider(
             func_name = GEMINI3_TOOL_RENAMES.get(func_name, func_name)
             func_name = f"{self._gemini3_tool_prefix}{func_name}"
 
-        try:
-            parsed_content = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            parsed_content = content
+        # Parse content - could be string, JSON string, or already a list
+        parsed_content = content
+        if isinstance(content, str):
+            try:
+                parsed_content = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                parsed_content = content
 
+        # For Gemini models only: convert multimodal content to inlineData format
+        # Claude via Antigravity doesn't support PDF/images in tool responses as inlineData
+        if not self._is_claude(model) and isinstance(parsed_content, list) and parsed_content:
+            first_item = parsed_content[0]
+            if isinstance(first_item, dict) and "type" in first_item:
+                # This is multimodal content - extract text and media separately
+                text_parts = []
+                media_parts = []
+
+                for block in parsed_content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type", "")
+
+                    if block_type == "text":
+                        text_content = block.get("text", "")
+                        if text_content:
+                            text_parts.append(text_content)
+                    elif block_type == "image_url":
+                        # Convert image_url to inlineData using existing method
+                        image_part = self._parse_image_url(block.get("image_url", {}))
+                        if image_part:
+                            media_parts.append(image_part)
+
+                # Build the response with text content
+                text_result = " ".join(text_parts) if text_parts else ""
+                parts = [
+                    {
+                        "functionResponse": {
+                            "name": func_name,
+                            "response": {
+                                "result": text_result
+                                if text_result
+                                else "See attached media content."
+                            },
+                            "id": tool_id,
+                        }
+                    }
+                ]
+
+                # Add media parts (inlineData for images/PDFs)
+                parts.extend(media_parts)
+
+                return parts
+
+        # Default: pass content as-is (for Claude or non-multimodal content)
         return [
             {
                 "functionResponse": {
@@ -4043,6 +4284,14 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         thinking_enabled = float(reasoning_effort) > 0
                     else:
                         thinking_enabled = True
+
+        # Preprocess PDFs for Claude models using Gemini
+        # Claude via Antigravity doesn't support PDF input natively, so we use
+        # Gemini to extract the text content from PDFs before sending to Claude
+        if self._is_claude(model):
+            messages = await self._preprocess_pdfs_for_claude(
+                client, messages, credential_path
+            )
 
         # Transform messages to Gemini format FIRST
         # This restores thinking from cache if reasoning_content was stripped by client

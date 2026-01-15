@@ -15,6 +15,32 @@ from .models import AnthropicMessagesRequest
 MIN_THINKING_SIGNATURE_LENGTH = 100
 
 
+def _convert_anthropic_source_to_openai(
+    source: Dict[str, Any], default_mime_type: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Convert Anthropic source format (base64 or url) to OpenAI image_url format.
+
+    Works for both images and documents (PDFs). Returns an image_url block
+    that can be used in OpenAI content arrays.
+
+    Args:
+        source: Anthropic source dict with type, media_type, and data/url
+        default_mime_type: Default MIME type if not specified in source
+
+    Returns:
+        OpenAI image_url block, or None if source type is not supported
+    """
+    source_type = source.get("type")
+    if source_type == "base64":
+        mime_type = source.get("media_type", default_mime_type)
+        data = source.get("data", "")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{data}"}}
+    if source_type == "url":
+        return {"type": "image_url", "image_url": {"url": source.get("url", "")}}
+    return None
+
+
 def _reorder_assistant_content(content: List[dict]) -> List[dict]:
     """
     Reorder assistant message content blocks to ensure correct order:
@@ -127,43 +153,18 @@ def anthropic_to_openai_messages(
                         )
                     elif block_type == "image":
                         # Convert Anthropic image format to OpenAI
-                        source = block.get("source", {})
-                        if source.get("type") == "base64":
-                            openai_content.append(
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
-                                    },
-                                }
-                            )
-                        elif source.get("type") == "url":
-                            openai_content.append(
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": source.get("url", "")},
-                                }
-                            )
+                        converted = _convert_anthropic_source_to_openai(
+                            block.get("source", {}), "image/png"
+                        )
+                        if converted:
+                            openai_content.append(converted)
                     elif block_type == "document":
                         # Convert Anthropic document format (e.g. PDF) to OpenAI
-                        # Documents are treated similarly to images with appropriate mime type
-                        source = block.get("source", {})
-                        if source.get("type") == "base64":
-                            openai_content.append(
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{source.get('media_type', 'application/pdf')};base64,{source.get('data', '')}"
-                                    },
-                                }
-                            )
-                        elif source.get("type") == "url":
-                            openai_content.append(
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": source.get("url", "")},
-                                }
-                            )
+                        converted = _convert_anthropic_source_to_openai(
+                            block.get("source", {}), "application/pdf"
+                        )
+                        if converted:
+                            openai_content.append(converted)
                     elif block_type == "thinking":
                         signature = block.get("signature", "")
                         if (
@@ -218,26 +219,17 @@ def anthropic_to_openai_messages(
                                         {"type": "text", "text": b.get("text", "")}
                                     )
                                 elif b_type == "image":
-                                    # Convert Anthropic image format to OpenAI format
-                                    source = b.get("source", {})
-                                    if source.get("type") == "base64":
-                                        tool_content_parts.append(
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
-                                                },
-                                            }
-                                        )
-                                    elif source.get("type") == "url":
-                                        tool_content_parts.append(
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": source.get("url", "")
-                                                },
-                                            }
-                                        )
+                                    converted = _convert_anthropic_source_to_openai(
+                                        b.get("source", {}), "image/png"
+                                    )
+                                    if converted:
+                                        tool_content_parts.append(converted)
+                                elif b_type == "document":
+                                    converted = _convert_anthropic_source_to_openai(
+                                        b.get("source", {}), "application/pdf"
+                                    )
+                                    if converted:
+                                        tool_content_parts.append(converted)
 
                             # If we only have text parts, join them as a string for compatibility
                             # Otherwise use the array format for multimodal content
