@@ -237,6 +237,10 @@ def _get_claude_thinking_cache_file():
     return _get_antigravity_cache_dir() / "claude_thinking.json"
 
 
+def _get_pdf_extraction_cache_file():
+    return _get_antigravity_cache_dir() / "pdf_extractions.json"
+
+
 # Gemini 3 tool fix system instruction (prevents hallucination)
 DEFAULT_GEMINI3_SYSTEM_INSTRUCTION = """<CRITICAL_TOOL_USAGE_INSTRUCTIONS>
 You are operating in a CUSTOM ENVIRONMENT where tool definitions COMPLETELY DIFFER from your training data.
@@ -1291,6 +1295,16 @@ class AntigravityProvider(
             env_prefix="ANTIGRAVITY_THINKING",
         )
 
+        # PDF extraction cache - longer TTLs since PDF content is stable
+        pdf_memory_ttl = env_int("ANTIGRAVITY_PDF_CACHE_TTL", 86400)  # 24 hours
+        pdf_disk_ttl = env_int("ANTIGRAVITY_PDF_DISK_TTL", 604800)  # 7 days
+        self._pdf_cache = ProviderCache(
+            _get_pdf_extraction_cache_file(),
+            pdf_memory_ttl,
+            pdf_disk_ttl,
+            env_prefix="ANTIGRAVITY_PDF",
+        )
+
         # Quota tracking state
         self._learned_costs: Dict[
             str, Dict[str, int]
@@ -1585,6 +1599,27 @@ class AntigravityProvider(
             key_parts.append(f"text_{text_hash}")
 
         return "thinking_" + "_".join(key_parts) if key_parts else None
+
+    def _generate_pdf_cache_key(self, pdf_base64: str) -> str:
+        """
+        Generate cache key for PDF extraction using SHA-256.
+
+        Uses SHA-256 for better collision resistance with large base64 content.
+        Hashes first 50KB + total length to avoid excessive computation on
+        huge PDFs while maintaining uniqueness.
+
+        Args:
+            pdf_base64: Base64-encoded PDF data
+
+        Returns:
+            Cache key in format 'pdf_<hash>'
+        """
+        sample_size = 50 * 1024
+        content_sample = pdf_base64[:sample_size]
+        hash_input = f"{content_sample}|len={len(pdf_base64)}"
+
+        content_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+        return f"pdf_{content_hash}"
 
     # NOTE: _discover_project_id() and _persist_project_metadata() are inherited from AntigravityAuthBase
 
@@ -2677,20 +2712,41 @@ class AntigravityProvider(
         data_url: str,
         credential_path: str,
     ) -> Dict[str, Any]:
-        """Extract text from a PDF data URL and return a text block."""
+        """Extract text from a PDF data URL and return a text block.
+
+        Uses caching to avoid re-extracting the same PDF on every turn.
+        Cache lookup uses SHA-256 hash of PDF content for collision resistance.
+        """
         try:
             header, pdf_base64 = data_url.split(",", 1)
             mime_type = header.split(":")[1].split(";")[0]
 
+            # Generate cache key and check cache first
+            cache_key = self._generate_pdf_cache_key(pdf_base64)
+            cached_text = await self._pdf_cache.retrieve_async(cache_key)
+            if cached_text:
+                lib_logger.debug(f"[PDF Cache] HIT for {cache_key[:20]}...")
+                return {"type": "text", "text": f"[PDF Content Extracted]\n\n{cached_text}"}
+
+            lib_logger.debug(f"[PDF Cache] MISS - extracting {cache_key[:20]}...")
+
+            # Cache miss - perform extraction
             extracted_text = await self._extract_pdf_with_gemini(
                 client, pdf_base64, mime_type, credential_path
             )
 
             if extracted_text:
-                lib_logger.info("[PDF Preprocess] Replaced PDF with extracted text")
+                # Store in cache (fire-and-forget)
+                self._pdf_cache.store(cache_key, extracted_text)
+                lib_logger.info(
+                    f"[PDF Preprocess] Extracted and cached {len(extracted_text)} chars"
+                )
                 return {"type": "text", "text": f"[PDF Content Extracted]\n\n{extracted_text}"}
 
-            return {"type": "text", "text": "[PDF Content - Text extraction failed. The PDF could not be read.]"}
+            return {
+                "type": "text",
+                "text": "[PDF Content - Text extraction failed. The PDF could not be read.]",
+            }
         except Exception as e:
             lib_logger.warning(f"[PDF Preprocess] Error processing PDF: {e}")
             return {"type": "text", "text": "[PDF Content - Processing error]"}
