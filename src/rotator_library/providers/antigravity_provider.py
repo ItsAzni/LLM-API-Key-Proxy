@@ -761,10 +761,10 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # - "format" (export, date/time tools)
     # - "minimum"/"maximum" (range tools)
     #
-    # Keywords to strip for Claude only (Gemini with 'parametersJsonSchema' accepts these,
-    # but we now use 'parameters' key which may silently ignore some):
+    # Keywords to strip for ALL targets (both Claude and Gemini):
+    # Gemini's Proto-based API rejects these with "Unknown name" errors.
     # Note: $schema, default, examples, title moved to meta_keywords (always stripped)
-    validation_keywords_claude_only = {
+    unsupported_validation_keywords = {
         "minItems",
         "maxItems",
         "uniqueItems",
@@ -883,12 +883,9 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         if key == "const":
             continue
 
-        # Strip Claude-only keywords when not targeting Gemini
-        if key in validation_keywords_claude_only:
-            if for_gemini:
-                # Gemini accepts these - preserve them
-                cleaned[key] = value
-            # For Claude: skip - not supported
+        # Strip unsupported validation keywords for ALL targets (both Claude and Gemini)
+        # Gemini's Proto-based API rejects these with "Unknown name" errors
+        if key in unsupported_validation_keywords:
             continue
 
         # Special handling for additionalProperties:
@@ -920,7 +917,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
             for prop_name, prop_schema in value.items():
                 # Log warning if property name matches a validation keyword
                 # This helps debug potential issues where the old code would have dropped it
-                if prop_name in validation_keywords_claude_only:
+                if prop_name in unsupported_validation_keywords:
                     lib_logger.debug(
                         f"[Schema] Preserving property '{prop_name}' (matches validation keyword name)"
                     )
