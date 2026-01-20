@@ -132,6 +132,11 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library.credential_manager import CredentialManager
     from rotator_library.background_refresher import BackgroundRefresher
     from rotator_library.model_info_service import init_model_info_service
+    from rotator_library.web_search import (
+        get_tavily_service,
+        inject_web_search_tool,
+        execute_with_tool_loop,
+    )
     from proxy_app.request_logger import log_request_to_console
     from proxy_app.batch_manager import EmbeddingBatcher
     from proxy_app.detailed_logger import RawIOLogger
@@ -373,10 +378,13 @@ if ENABLE_RAW_LOGGING:
 PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 
+# Keys that should NOT be treated as provider API keys
+EXCLUDED_API_KEYS = {"PROXY_API_KEY", "TAVILY_API_KEY"}
+
 # Discover API keys from environment variables
 api_keys = {}
 for key, value in os.environ.items():
-    if "_API_KEY" in key and key != "PROXY_API_KEY":
+    if "_API_KEY" in key and key not in EXCLUDED_API_KEYS:
         provider = key.split("_API_KEY")[0].lower()
         if provider not in api_keys:
             api_keys[provider] = []
@@ -965,10 +973,16 @@ async def chat_completions(
             client_info=(request.client.host, request.client.port),
             request_data=request_data,
         )
+
+        # Inject web_search tool if Tavily is configured
+        request_data = inject_web_search_tool(request_data)
+
         is_streaming = request_data.get("stream", False)
 
         if is_streaming:
-            response_generator = client.acompletion(request=request, **request_data)
+            response_generator = await execute_with_tool_loop(
+                client, request_data, request=request
+            )
             return StreamingResponse(
                 streaming_response_wrapper(
                     request, request_data, response_generator, raw_logger
@@ -976,7 +990,9 @@ async def chat_completions(
                 media_type="text/event-stream",
             )
         else:
-            response = await client.acompletion(request=request, **request_data)
+            response = await execute_with_tool_loop(
+                client, request_data, request=request
+            )
             if raw_logger:
                 # Assuming response has status_code and headers attributes
                 # This might need adjustment based on the actual response object
@@ -1767,6 +1783,10 @@ async def ollama_show_model(
                 if info.capabilities.tools or info.capabilities.functions:
                     capabilities.append("tools")
 
+    # Add websearch capability if Tavily is configured
+    if get_tavily_service().is_configured:
+        capabilities.append("websearch")
+
     return OllamaShowResponse(
         modelfile=f"FROM {generate_model_display_name(model_id)}",
         parameters='stop "<|eot_id|>"',
@@ -1809,6 +1829,9 @@ async def ollama_chat(
     # Translate to OpenAI format
     openai_request = ollama_to_openai_request(body, model_id)
 
+    # Inject web_search tool if Tavily is configured
+    openai_request = inject_web_search_tool(openai_request)
+
     # Get display name for response
     display_name = generate_model_display_name(model_id)
 
@@ -1824,8 +1847,10 @@ async def ollama_chat(
     )
 
     if body.stream:
-        # Streaming response
-        openai_stream = client.acompletion(request=request, **openai_request)
+        # Streaming response with tool loop
+        openai_stream = await execute_with_tool_loop(
+            client, openai_request, request=request
+        )
 
         async def is_disconnected():
             return await request.is_disconnected()
@@ -1844,9 +1869,11 @@ async def ollama_chat(
             },
         )
     else:
-        # Non-streaming response
+        # Non-streaming response with tool loop
         openai_request["stream"] = False
-        response = await client.acompletion(request=request, **openai_request)
+        response = await execute_with_tool_loop(
+            client, openai_request, request=request
+        )
 
         # Convert to Ollama format
         from rotator_library.ollama_compat.translator import openai_to_ollama_response
@@ -1857,6 +1884,150 @@ async def ollama_chat(
         )
 
         return JSONResponse(content=ollama_response.model_dump())
+
+
+# --- Ollama Web Search API Endpoints (Tavily-powered) ---
+class OllamaWebSearchRequest(BaseModel):
+    """Request model for Ollama-compatible web search."""
+    query: str
+    max_results: Optional[int] = 5
+
+
+class OllamaWebSearchResult(BaseModel):
+    """Individual search result."""
+    title: str
+    url: str
+    content: str
+
+
+class OllamaWebSearchResponse(BaseModel):
+    """Response model for Ollama-compatible web search."""
+    results: List[OllamaWebSearchResult]
+
+
+class OllamaWebFetchRequest(BaseModel):
+    """Request model for Ollama-compatible web fetch."""
+    url: str
+
+
+class OllamaWebFetchResponse(BaseModel):
+    """Response model for Ollama-compatible web fetch."""
+    title: str
+    content: str
+    links: List[str]
+
+
+@app.post("/api/web_search")
+async def ollama_web_search(body: OllamaWebSearchRequest):
+    """
+    Ollama-compatible web search endpoint powered by Tavily.
+
+    This endpoint mimics Ollama's web search API format, allowing
+    Raycast and other Ollama clients to use web search functionality.
+    """
+    tavily_service = get_tavily_service()
+
+    if not tavily_service.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Web search is not configured. Set TAVILY_API_KEY in your environment."
+        )
+
+    result = await tavily_service.search(
+        query=body.query,
+        max_results=body.max_results
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    # Transform Tavily results to Ollama format
+    ollama_results = []
+    for item in result.get("results", []):
+        ollama_results.append(OllamaWebSearchResult(
+            title=item.get("title", "Untitled"),
+            url=item.get("url", ""),
+            content=item.get("content", "")
+        ))
+
+    return OllamaWebSearchResponse(results=ollama_results)
+
+
+@app.post("/api/web_fetch")
+async def ollama_web_fetch(body: OllamaWebFetchRequest):
+    """
+    Ollama-compatible web fetch endpoint.
+
+    Fetches a single web page by URL and returns its content.
+    Uses httpx to fetch the page directly.
+    """
+    import httpx
+    from html.parser import HTMLParser
+
+    class SimpleHTMLParser(HTMLParser):
+        """Simple HTML parser to extract title and links."""
+        def __init__(self):
+            super().__init__()
+            self.title = ""
+            self.in_title = False
+            self.links = []
+            self.text_parts = []
+            self.in_body = False
+            self.skip_tags = {"script", "style", "nav", "header", "footer"}
+            self.current_skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "title":
+                self.in_title = True
+            elif tag == "body":
+                self.in_body = True
+            elif tag == "a":
+                for attr, value in attrs:
+                    if attr == "href" and value and value.startswith("http"):
+                        self.links.append(value)
+            elif tag in self.skip_tags:
+                self.current_skip += 1
+
+        def handle_endtag(self, tag):
+            if tag == "title":
+                self.in_title = False
+            elif tag == "body":
+                self.in_body = False
+            elif tag in self.skip_tags:
+                self.current_skip = max(0, self.current_skip - 1)
+
+        def handle_data(self, data):
+            if self.in_title:
+                self.title += data
+            elif self.in_body and self.current_skip == 0:
+                text = data.strip()
+                if text:
+                    self.text_parts.append(text)
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(body.url)
+            response.raise_for_status()
+            html = response.text
+
+        parser = SimpleHTMLParser()
+        parser.feed(html)
+
+        # Combine text parts and truncate if too long
+        content = " ".join(parser.text_parts)
+        if len(content) > 10000:
+            content = content[:10000] + "..."
+
+        return OllamaWebFetchResponse(
+            title=parser.title.strip() or "Untitled",
+            content=content,
+            links=parser.links[:50]  # Limit to 50 links
+        )
+
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing page: {str(e)}")
 
 
 if __name__ == "__main__":
