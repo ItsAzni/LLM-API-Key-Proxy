@@ -41,6 +41,8 @@ class TavilyService:
         search_depth: Optional[str] = None,
         include_domains: Optional[List[str]] = None,
         exclude_domains: Optional[List[str]] = None,
+        time_range: Optional[str] = None,
+        topic: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a Tavily search.
@@ -51,6 +53,8 @@ class TavilyService:
             search_depth: Search depth - 'basic' or 'advanced' (defaults to configured value)
             include_domains: List of domains to include
             exclude_domains: List of domains to exclude
+            time_range: Time filter - 'day', 'week', 'month', 'year' (defaults to None = any time)
+            topic: Search topic - 'general', 'news', 'finance' (defaults to 'general')
 
         Returns:
             Dict containing search results with keys:
@@ -81,6 +85,10 @@ class TavilyService:
             payload["include_domains"] = include_domains
         if exclude_domains:
             payload["exclude_domains"] = exclude_domains
+        if time_range:
+            payload["time_range"] = time_range
+        if topic:
+            payload["topic"] = topic
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:

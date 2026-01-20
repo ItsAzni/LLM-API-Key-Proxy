@@ -17,6 +17,8 @@ async def ollama_streaming_wrapper(
     openai_stream: AsyncGenerator[str, None],
     model_name: str,
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+    suppress_tool_calls=False,
+    emit_tool_call_events=False,
 ) -> AsyncGenerator[str, None]:
     """
     Convert OpenAI streaming format to Ollama NDJSON format.
@@ -31,6 +33,8 @@ async def ollama_streaming_wrapper(
         openai_stream: AsyncGenerator yielding OpenAI SSE format strings
         model_name: The display name to include in responses
         is_disconnected: Optional async callback that returns True if client disconnected
+        suppress_tool_calls: Skip tool call responses and keep streaming (tool loop mode)
+        emit_tool_call_events: Emit non-terminal tool call chunks for UI indicators
 
     Yields:
         NDJSON format strings (one JSON object per line)
@@ -60,6 +64,53 @@ async def ollama_streaming_wrapper(
 
             # Handle [DONE] marker
             if data_content == "[DONE]":
+                has_tool_calls = finish_reason == "tool_calls" or accumulated_tool_calls
+                if suppress_tool_calls and has_tool_calls:
+                    has_web_search_calls = any(
+                        tc.get("name") == "web_search"
+                        for tc in accumulated_tool_calls.values()
+                    )
+                    if not has_web_search_calls:
+                        pass
+                    elif emit_tool_call_events and accumulated_tool_calls:
+                        tool_call_events = []
+                        for idx in sorted(accumulated_tool_calls.keys()):
+                            tc = accumulated_tool_calls[idx]
+                            if tc.get("name") != "web_search":
+                                continue
+                            try:
+                                args = json.loads(tc["arguments"])
+                            except json.JSONDecodeError:
+                                args = {}
+                            tool_call_events.append({
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": args,
+                                }
+                            })
+
+                        if tool_call_events:
+                            tool_call_chunk = {
+                                "model": model_name,
+                                "created_at": datetime.utcnow().isoformat() + "Z",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "tool_calls": tool_call_events,
+                                },
+                                "done": False,
+                            }
+                            yield json.dumps(tool_call_chunk) + "\n"
+
+                    if has_web_search_calls:
+                        # Tool loop will handle tool calls and produce a follow-up response.
+                        accumulated_tool_calls = {}
+                        accumulated_content = ""
+                        accumulated_thinking = ""
+                        finish_reason = None
+                        last_yield_time = datetime.utcnow()
+                        continue
+
                 # Build final tool calls if any
                 final_tool_calls = None
                 if accumulated_tool_calls:

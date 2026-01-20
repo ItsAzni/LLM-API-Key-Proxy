@@ -9,6 +9,7 @@ This enables Raycast AI and other Ollama clients to use the proxy.
 import json
 import re
 import uuid
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -114,6 +115,16 @@ def ollama_to_openai_messages(messages: List[OllamaChatMessage]) -> List[Dict[st
     openai_messages = []
     # Track tool call IDs for matching tool responses
     pending_tool_call_ids: List[str] = []
+    web_search_mode = os.getenv("OLLAMA_WEB_SEARCH_MODE", "server").lower()
+    tool_follow_up = False
+    if messages:
+        last_msg = messages[-1]
+        if last_msg.role == "tool":
+            tool_follow_up = True
+        elif last_msg.role == "assistant" and last_msg.tool_calls:
+            tool_follow_up = True
+    if web_search_mode == "server" and tool_follow_up:
+        web_search_mode = "client"
 
     for msg in messages:
         role = msg.role
@@ -121,6 +132,8 @@ def ollama_to_openai_messages(messages: List[OllamaChatMessage]) -> List[Dict[st
 
         # Handle tool responses (need to match with tool call IDs)
         if role == "tool":
+            if not pending_tool_call_ids:
+                continue
             # Use the next pending tool call ID if available
             tool_call_id = (
                 pending_tool_call_ids.pop(0)
@@ -164,8 +177,44 @@ def ollama_to_openai_messages(messages: List[OllamaChatMessage]) -> List[Dict[st
 
         # Handle assistant messages with tool calls
         if role == "assistant" and msg.tool_calls:
-            tool_calls = []
+            if web_search_mode == "client":
+                tool_calls = []
+                for tc in msg.tool_calls:
+                    call_id = f"call_{uuid.uuid4().hex[:9]}"
+                    pending_tool_call_ids.append(call_id)
+                    tool_calls.append(
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                # Ollama sends arguments as object, OpenAI needs JSON string
+                                "arguments": json.dumps(tc.function.arguments),
+                            },
+                        }
+                    )
+                openai_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content if content else None,
+                        "tool_calls": tool_calls,
+                    }
+                )
+                continue
+
+            filtered_tool_calls = []
             for tc in msg.tool_calls:
+                if tc.function and tc.function.name == "web_search":
+                    continue
+                filtered_tool_calls.append(tc)
+
+            if not filtered_tool_calls:
+                if content:
+                    openai_messages.append({"role": "assistant", "content": content})
+                continue
+
+            tool_calls = []
+            for tc in filtered_tool_calls:
                 call_id = f"call_{uuid.uuid4().hex[:9]}"
                 pending_tool_call_ids.append(call_id)
                 tool_calls.append(

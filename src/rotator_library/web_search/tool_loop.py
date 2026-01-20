@@ -4,7 +4,7 @@ Tool Loop for agentic web search execution.
 Provides a wrapper around the RotatingClient that handles the agentic tool loop:
 1. Send request to LLM
 2. Check if LLM responds with web_search tool call
-3. Execute Tavily search
+3. Execute web search (Tavily or Brave fallback)
 4. Add result to messages and continue
 5. Repeat until final response or max iterations
 """
@@ -13,7 +13,7 @@ import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
-from .tavily_service import get_tavily_service
+from .search_service import get_search_service
 from .tool_handler import (
     extract_all_web_search_tool_calls,
     execute_web_search_tool,
@@ -74,9 +74,11 @@ async def _non_streaming_tool_loop(
 
     Iteratively processes tool calls until the model produces a final response.
     """
-    tavily_service = get_tavily_service()
+    search_service = get_search_service()
     messages = list(request_data.get("messages", []))
     iteration = 0
+    seen_queries = set()
+    early_stop = False
 
     while iteration < max_tool_iterations:
         # Update messages in request data
@@ -94,27 +96,40 @@ async def _non_streaming_tool_loop(
             # No web_search tool calls, return the response
             return response
 
-        if not tavily_service.is_configured:
-            # Tavily not configured but model tried to use it
-            logger.warning("Model called web_search but Tavily is not configured")
+        if not search_service.is_configured:
+            # No search provider configured but model tried to use web_search
+            logger.warning("Model called web_search but no search provider is configured")
             return response
 
         logger.info(f"Tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)")
+
+        filtered_tool_calls = []
+        for query, tool_call_id, freshness in tool_calls:
+            key = (query, freshness or "")
+            if key in seen_queries:
+                continue
+            seen_queries.add(key)
+            filtered_tool_calls.append((query, tool_call_id, freshness))
+
+        if not filtered_tool_calls:
+            logger.warning("Detected repeated web_search calls; stopping tool loop")
+            early_stop = True
+            break
 
         # Add assistant message with tool calls to conversation
         assistant_msg = build_assistant_message_with_tool_calls(response)
         messages.append(assistant_msg)
 
         # Execute all web searches and add results
-        for query, tool_call_id in tool_calls:
-            result = await execute_web_search_tool(query)
+        for query, tool_call_id, freshness in filtered_tool_calls:
+            result = await execute_web_search_tool(query, freshness=freshness)
             tool_result_msg = build_tool_result_message(tool_call_id, result)
             messages.append(tool_result_msg)
 
         iteration += 1
 
-    # Max iterations reached
-    logger.warning(f"Tool loop reached max iterations ({max_tool_iterations})")
+    if not early_stop:
+        logger.warning(f"Tool loop reached max iterations ({max_tool_iterations})")
     # Make one final call without allowing further tool calls
     final_request = dict(request_data)
     final_request["messages"] = messages
@@ -134,16 +149,16 @@ async def _streaming_tool_loop(
     **kwargs,
 ) -> AsyncGenerator[str, None]:
     """
-    Handle streaming tool loop.
+    Handle streaming tool loop with real-time streaming.
 
-    For streaming, we need to buffer the response to detect tool calls,
-    execute them, then either:
-    - Return the buffered stream if no tool calls
-    - Make a new streaming call with the tool results
+    Streams chunks to client in real-time while accumulating to detect tool calls.
+    If tool calls are detected, executes them and streams another response.
     """
-    tavily_service = get_tavily_service()
+    search_service = get_search_service()
     messages = list(request_data.get("messages", []))
     iteration = 0
+    seen_queries = set()
+    early_stop = False
 
     while iteration < max_tool_iterations:
         # Update messages in request data
@@ -151,47 +166,57 @@ async def _streaming_tool_loop(
         current_request["messages"] = messages
         current_request["stream"] = True
 
-        # Buffer the streaming response to check for tool calls
-        buffered_chunks: List[str] = []
         accumulated_response = _create_empty_accumulated_response()
 
         stream = client.acompletion(request=request, **current_request, **kwargs)
 
+        # Stream chunks in real-time while accumulating for tool detection
         async for chunk in stream:
-            buffered_chunks.append(chunk)
+            yield chunk  # Stream immediately to client!
             _accumulate_chunk(accumulated_response, chunk)
 
-        # Check if we have tool calls
+        # After stream ends, check for tool calls
         tool_calls = _extract_tool_calls_from_accumulated(accumulated_response)
 
         if not tool_calls:
-            # No tool calls - yield all buffered chunks
-            for chunk in buffered_chunks:
-                yield chunk
+            # No tool calls - we're done (chunks already streamed)
             return
 
-        if not tavily_service.is_configured:
-            logger.warning("Model called web_search but Tavily is not configured")
-            for chunk in buffered_chunks:
-                yield chunk
+        if not search_service.is_configured:
+            logger.warning("Model called web_search but no search provider is configured")
             return
 
         logger.info(f"Streaming tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)")
+
+        filtered_tool_calls = []
+        for query, tool_call_id, freshness in tool_calls:
+            key = (query, freshness or "")
+            if key in seen_queries:
+                continue
+            seen_queries.add(key)
+            filtered_tool_calls.append((query, tool_call_id, freshness))
+
+        if not filtered_tool_calls:
+            logger.warning("Detected repeated web_search calls; stopping tool loop")
+            early_stop = True
+            break
 
         # Build assistant message from accumulated response
         assistant_msg = _build_assistant_message_from_accumulated(accumulated_response)
         messages.append(assistant_msg)
 
         # Execute all web searches and add results
-        for query, tool_call_id in tool_calls:
-            result = await execute_web_search_tool(query)
+        for query, tool_call_id, freshness in filtered_tool_calls:
+            result = await execute_web_search_tool(query, freshness=freshness)
             tool_result_msg = build_tool_result_message(tool_call_id, result)
             messages.append(tool_result_msg)
 
         iteration += 1
+        # Loop continues - will make another streaming request with tool results
 
-    # Max iterations reached - make final call without tools
-    logger.warning(f"Streaming tool loop reached max iterations ({max_tool_iterations})")
+    # Max iterations reached or early stop - make final call without tools
+    if not early_stop:
+        logger.warning(f"Streaming tool loop reached max iterations ({max_tool_iterations})")
     final_request = dict(request_data)
     final_request["messages"] = messages
     final_request["stream"] = True
@@ -272,11 +297,11 @@ def _accumulate_chunk(accumulated: Dict[str, Any], chunk: str) -> None:
 
 def _extract_tool_calls_from_accumulated(
     accumulated: Dict[str, Any]
-) -> List[tuple[str, str]]:
+) -> List[tuple[str, str, Optional[str]]]:
     """
     Extract web_search tool calls from accumulated response.
 
-    Returns list of (query, tool_call_id) tuples.
+    Returns list of (query, tool_call_id, freshness) tuples.
     """
     result = []
 
@@ -288,8 +313,9 @@ def _extract_tool_calls_from_accumulated(
                     args = json.loads(func.get("arguments", "{}"))
                     query = args.get("query", "")
                     tool_call_id = tool_call.get("id", "")
+                    freshness = args.get("freshness")  # May be None
                     if query and tool_call_id:
-                        result.append((query, tool_call_id))
+                        result.append((query, tool_call_id, freshness))
                 except json.JSONDecodeError:
                     logger.warning(f"Failed to parse tool call arguments: {func.get('arguments')}")
 

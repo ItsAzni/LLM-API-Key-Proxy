@@ -7,11 +7,68 @@ into requests and processing tool calls from model responses.
 
 import json
 import logging
+import re
 from typing import Dict, Any, Optional, Tuple, List
 
-from .tavily_service import get_tavily_service
+from .search_service import get_search_service
 
 logger = logging.getLogger("rotator_library.web_search")
+
+
+# Patterns that indicate the user wants recent/fresh results
+FRESHNESS_PATTERNS = {
+    "day": [
+        r"\btoday\b",
+        r"\btoday's\b",
+        r"\bthis morning\b",
+        r"\btonight\b",
+        r"\bright now\b",
+        r"\bcurrently\b",
+        r"\bjust now\b",
+        r"\blast 24 hours?\b",
+        r"\bpast 24 hours?\b",
+    ],
+    "week": [
+        r"\bthis week\b",
+        r"\blast week\b",
+        r"\bpast week\b",
+        r"\brecent\b",
+        r"\brecently\b",
+        r"\blatest\b",
+        r"\bnew\b",
+        r"\blast few days\b",
+        r"\bpast few days\b",
+    ],
+    "month": [
+        r"\bthis month\b",
+        r"\blast month\b",
+        r"\bpast month\b",
+    ],
+}
+
+
+def detect_freshness_from_query(query: str) -> Optional[str]:
+    """
+    Auto-detect desired freshness from query text.
+
+    Looks for temporal keywords like "today", "latest", "recent", etc.
+
+    Args:
+        query: The search query
+
+    Returns:
+        Freshness value ("day", "week", "month") or None if not detected
+    """
+    query_lower = query.lower()
+
+    # Check patterns in order of specificity (day first, then week, then month)
+    for freshness, patterns in FRESHNESS_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, query_lower):
+                logger.debug(f"Auto-detected freshness '{freshness}' from query: {query}")
+                return freshness
+
+    return None
 
 
 # Web search tool definition in OpenAI function format (universal fallback)
@@ -21,7 +78,8 @@ WEB_SEARCH_TOOL_DEFINITION: Dict[str, Any] = {
         "name": "web_search",
         "description": (
             "Search the web for current information. Use for questions about "
-            "recent events, weather, news, prices, or anything requiring up-to-date data."
+            "recent events, weather, news, prices, or anything requiring up-to-date data. "
+            "Set freshness to 'day' for today's news, 'week' for recent updates, or 'month' for broader results."
         ),
         "parameters": {
             "type": "object",
@@ -29,7 +87,19 @@ WEB_SEARCH_TOOL_DEFINITION: Dict[str, Any] = {
                 "query": {
                     "type": "string",
                     "description": "The search query",
-                }
+                },
+                "freshness": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year", "any"],
+                    "description": (
+                        "How recent the results should be. "
+                        "'day' = past 24 hours (use for 'today' queries), "
+                        "'week' = past 7 days (use for 'recent'/'latest'), "
+                        "'month' = past 30 days, "
+                        "'year' = past year, "
+                        "'any' = no time filter (default)"
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -39,7 +109,7 @@ WEB_SEARCH_TOOL_DEFINITION: Dict[str, Any] = {
 
 def inject_web_search_tool(request_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Add web_search tool to request if Tavily is configured and tool not already present.
+    Add web_search tool to request if any search provider is configured and tool not already present.
 
     Args:
         request_data: The original request data dict
@@ -47,8 +117,8 @@ def inject_web_search_tool(request_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Modified request data with web_search tool injected (if applicable)
     """
-    tavily_service = get_tavily_service()
-    if not tavily_service.is_configured:
+    search_service = get_search_service()
+    if not search_service.is_configured:
         return request_data
 
     # Check if tools already exist in request
@@ -123,7 +193,7 @@ def has_web_search_tool_call(response: Any) -> Tuple[bool, Optional[str], Option
     return False, None, None
 
 
-def extract_all_web_search_tool_calls(response: Any) -> List[Tuple[str, str]]:
+def extract_all_web_search_tool_calls(response: Any) -> List[Tuple[str, str, Optional[str]]]:
     """
     Extract all web_search tool calls from a response.
 
@@ -131,7 +201,8 @@ def extract_all_web_search_tool_calls(response: Any) -> List[Tuple[str, str]]:
         response: The model response (can be dict or object)
 
     Returns:
-        List of tuples (query, tool_call_id)
+        List of tuples (query, tool_call_id, freshness)
+        where freshness may be None if not specified
     """
     result = []
 
@@ -158,20 +229,24 @@ def extract_all_web_search_tool_calls(response: Any) -> List[Tuple[str, str]]:
                         args = json.loads(args_str)
                         query = args.get("query", "")
                         tool_call_id = tool_call.get("id", "")
+                        freshness = args.get("freshness")  # May be None
                         if query and tool_call_id:
-                            result.append((query, tool_call_id))
+                            result.append((query, tool_call_id, freshness))
                     except json.JSONDecodeError:
                         logger.warning(f"Failed to parse tool call arguments: {args_str}")
 
     return result
 
 
-async def execute_web_search_tool(query: str) -> str:
+async def execute_web_search_tool(query: str, freshness: Optional[str] = None) -> str:
     """
-    Execute Tavily search and return formatted result string.
+    Execute web search and return formatted result string.
+
+    Uses the unified search service which tries Tavily first, then Brave as fallback.
 
     Args:
         query: The search query
+        freshness: Time filter - 'day', 'week', 'month', 'year', or None
 
     Returns:
         Formatted string containing search results
@@ -179,29 +254,40 @@ async def execute_web_search_tool(query: str) -> str:
     if not query:
         return "[Error: No search query provided]"
 
-    tavily_service = get_tavily_service()
-    if not tavily_service.is_configured:
+    search_service = get_search_service()
+    if not search_service.is_configured:
         return "[Error: Web search is not configured]"
 
-    logger.info(f"Executing web search: {query}")
+    # Auto-detect freshness from query if not explicitly provided
+    effective_freshness = freshness
+    if not effective_freshness:
+        effective_freshness = detect_freshness_from_query(query)
+
+    if effective_freshness:
+        logger.info(f"Executing web search: {query} (freshness={effective_freshness})")
+    else:
+        logger.info(f"Executing web search: {query}")
 
     try:
-        result = await tavily_service.search(query)
+        result = await search_service.search(query, freshness=effective_freshness)
 
-        if "error" in result:
+        if "error" in result and not result.get("results"):
             return f"[Search Error: {result['error']}]"
 
         # Format results
-        output_parts = ["[Search Results]", ""]
+        provider = result.get("provider", "unknown")
+        freshness_info = f", freshness={effective_freshness}" if effective_freshness else ""
+        output_parts = [f"[Search Results via {provider}{freshness_info}]", ""]
 
-        # Include Tavily's answer if available
+        # Include answer/summary if available (Exa returns this instead of structured results)
         if result.get("answer"):
             output_parts.append(f"Summary: {result['answer']}")
             output_parts.append("")
 
         # Format individual results
         results = result.get("results", [])
-        if not results:
+        if not results and not result.get("answer"):
+            # Only return "no results" if we have neither results nor answer
             return "[No search results found]"
 
         for i, item in enumerate(results, 1):

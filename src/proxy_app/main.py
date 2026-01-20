@@ -133,7 +133,7 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library.background_refresher import BackgroundRefresher
     from rotator_library.model_info_service import init_model_info_service
     from rotator_library.web_search import (
-        get_tavily_service,
+        get_search_service,
         inject_web_search_tool,
         execute_with_tool_loop,
     )
@@ -379,7 +379,7 @@ PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 
 # Keys that should NOT be treated as provider API keys
-EXCLUDED_API_KEYS = {"PROXY_API_KEY", "TAVILY_API_KEY"}
+EXCLUDED_API_KEYS = {"PROXY_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY"}
 
 # Discover API keys from environment variables
 api_keys = {}
@@ -974,15 +974,11 @@ async def chat_completions(
             request_data=request_data,
         )
 
-        # Inject web_search tool if Tavily is configured
-        request_data = inject_web_search_tool(request_data)
-
         is_streaming = request_data.get("stream", False)
 
         if is_streaming:
-            response_generator = await execute_with_tool_loop(
-                client, request_data, request=request
-            )
+            # Direct streaming without tool loop for real-time response
+            response_generator = client.acompletion(request=request, **request_data)
             return StreamingResponse(
                 streaming_response_wrapper(
                     request, request_data, response_generator, raw_logger
@@ -990,9 +986,7 @@ async def chat_completions(
                 media_type="text/event-stream",
             )
         else:
-            response = await execute_with_tool_loop(
-                client, request_data, request=request
-            )
+            response = await client.acompletion(request=request, **request_data)
             if raw_logger:
                 # Assuming response has status_code and headers attributes
                 # This might need adjustment based on the actual response object
@@ -1783,8 +1777,8 @@ async def ollama_show_model(
                 if info.capabilities.tools or info.capabilities.functions:
                     capabilities.append("tools")
 
-    # Add websearch capability if Tavily is configured
-    if get_tavily_service().is_configured:
+    # Add websearch capability (Exa is always available, Tavily/Brave as fallback)
+    if get_search_service().is_configured:
         capabilities.append("websearch")
 
     return OllamaShowResponse(
@@ -1826,11 +1820,26 @@ async def ollama_chat(
     if not model_id:
         raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
 
+    tool_follow_up = False
+    if body.messages:
+        last_msg = body.messages[-1]
+        if last_msg.role == "tool":
+            tool_follow_up = True
+        elif last_msg.role == "assistant" and last_msg.tool_calls:
+            tool_follow_up = True
+
     # Translate to OpenAI format
     openai_request = ollama_to_openai_request(body, model_id)
 
-    # Inject web_search tool if Tavily is configured
-    openai_request = inject_web_search_tool(openai_request)
+    # Inject web_search tool so model knows it can search
+    if not tool_follow_up:
+        openai_request = inject_web_search_tool(openai_request)
+    else:
+        openai_request.pop("tools", None)
+        openai_request.pop("tool_choice", None)
+
+    web_search_mode = os.getenv("OLLAMA_WEB_SEARCH_MODE", "server").lower()
+    use_server_tool_loop = web_search_mode != "client" and not tool_follow_up
 
     # Get display name for response
     display_name = generate_model_display_name(model_id)
@@ -1846,18 +1855,46 @@ async def ollama_chat(
         request_data={"model": model_id, "ollama_model": body.model, "stream": body.stream},
     )
 
+    # NOTE: emit_tool_call_events=True causes clients like Raycast to interpret
+    # the tool_calls in the stream as needing client-side handling, which sends
+    # a follow-up request and creates a loop. Keep this disabled by default.
+    emit_tool_call_events = False
+    if use_server_tool_loop:
+        emit_tool_call_events_env = os.getenv("OLLAMA_EMIT_TOOL_CALL_EVENTS")
+        if emit_tool_call_events_env is not None:
+            emit_tool_call_events = emit_tool_call_events_env.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
     if body.stream:
-        # Streaming response with tool loop
-        openai_stream = await execute_with_tool_loop(
-            client, openai_request, request=request
-        )
+        if use_server_tool_loop:
+            # Streaming response with tool loop
+            openai_stream = await execute_with_tool_loop(
+                client, openai_request, request=request
+            )
+        else:
+            openai_stream = client.acompletion(request=request, **openai_request)
 
         async def is_disconnected():
             return await request.is_disconnected()
 
-        ollama_stream = ollama_streaming_wrapper(
-            openai_stream, display_name, is_disconnected
-        )
+        if not use_server_tool_loop:
+            ollama_stream = ollama_streaming_wrapper(
+                openai_stream,
+                display_name,
+                is_disconnected,
+            )
+        else:
+            ollama_stream = ollama_streaming_wrapper(
+                openai_stream,
+                display_name,
+                is_disconnected,
+                suppress_tool_calls=True,
+                emit_tool_call_events=emit_tool_call_events,
+            )
 
         return StreamingResponse(
             ollama_stream,
@@ -1869,11 +1906,14 @@ async def ollama_chat(
             },
         )
     else:
-        # Non-streaming response with tool loop
+        # Non-streaming response
         openai_request["stream"] = False
-        response = await execute_with_tool_loop(
-            client, openai_request, request=request
-        )
+        if use_server_tool_loop:
+            response = await execute_with_tool_loop(
+                client, openai_request, request=request
+            )
+        else:
+            response = await client.acompletion(request=request, **openai_request)
 
         # Convert to Ollama format
         from rotator_library.ollama_compat.translator import openai_to_ollama_response
@@ -1920,34 +1960,43 @@ class OllamaWebFetchResponse(BaseModel):
 @app.post("/api/web_search")
 async def ollama_web_search(body: OllamaWebSearchRequest):
     """
-    Ollama-compatible web search endpoint powered by Tavily.
+    Ollama-compatible web search endpoint.
+
+    Uses the unified search service with fallback:
+    1. Exa MCP (free, no API key)
+    2. Tavily (if configured)
+    3. Brave (if configured)
 
     This endpoint mimics Ollama's web search API format, allowing
     Raycast and other Ollama clients to use web search functionality.
     """
-    tavily_service = get_tavily_service()
+    search_service = get_search_service()
 
-    if not tavily_service.is_configured:
-        raise HTTPException(
-            status_code=503,
-            detail="Web search is not configured. Set TAVILY_API_KEY in your environment."
-        )
-
-    result = await tavily_service.search(
+    result = await search_service.search(
         query=body.query,
         max_results=body.max_results
     )
 
-    if "error" in result:
+    if "error" in result and not result.get("results") and not result.get("answer"):
         raise HTTPException(status_code=500, detail=result["error"])
 
-    # Transform Tavily results to Ollama format
+    # Transform results to Ollama format
     ollama_results = []
+
+    # If we have structured results, use those
     for item in result.get("results", []):
         ollama_results.append(OllamaWebSearchResult(
             title=item.get("title", "Untitled"),
             url=item.get("url", ""),
             content=item.get("content", "")
+        ))
+
+    # If we have an answer (from Exa), create a result from it
+    if not ollama_results and result.get("answer"):
+        ollama_results.append(OllamaWebSearchResult(
+            title=f"Search Results for: {body.query}",
+            url="",
+            content=result["answer"]
         ))
 
     return OllamaWebSearchResponse(results=ollama_results)
