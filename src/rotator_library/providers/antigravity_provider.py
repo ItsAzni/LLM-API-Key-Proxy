@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1407,7 +1408,7 @@ class AntigravityProvider(
         """
         Sanitize tool name to comply with Antigravity API rules.
 
-        Rules (from ANTIGRAVITY_API_SPEC.md):
+        Rules (from Gemini API error message):
         - First char must be letter (a-z, A-Z) or underscore (_)
         - Allowed chars: a-zA-Z0-9_.:-
         - Max length: 64 characters
@@ -1426,8 +1427,12 @@ class AntigravityProvider(
         # Replace / with _ (most common issue)
         sanitized = sanitized.replace("/", "_")
 
-        # If starts with digit, prepend underscore
-        if sanitized and sanitized[0].isdigit():
+        # Replace any character not in allowed set [a-zA-Z0-9_.:-] with underscore
+        # Gemini allows: letters, digits, underscores, dots, colons, dashes
+        sanitized = re.sub(r"[^a-zA-Z0-9_\.:\-]", "_", sanitized)
+
+        # First char must be letter or underscore (not digit, dot, colon, or dash)
+        if sanitized and not (sanitized[0].isalpha() or sanitized[0] == "_"):
             sanitized = f"_{sanitized}"
 
         # Truncate to 60 chars (leave room for potential suffix)
@@ -2736,7 +2741,10 @@ class AntigravityProvider(
             cached_text = await self._pdf_cache.retrieve_async(cache_key)
             if cached_text:
                 lib_logger.debug(f"[PDF Cache] HIT for {cache_key[:20]}...")
-                return {"type": "text", "text": f"[PDF Content Extracted]\n\n{cached_text}"}
+                return {
+                    "type": "text",
+                    "text": f"[PDF Content Extracted]\n\n{cached_text}",
+                }
 
             lib_logger.debug(f"[PDF Cache] MISS - extracting {cache_key[:20]}...")
 
@@ -2751,7 +2759,10 @@ class AntigravityProvider(
                 lib_logger.info(
                     f"[PDF Preprocess] Extracted and cached {len(extracted_text)} chars"
                 )
-                return {"type": "text", "text": f"[PDF Content Extracted]\n\n{extracted_text}"}
+                return {
+                    "type": "text",
+                    "text": f"[PDF Content Extracted]\n\n{extracted_text}",
+                }
 
             return {
                 "type": "text",
@@ -2953,7 +2964,11 @@ class AntigravityProvider(
 
         # For Gemini models only: convert multimodal content to inlineData format
         # Claude via Antigravity doesn't support PDF/images in tool responses as inlineData
-        if not self._is_claude(model) and isinstance(parsed_content, list) and parsed_content:
+        if (
+            not self._is_claude(model)
+            and isinstance(parsed_content, list)
+            and parsed_content
+        ):
             first_item = parsed_content[0]
             if isinstance(first_item, dict) and "type" in first_item:
                 # This is multimodal content - extract text and media separately
