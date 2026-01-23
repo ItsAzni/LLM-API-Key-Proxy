@@ -347,10 +347,15 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
         # Check if this model uses Responses API
         if self._is_responses_api_model(model):
-            # TODO: Implement Responses API support in Task 5
-            lib_logger.warning(
-                f"Model {model} requires Responses API which is not yet implemented. "
-                "Attempting standard chat completions endpoint."
+            lib_logger.debug(f"Model {model} using Responses API endpoint")
+            return await self._responses_api_completion(
+                client=client,
+                api_base=api_base,
+                headers=headers,
+                model=model,
+                messages=messages,
+                stream=stream,
+                **kwargs,
             )
 
         # Build request payload for Chat Completions API
@@ -630,3 +635,403 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             ],
                         )
                         yield final_chunk
+
+    # =========================================================================
+    # RESPONSES API IMPLEMENTATION
+    # =========================================================================
+
+    def _convert_messages_to_responses_format(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert Chat Completions messages to Responses API input format.
+
+        The Responses API uses a different message structure:
+        - 'system' role becomes 'developer'
+        - Content can be structured with type: 'input_text' or 'input_image'
+        - Previous assistant responses use type: 'message' with 'output_text'
+
+        Args:
+            messages: List of Chat Completions format messages
+
+        Returns:
+            List of Responses API format input items
+        """
+        input_items = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content")
+
+            # Map system role to developer (Responses API convention)
+            if role == "system":
+                role = "developer"
+
+            # Handle assistant messages (previous responses)
+            if role == "assistant":
+                # Convert to Responses API message format
+                if isinstance(content, str):
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": content}],
+                    })
+                elif isinstance(content, list):
+                    # Convert content parts
+                    output_content = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "text":
+                                output_content.append({
+                                    "type": "output_text",
+                                    "text": part.get("text", ""),
+                                })
+                            else:
+                                output_content.append(part)
+                        else:
+                            output_content.append({
+                                "type": "output_text",
+                                "text": str(part),
+                            })
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": output_content,
+                    })
+                continue
+
+            # Handle user/developer messages
+            if isinstance(content, str):
+                # Simple string content
+                input_items.append({
+                    "role": role,
+                    "content": [{"type": "input_text", "text": content}],
+                })
+            elif isinstance(content, list):
+                # Structured content - convert types
+                converted_content = []
+                for part in content:
+                    if isinstance(part, dict):
+                        part_type = part.get("type", "")
+                        if part_type == "text":
+                            converted_content.append({
+                                "type": "input_text",
+                                "text": part.get("text", ""),
+                            })
+                        elif part_type == "image_url":
+                            # Convert image_url to input_image format
+                            image_url = part.get("image_url", {})
+                            url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
+                            converted_content.append({
+                                "type": "input_image",
+                                "image_url": url,
+                            })
+                        else:
+                            # Pass through other types
+                            converted_content.append(part)
+                    else:
+                        converted_content.append({
+                            "type": "input_text",
+                            "text": str(part),
+                        })
+                input_items.append({
+                    "role": role,
+                    "content": converted_content,
+                })
+            else:
+                # Fallback for unexpected content types
+                input_items.append({
+                    "role": role,
+                    "content": [{"type": "input_text", "text": str(content) if content else ""}],
+                })
+
+        return input_items
+
+    async def _responses_api_completion(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        headers: Dict[str, str],
+        model: str,
+        messages: List[Dict[str, Any]],
+        stream: bool,
+        **kwargs,
+    ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
+        """
+        Handle completion request using the Responses API.
+
+        The Responses API is used for GPT-5 and o-series models.
+
+        Args:
+            client: HTTP client instance
+            api_base: API base URL
+            headers: Request headers
+            model: Model name
+            messages: List of messages in Chat Completions format
+            stream: Whether to stream the response
+            **kwargs: Additional parameters
+
+        Returns:
+            ModelResponse or AsyncGenerator for streaming
+        """
+        # Convert messages to Responses API format
+        input_items = self._convert_messages_to_responses_format(messages)
+
+        # Build request payload
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": stream,
+        }
+
+        # Copy over optional parameters with Responses API naming
+        if "max_tokens" in kwargs and kwargs["max_tokens"] is not None:
+            payload["max_output_tokens"] = kwargs["max_tokens"]
+        if "temperature" in kwargs and kwargs["temperature"] is not None:
+            payload["temperature"] = kwargs["temperature"]
+        if "top_p" in kwargs and kwargs["top_p"] is not None:
+            payload["top_p"] = kwargs["top_p"]
+
+        endpoint = f"{api_base}/responses"
+
+        lib_logger.debug(
+            f"Copilot Responses API request to {model}: {json.dumps(payload, default=str)[:500]}..."
+        )
+
+        if stream:
+            return self._stream_responses_api(client, endpoint, headers, payload, model)
+        else:
+            return await self._non_stream_responses_api(
+                client, endpoint, headers, payload, model
+            )
+
+    async def _non_stream_responses_api(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> litellm.ModelResponse:
+        """
+        Handle non-streaming Responses API response.
+
+        Args:
+            client: HTTP client instance
+            endpoint: API endpoint URL
+            headers: Request headers
+            payload: Request payload
+            model: Model name for response
+
+        Returns:
+            litellm.ModelResponse with the completion
+        """
+        response = await client.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.non_streaming(),
+        )
+
+        if response.status_code >= 400:
+            error_text = response.text
+            lib_logger.error(
+                f"Copilot Responses API error {response.status_code}: {error_text[:500]}"
+            )
+            raise httpx.HTTPStatusError(
+                f"Copilot Responses API error: {response.status_code}",
+                request=response.request,
+                response=response,
+            )
+
+        data = response.json()
+
+        # Translate Responses API format to litellm format
+        created = data.get("created_at", int(time.time()))
+        if isinstance(created, str):
+            # Parse ISO timestamp if needed
+            try:
+                from datetime import datetime
+                created = int(datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
+            except (ValueError, TypeError):
+                created = int(time.time())
+
+        response_id = data.get("id", f"resp-{uuid.uuid4().hex[:8]}")
+
+        # Extract output text from the response
+        output_text = data.get("output_text", "")
+
+        # If output_text is not directly available, extract from output array
+        if not output_text and "output" in data:
+            for item in data.get("output", []):
+                if item.get("type") == "message" and item.get("role") == "assistant":
+                    for content_part in item.get("content", []):
+                        if content_part.get("type") == "output_text":
+                            output_text = content_part.get("text", "")
+                            break
+                    if output_text:
+                        break
+
+        # Build choices in Chat Completions format
+        choices = [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": output_text,
+                },
+                "finish_reason": data.get("status", "completed") == "completed" and "stop" or "stop",
+            }
+        ]
+
+        response_obj = litellm.ModelResponse(
+            id=response_id,
+            created=created,
+            model=f"github_copilot/{model}",
+            object="chat.completion",
+            choices=choices,
+        )
+
+        # Add usage if available
+        if "usage" in data:
+            usage = data["usage"]
+            response_obj.usage = litellm.Usage(
+                prompt_tokens=usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+                completion_tokens=usage.get("output_tokens", usage.get("completion_tokens", 0)),
+                total_tokens=usage.get("total_tokens", 0),
+            )
+
+        return response_obj
+
+    async def _stream_responses_api(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Handle streaming Responses API response.
+
+        Parses SSE chunks from the API and yields litellm ModelResponse chunks.
+
+        Args:
+            client: HTTP client instance
+            endpoint: API endpoint URL
+            headers: Request headers
+            payload: Request payload
+            model: Model name for response
+
+        Yields:
+            litellm.ModelResponse chunks
+        """
+        created = int(time.time())
+        response_id = f"resp-{uuid.uuid4().hex[:8]}"
+
+        async with client.stream(
+            "POST",
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.streaming(),
+        ) as response:
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                error_text = error_body.decode("utf-8", errors="ignore")
+                lib_logger.error(
+                    f"Copilot Responses API error {response.status_code}: {error_text[:500]}"
+                )
+                raise httpx.HTTPStatusError(
+                    f"Copilot Responses API error: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+
+                if not line.startswith("data: "):
+                    continue
+
+                data = line[6:].strip()
+                if not data or data == "[DONE]":
+                    continue
+
+                try:
+                    evt = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                # Extract response ID from first event
+                if evt.get("response", {}).get("id"):
+                    response_id = evt["response"]["id"]
+                elif evt.get("id"):
+                    response_id = evt["id"]
+
+                # Handle different event types
+                event_type = evt.get("type", "")
+
+                # Handle content delta events
+                if event_type == "response.output_text.delta":
+                    delta_text = evt.get("delta", "")
+                    if delta_text:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": delta_text,
+                                        "role": "assistant",
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        yield chunk
+
+                # Handle response done event
+                elif event_type == "response.done":
+                    final_chunk = litellm.ModelResponse(
+                        id=response_id,
+                        created=created,
+                        model=f"github_copilot/{model}",
+                        object="chat.completion.chunk",
+                        choices=[
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    )
+                    yield final_chunk
+
+                # Handle content_part delta (alternative format)
+                elif event_type == "response.content_part.delta":
+                    content_part = evt.get("part", {})
+                    if content_part.get("type") == "output_text":
+                        delta_text = content_part.get("text", "")
+                        if delta_text:
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "content": delta_text,
+                                            "role": "assistant",
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            yield chunk

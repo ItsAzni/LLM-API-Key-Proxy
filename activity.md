@@ -3,8 +3,8 @@
 ## Current Status
 
 **Last Updated:** 2026-01-23
-**Tasks Completed:** 4/10
-**Current Task:** Implement streaming support (COMPLETED)
+**Tasks Completed:** 5/10
+**Current Task:** Implement Responses API for GPT-5/o-series (COMPLETED)
 
 ---
 
@@ -143,4 +143,53 @@
 - Task 4 was completed during Task 3 implementation
 - Streaming includes full tool calls accumulation and emission
 - Uses proper SSE parsing with "data: " prefix handling
+
+### 2026-01-23 - Task 5: Implement Responses API for GPT-5/o-series
+
+**Status:** COMPLETED
+
+**Changes Made:**
+- Verified `RESPONSES_API_MODELS` set is already defined (gpt-5.1-codex, gpt-5-mini, gpt-5-nano, o3, o4-mini)
+- Implemented `_convert_messages_to_responses_format()` helper:
+  - Converts Chat Completions format to Responses API input format
+  - Maps `system` role to `developer` (Responses API convention)
+  - Converts `text` content to `input_text` type
+  - Converts `image_url` content to `input_image` type
+  - Converts assistant messages to `type: "message"` with `output_text` content
+- Implemented `_responses_api_completion()` method:
+  - Routes to `/responses` endpoint
+  - Converts messages using `_convert_messages_to_responses_format()`
+  - Maps `max_tokens` to `max_output_tokens` (Responses API naming)
+  - Supports both streaming and non-streaming
+- Implemented `_non_stream_responses_api()`:
+  - Parses Responses API response format
+  - Extracts `output_text` from response
+  - Handles ISO timestamp parsing for `created_at`
+  - Maps `input_tokens`/`output_tokens` to `prompt_tokens`/`completion_tokens`
+- Implemented `_stream_responses_api()` async generator:
+  - Parses SSE events from Responses API
+  - Handles `response.output_text.delta` events for content
+  - Handles `response.done` events for completion
+  - Handles `response.content_part.delta` events (alternative format)
+- Updated `acompletion()` routing:
+  - Now routes to `_responses_api_completion()` for RESPONSES_API_MODELS
+  - Removed warning/fallback to chat completions
+
+**Files Modified:**
+- `src/rotator_library/providers/github_copilot_provider.py` (MODIFIED)
+
+**Verification:**
+- Syntax check passed (`python -m py_compile`)
+- Import test passed
+- Class instantiation verified
+- `_is_responses_api_model()` correctly identifies GPT-5 and o-series models
+- All Responses API methods are accessible
+
+**Notes:**
+- Responses API uses different message format than Chat Completions
+- `system` role → `developer` role
+- `text` type → `input_text` type for input
+- `text` type → `output_text` type for output
+- `/responses` endpoint instead of `/chat/completions`
+- Based on OpenAI Responses API documentation
 

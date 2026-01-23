@@ -71,7 +71,7 @@ Implement GitHub Copilot as a provider for LLM-API-Key-Proxy following the offic
       "Route /responses endpoint for qualifying models",
       "Handle different response format"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
