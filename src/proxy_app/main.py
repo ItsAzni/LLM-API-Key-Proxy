@@ -983,6 +983,14 @@ async def chat_completions(
         logging.getLogger("rotator_library").debug(
             f"Handling reasoning parameters: model={model}, reasoning_effort={reasoning_effort}"
         )
+        if (
+            model
+            and model.startswith("github_copilot/")
+            and reasoning_effort is not None
+        ):
+            logging.getLogger("rotator_library").info(
+                f"Copilot reasoning_effort={reasoning_effort}"
+            )
 
         # Log basic request info to console (this is a separate, simpler logger).
         log_request_to_console(
@@ -996,7 +1004,11 @@ async def chat_completions(
 
         # Web search tool injection (enabled via ENABLE_WEB_SEARCH_TOOL env var)
         # When enabled, injects a web_search tool that models can call for real-time info
-        enable_web_search = os.getenv("ENABLE_WEB_SEARCH_TOOL", "false").lower() in ("true", "1", "yes")
+        enable_web_search = os.getenv("ENABLE_WEB_SEARCH_TOOL", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
         use_tool_loop = False
 
         if enable_web_search:
@@ -1695,7 +1707,10 @@ async def _get_ollama_model_registry(
     global _ollama_model_registry, _ollama_model_registry_updated
 
     now = time.time()
-    if _ollama_model_registry and (now - _ollama_model_registry_updated) < _OLLAMA_REGISTRY_TTL:
+    if (
+        _ollama_model_registry
+        and (now - _ollama_model_registry_updated) < _OLLAMA_REGISTRY_TTL
+    ):
         return _ollama_model_registry
 
     # Refresh the registry
@@ -1894,7 +1909,11 @@ async def ollama_chat(
             request.client.host if request.client else "unknown",
             request.client.port if request.client else 0,
         ),
-        request_data={"model": model_id, "ollama_model": body.model, "stream": body.stream},
+        request_data={
+            "model": model_id,
+            "ollama_model": body.model,
+            "stream": body.stream,
+        },
     )
 
     # NOTE: emit_tool_call_events=True causes clients like Raycast to interpret
@@ -1971,12 +1990,14 @@ async def ollama_chat(
 # --- Ollama Web Search API Endpoints (Tavily-powered) ---
 class OllamaWebSearchRequest(BaseModel):
     """Request model for Ollama-compatible web search."""
+
     query: str
     max_results: Optional[int] = 5
 
 
 class OllamaWebSearchResult(BaseModel):
     """Individual search result."""
+
     title: str
     url: str
     content: str
@@ -1984,16 +2005,19 @@ class OllamaWebSearchResult(BaseModel):
 
 class OllamaWebSearchResponse(BaseModel):
     """Response model for Ollama-compatible web search."""
+
     results: List[OllamaWebSearchResult]
 
 
 class OllamaWebFetchRequest(BaseModel):
     """Request model for Ollama-compatible web fetch."""
+
     url: str
 
 
 class OllamaWebFetchResponse(BaseModel):
     """Response model for Ollama-compatible web fetch."""
+
     title: str
     content: str
     links: List[str]
@@ -2014,10 +2038,7 @@ async def ollama_web_search(body: OllamaWebSearchRequest):
     """
     search_service = get_search_service()
 
-    result = await search_service.search(
-        query=body.query,
-        max_results=body.max_results
-    )
+    result = await search_service.search(query=body.query, max_results=body.max_results)
 
     if "error" in result and not result.get("results") and not result.get("answer"):
         raise HTTPException(status_code=500, detail=result["error"])
@@ -2027,19 +2048,23 @@ async def ollama_web_search(body: OllamaWebSearchRequest):
 
     # If we have structured results, use those
     for item in result.get("results", []):
-        ollama_results.append(OllamaWebSearchResult(
-            title=item.get("title", "Untitled"),
-            url=item.get("url", ""),
-            content=item.get("content", "")
-        ))
+        ollama_results.append(
+            OllamaWebSearchResult(
+                title=item.get("title", "Untitled"),
+                url=item.get("url", ""),
+                content=item.get("content", ""),
+            )
+        )
 
     # If we have an answer (from Exa), create a result from it
     if not ollama_results and result.get("answer"):
-        ollama_results.append(OllamaWebSearchResult(
-            title=f"Search Results for: {body.query}",
-            url="",
-            content=result["answer"]
-        ))
+        ollama_results.append(
+            OllamaWebSearchResult(
+                title=f"Search Results for: {body.query}",
+                url="",
+                content=result["answer"],
+            )
+        )
 
     return OllamaWebSearchResponse(results=ollama_results)
 
@@ -2057,6 +2082,7 @@ async def ollama_web_fetch(body: OllamaWebFetchRequest):
 
     class SimpleHTMLParser(HTMLParser):
         """Simple HTML parser to extract title and links."""
+
         def __init__(self):
             super().__init__()
             self.title = ""
@@ -2112,7 +2138,7 @@ async def ollama_web_fetch(body: OllamaWebFetchRequest):
         return OllamaWebFetchResponse(
             title=parser.title.strip() or "Untitled",
             content=content,
-            links=parser.links[:50]  # Limit to 50 links
+            links=parser.links[:50],  # Limit to 50 links
         )
 
     except httpx.HTTPError as e:
