@@ -3,8 +3,8 @@
 ## Current Status
 
 **Last Updated:** 2026-01-23
-**Tasks Completed:** 5/10
-**Current Task:** Implement Responses API for GPT-5/o-series (COMPLETED)
+**Tasks Completed:** 6/10
+**Current Task:** Integrate with provider factory (COMPLETED)
 
 ---
 
@@ -192,4 +192,33 @@
 - `text` type → `output_text` type for output
 - `/responses` endpoint instead of `/chat/completions`
 - Based on OpenAI Responses API documentation
+
+### 2026-01-23 - Task 6: Integrate with provider factory
+
+**Status:** COMPLETED
+
+**Changes Made:**
+- Added `GitHubCopilotAuthBase` import to `src/rotator_library/provider_factory.py`
+- Added `"github_copilot": GitHubCopilotAuthBase` to `PROVIDER_MAP`
+- Added `"github_copilot": "GitHub Copilot"` to `OAUTH_FRIENDLY_NAMES` in `credential_tool.py`
+- Added `"github_copilot"` to both `oauth_providers` lists in `credential_tool.py`:
+  - Line 290: `_get_oauth_credentials_summary()` function
+  - Line 2334: `_combine_all_credentials()` function
+
+**Files Modified:**
+- `src/rotator_library/provider_factory.py` (MODIFIED)
+- `src/rotator_library/credential_tool.py` (MODIFIED)
+
+**Verification:**
+- Syntax check passed for both files (`python -m py_compile`)
+- Provider factory imports correctly
+- `github_copilot` appears in `get_available_providers()` output
+- `GitHubCopilotAuthBase` can be instantiated via `get_provider_auth_class('github_copilot')`
+- `GitHubCopilotProvider` auto-discovered in `PROVIDER_PLUGINS`
+- Provider `has_custom_logic()` returns True
+
+**Notes:**
+- Provider factory integration enables credential tool to manage GitHub Copilot OAuth credentials
+- Auto-discovery via `PROVIDER_PLUGINS` allows the proxy to use the full provider class
+- Credential tool will now list GitHub Copilot as an available OAuth provider option
 

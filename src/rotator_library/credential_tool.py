@@ -66,6 +66,7 @@ OAUTH_FRIENDLY_NAMES = {
     "iflow": "iFlow",
     "antigravity": "Antigravity",
     "codex": "OpenAI Codex",
+    "github_copilot": "GitHub Copilot",
 }
 
 
@@ -286,7 +287,7 @@ def _get_oauth_credentials_summary() -> dict:
         Example: {"gemini_cli": [{"email": "user@example.com", "tier": "free-tier", ...}, ...]}
     """
     provider_factory, _ = _ensure_providers_loaded()
-    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity"]
+    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "github_copilot"]
     oauth_summary = {}
 
     for provider_name in oauth_providers:
@@ -2330,7 +2331,7 @@ async def combine_all_credentials():
     clear_screen("Combine All Credentials")
 
     # List of providers that support OAuth credentials
-    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity"]
+    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "github_copilot"]
 
     provider_factory, _ = _ensure_providers_loaded()
 
