@@ -538,22 +538,70 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             return True
         return False
 
+    # Responses API alternate input types that indicate agent-initiated requests
+    # Based on opencode copilot-auth plugin
+    RESPONSES_API_AGENT_TYPES = {
+        "file_search_call",
+        "computer_call",
+        "computer_call_output",
+        "web_search_call",
+        "function_call",
+        "function_call_output",
+        "image_generation_call",
+        "code_interpreter_call",
+        "local_shell_call",
+        "local_shell_call_output",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+        "mcp_call",
+        "reasoning",
+    }
+
     def _detect_agent_initiated(self, messages: List[Dict[str, Any]]) -> bool:
         """
         Detect if the conversation is agent-initiated.
 
-        A conversation is agent-initiated if the last message is not from a user.
+        Based on opencode's copilot-force-agent-header plugin:
+        - Returns True if ANY message has role "assistant" or "tool"
+        - Also checks for Responses API alternate input types
+
+        This enables better agentic behavior from GitHub Copilot models.
 
         Args:
             messages: List of message dictionaries
 
         Returns:
-            True if the last message is not from a user
+            True if conversation contains assistant/tool messages
         """
+        import os
+
+        # Force agent mode via environment variable
+        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() in ("true", "1", "yes")
+        if force_agent:
+            return True
+
         if not messages:
             return False
-        last_msg = messages[-1]
-        return last_msg.get("role") != "user"
+
+        # Check Chat Completions format: any message with assistant/tool role
+        for msg in messages:
+            role = msg.get("role", "")
+            if role in ("assistant", "tool"):
+                return True
+
+        # Check Responses API format: last input with agent type
+        # (messages might be in Responses API input format already)
+        if messages:
+            last_msg = messages[-1]
+            msg_type = last_msg.get("type", "")
+            if msg_type in self.RESPONSES_API_AGENT_TYPES:
+                return True
+            # Also check if last message role is assistant
+            if last_msg.get("role") == "assistant":
+                return True
+
+        return False
 
     async def _build_copilot_headers(
         self,
