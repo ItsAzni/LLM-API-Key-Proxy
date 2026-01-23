@@ -49,7 +49,7 @@ Implement GitHub Copilot as a provider for LLM-API-Key-Proxy following the offic
       "Route to /chat/completions endpoint",
       "Handle response translation to litellm format"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

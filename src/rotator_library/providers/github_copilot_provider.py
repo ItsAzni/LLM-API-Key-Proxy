@@ -21,10 +21,16 @@ API Endpoints:
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import List
+import time
+import uuid
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import httpx
+import litellm
+
+from ..timeout_config import TimeoutConfig
 
 from .provider_interface import ProviderInterface
 from .github_copilot_auth_base import GitHubCopilotAuthBase
@@ -210,3 +216,417 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Strip provider prefix if present
         clean_model = model.split("/")[-1] if "/" in model else model
         return clean_model in RESPONSES_API_MODELS
+
+    # =========================================================================
+    # CHAT COMPLETIONS HELPERS
+    # =========================================================================
+
+    def _detect_vision_content(self, messages: List[Dict[str, Any]]) -> bool:
+        """
+        Detect if messages contain vision/image content.
+
+        Checks both Chat Completions format (image_url) and Responses API
+        format (input_image) for multimodal content.
+
+        Args:
+            messages: List of message dictionaries
+
+        Returns:
+            True if any message contains image content
+        """
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        # Chat Completions format
+                        if part.get("type") == "image_url":
+                            return True
+                        # Responses API format
+                        if part.get("type") == "input_image":
+                            return True
+        return False
+
+    def _detect_agent_initiated(self, messages: List[Dict[str, Any]]) -> bool:
+        """
+        Detect if the conversation is agent-initiated.
+
+        A conversation is agent-initiated if the last message is not from a user.
+
+        Args:
+            messages: List of message dictionaries
+
+        Returns:
+            True if the last message is not from a user
+        """
+        if not messages:
+            return False
+        last_msg = messages[-1]
+        return last_msg.get("role") != "user"
+
+    async def _build_copilot_headers(
+        self,
+        credential_path: str,
+        is_vision: bool = False,
+        is_agent: bool = False,
+    ) -> Dict[str, str]:
+        """
+        Build headers for GitHub Copilot API requests.
+
+        Args:
+            credential_path: Path to the credential file
+            is_vision: True if request contains vision content
+            is_agent: True if request is agent-initiated
+
+        Returns:
+            Dictionary of headers for the API request
+        """
+        auth_header = await self.get_auth_header(credential_path)
+
+        headers = {
+            **auth_header,
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+            "Openai-Intent": "conversation-edits",
+            "x-initiator": "agent" if is_agent else "user",
+        }
+
+        if is_vision:
+            headers["Copilot-Vision-Request"] = "true"
+
+        return headers
+
+    # =========================================================================
+    # ACOMPLETION IMPLEMENTATION
+    # =========================================================================
+
+    async def acompletion(
+        self, client: httpx.AsyncClient, **kwargs
+    ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
+        """
+        Handle chat completion request for GitHub Copilot.
+
+        Routes to the appropriate endpoint based on model:
+        - Standard models: /chat/completions
+        - GPT-5/o-series: /responses (Responses API) - NOT YET IMPLEMENTED
+
+        Args:
+            client: HTTP client instance
+            **kwargs: Completion parameters including:
+                - model: Model name
+                - messages: List of messages
+                - stream: Whether to stream the response
+                - credential_identifier: Path to credential file
+
+        Returns:
+            ModelResponse or AsyncGenerator for streaming
+        """
+        # Extract parameters
+        model = kwargs.get("model", "gpt-4o")
+        messages = kwargs.get("messages", [])
+        stream = kwargs.get("stream", False)
+        credential_path = kwargs.pop(
+            "credential_identifier", kwargs.get("credential_path", "")
+        )
+
+        # Normalize model name (strip provider prefix)
+        if "/" in model:
+            model = model.split("/", 1)[1]
+
+        # Detect content types
+        is_vision = self._detect_vision_content(messages)
+        is_agent = self._detect_agent_initiated(messages)
+
+        # Get API base URL
+        api_base = self._get_api_base(credential_path)
+
+        # Build headers
+        headers = await self._build_copilot_headers(
+            credential_path, is_vision=is_vision, is_agent=is_agent
+        )
+
+        # Check if this model uses Responses API
+        if self._is_responses_api_model(model):
+            # TODO: Implement Responses API support in Task 5
+            lib_logger.warning(
+                f"Model {model} requires Responses API which is not yet implemented. "
+                "Attempting standard chat completions endpoint."
+            )
+
+        # Build request payload for Chat Completions API
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+        }
+
+        # Copy over optional parameters
+        optional_params = [
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+        ]
+        for param in optional_params:
+            if param in kwargs and kwargs[param] is not None:
+                payload[param] = kwargs[param]
+
+        endpoint = f"{api_base}/chat/completions"
+
+        lib_logger.debug(
+            f"Copilot request to {model}: {json.dumps(payload, default=str)[:500]}..."
+        )
+
+        if stream:
+            return self._stream_chat_response(
+                client, endpoint, headers, payload, model
+            )
+        else:
+            return await self._non_stream_chat_response(
+                client, endpoint, headers, payload, model
+            )
+
+    async def _non_stream_chat_response(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> litellm.ModelResponse:
+        """
+        Handle non-streaming chat completion response.
+
+        Args:
+            client: HTTP client instance
+            endpoint: API endpoint URL
+            headers: Request headers
+            payload: Request payload
+            model: Model name for response
+
+        Returns:
+            litellm.ModelResponse with the completion
+        """
+        response = await client.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.non_streaming(),
+        )
+
+        if response.status_code >= 400:
+            error_text = response.text
+            lib_logger.error(
+                f"Copilot API error {response.status_code}: {error_text[:500]}"
+            )
+            raise httpx.HTTPStatusError(
+                f"Copilot API error: {response.status_code}",
+                request=response.request,
+                response=response,
+            )
+
+        data = response.json()
+
+        # Translate to litellm format
+        created = data.get("created", int(time.time()))
+        response_id = data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}")
+
+        choices = []
+        for choice in data.get("choices", []):
+            message = choice.get("message", {})
+            choices.append(
+                {
+                    "index": choice.get("index", 0),
+                    "message": {
+                        "role": message.get("role", "assistant"),
+                        "content": message.get("content"),
+                    },
+                    "finish_reason": choice.get("finish_reason", "stop"),
+                }
+            )
+
+        # Handle tool calls if present
+        for i, choice in enumerate(data.get("choices", [])):
+            message = choice.get("message", {})
+            if "tool_calls" in message:
+                choices[i]["message"]["tool_calls"] = message["tool_calls"]
+
+        response_obj = litellm.ModelResponse(
+            id=response_id,
+            created=created,
+            model=f"github_copilot/{model}",
+            object="chat.completion",
+            choices=choices,
+        )
+
+        # Add usage if available
+        if "usage" in data:
+            usage = data["usage"]
+            response_obj.usage = litellm.Usage(
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+            )
+
+        return response_obj
+
+    async def _stream_chat_response(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Handle streaming chat completion response.
+
+        Parses SSE chunks from the API and yields litellm ModelResponse chunks.
+
+        Args:
+            client: HTTP client instance
+            endpoint: API endpoint URL
+            headers: Request headers
+            payload: Request payload
+            model: Model name for response
+
+        Yields:
+            litellm.ModelResponse chunks
+        """
+        created = int(time.time())
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+
+        # Track tool calls state
+        current_tool_calls: Dict[int, Dict[str, Any]] = {}
+
+        async with client.stream(
+            "POST",
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.streaming(),
+        ) as response:
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                error_text = error_body.decode("utf-8", errors="ignore")
+                lib_logger.error(
+                    f"Copilot API error {response.status_code}: {error_text[:500]}"
+                )
+                raise httpx.HTTPStatusError(
+                    f"Copilot API error: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+
+                if not line.startswith("data: "):
+                    continue
+
+                data = line[6:].strip()
+                if not data or data == "[DONE]":
+                    continue
+
+                try:
+                    evt = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                # Extract response ID from first chunk
+                if evt.get("id"):
+                    response_id = evt["id"]
+
+                # Process choices
+                for choice in evt.get("choices", []):
+                    index = choice.get("index", 0)
+                    delta = choice.get("delta", {})
+                    finish_reason = choice.get("finish_reason")
+
+                    # Handle content delta
+                    if "content" in delta:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": index,
+                                    "delta": {
+                                        "content": delta["content"],
+                                        "role": delta.get("role", "assistant"),
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        yield chunk
+
+                    # Handle tool calls delta
+                    if "tool_calls" in delta:
+                        for tc in delta["tool_calls"]:
+                            tc_index = tc.get("index", 0)
+
+                            if tc_index not in current_tool_calls:
+                                current_tool_calls[tc_index] = {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+
+                            # Accumulate function data
+                            if "id" in tc and tc["id"]:
+                                current_tool_calls[tc_index]["id"] = tc["id"]
+                            if "function" in tc:
+                                func = tc["function"]
+                                if "name" in func:
+                                    current_tool_calls[tc_index]["function"][
+                                        "name"
+                                    ] += func["name"]
+                                if "arguments" in func:
+                                    current_tool_calls[tc_index]["function"][
+                                        "arguments"
+                                    ] += func["arguments"]
+
+                    # Handle finish
+                    if finish_reason:
+                        # Send accumulated tool calls if any
+                        if current_tool_calls and finish_reason == "tool_calls":
+                            tool_calls_list = [
+                                current_tool_calls[i]
+                                for i in sorted(current_tool_calls.keys())
+                            ]
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": index,
+                                        "delta": {"tool_calls": tool_calls_list},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            yield chunk
+
+                        # Final chunk
+                        final_chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": index,
+                                    "delta": {},
+                                    "finish_reason": finish_reason,
+                                }
+                            ],
+                        )
+                        yield final_chunk

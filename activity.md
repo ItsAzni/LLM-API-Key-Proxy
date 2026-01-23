@@ -3,8 +3,8 @@
 ## Current Status
 
 **Last Updated:** 2026-01-23
-**Tasks Completed:** 2/10
-**Current Task:** Create GitHub Copilot Provider class (COMPLETED)
+**Tasks Completed:** 3/10
+**Current Task:** Implement chat completions endpoint (COMPLETED)
 
 ---
 
@@ -76,4 +76,45 @@
 - Uses hardcoded model list (dynamic discovery can be added later)
 - Enterprise support via different API base URL
 - Responses API models (GPT-5, o-series) will use `/responses` endpoint
+
+### 2026-01-23 - Task 3: Implement chat completions endpoint
+
+**Status:** COMPLETED
+
+**Changes Made:**
+- Implemented `_detect_vision_content()` helper to detect image content in messages
+- Implemented `_detect_agent_initiated()` helper to detect agent-initiated conversations
+- Implemented `_build_copilot_headers()` async helper to build API headers with:
+  - Authorization from `get_auth_header()`
+  - User-Agent, Openai-Intent headers
+  - x-initiator header (user/agent)
+  - Copilot-Vision-Request header for vision content
+- Implemented `acompletion()` method that:
+  - Extracts parameters from kwargs
+  - Detects vision and agent-initiated content
+  - Routes to /chat/completions endpoint
+  - Handles optional parameters (temperature, top_p, max_tokens, etc.)
+- Implemented `_non_stream_chat_response()` for non-streaming responses:
+  - Makes POST request to endpoint
+  - Translates response to litellm.ModelResponse format
+  - Handles usage statistics and tool calls
+- Implemented `_stream_chat_response()` async generator for streaming:
+  - Parses SSE chunks from API
+  - Yields litellm.ModelResponse chunks
+  - Accumulates tool calls across chunks
+  - Handles finish_reason properly
+
+**Files Modified:**
+- `src/rotator_library/providers/github_copilot_provider.py` (MODIFIED)
+
+**Verification:**
+- Syntax check passed (`python -m py_compile`)
+- Import test passed
+- Class instantiation verified with `has_custom_logic()` returning True
+
+**Notes:**
+- Both streaming and non-streaming are implemented
+- Tool calls support included in streaming
+- Responses API models (GPT-5, o-series) will show a warning and fall back to chat completions for now (Task 5)
+- Based on copilot.ts reference implementation patterns
 
