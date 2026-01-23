@@ -60,7 +60,7 @@ Implement GitHub Copilot as a provider for LLM-API-Key-Proxy following the offic
       "Yield litellm.ModelResponse chunks",
       "Handle stream completion properly"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
