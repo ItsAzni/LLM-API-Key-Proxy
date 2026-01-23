@@ -176,8 +176,14 @@ async def _streaming_tool_loop(
 
         stream = client.acompletion(request=request, **current_request, **kwargs)
 
+        done_chunk = None
+
         # Stream chunks in real-time while accumulating for tool detection
         async for chunk in stream:
+            if chunk.strip() == "data: [DONE]":
+                done_chunk = chunk
+                continue
+
             sanitized_chunk = _strip_tool_call_finish_reason(chunk)
             yield sanitized_chunk  # Stream immediately to client!
             _accumulate_chunk(accumulated_response, chunk)
@@ -187,6 +193,8 @@ async def _streaming_tool_loop(
 
         if not tool_calls:
             # No tool calls - we're done (chunks already streamed)
+            if done_chunk:
+                yield done_chunk
             return
 
         if not search_service.is_configured:
