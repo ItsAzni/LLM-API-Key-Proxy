@@ -784,6 +784,8 @@ async def streaming_response_wrapper(
             # --- Aggregation Logic ---
             final_message = {"role": "assistant"}
             aggregated_tool_calls = {}
+            tool_call_id_map = {}
+            next_tool_call_index = 0
             usage_data = None
             finish_reason = None
 
@@ -805,7 +807,20 @@ async def streaming_response_wrapper(
 
                         elif key == "tool_calls":
                             for tc_chunk in value:
-                                index = tc_chunk["index"]
+                                index = tc_chunk.get("index")
+                                if index is None:
+                                    call_id = tc_chunk.get("id")
+                                    if call_id in tool_call_id_map:
+                                        index = tool_call_id_map[call_id]
+                                    else:
+                                        index = next_tool_call_index
+                                        next_tool_call_index += 1
+                                        if call_id:
+                                            tool_call_id_map[call_id] = index
+                                else:
+                                    call_id = tc_chunk.get("id")
+                                    if call_id and call_id not in tool_call_id_map:
+                                        tool_call_id_map[call_id] = index
                                 if index not in aggregated_tool_calls:
                                     aggregated_tool_calls[index] = {
                                         "type": "function",
