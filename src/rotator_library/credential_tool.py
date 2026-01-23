@@ -1736,6 +1736,7 @@ async def setup_new_credential(provider_name: str):
             "qwen_code": "Qwen Code (OAuth - also supports API keys)",
             "iflow": "iFlow (OAuth - also supports API keys)",
             "antigravity": "Antigravity (OAuth)",
+            "github_copilot": "GitHub Copilot (OAuth)",
         }
         display_name = oauth_friendly_names.get(
             provider_name, provider_name.replace("_", " ").title()

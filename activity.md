@@ -3,8 +3,8 @@
 ## Current Status
 
 **Last Updated:** 2026-01-23
-**Tasks Completed:** 6/10
-**Current Task:** Integrate with provider factory (COMPLETED)
+**Tasks Completed:** 7/10
+**Current Task:** Integrate with credential tool (COMPLETED)
 
 ---
 
@@ -221,4 +221,38 @@
 - Provider factory integration enables credential tool to manage GitHub Copilot OAuth credentials
 - Auto-discovery via `PROVIDER_PLUGINS` allows the proxy to use the full provider class
 - Credential tool will now list GitHub Copilot as an available OAuth provider option
+
+### 2026-01-23 - Task 7: Integrate with credential tool
+
+**Status:** COMPLETED
+
+**Changes Made:**
+- Verified `github_copilot` is in `OAUTH_FRIENDLY_NAMES` (already added in Task 6)
+- Verified `github_copilot` is in `oauth_providers` lists (already added in Task 6)
+- Added `github_copilot` to local `oauth_friendly_names` dict in `setup_new_credential()` function (line 1739)
+  - Display name: "GitHub Copilot (OAuth)"
+- Tested credential setup flow integration:
+  - `get_provider_auth_class('github_copilot')` returns `GitHubCopilotAuthBase`
+  - Auth class instantiation works
+  - `setup_credential()` method is accessible
+  - `list_credentials()` method is accessible
+  - OAuth summary includes `github_copilot`
+
+**Files Modified:**
+- `src/rotator_library/credential_tool.py` (MODIFIED - added friendly name)
+
+**Verification:**
+- Syntax check passed (`python -m py_compile`)
+- All integration tests passed:
+  - Provider available in `get_available_providers()`
+  - Auth class retrievable via `get_provider_auth_class()`
+  - Auth class instantiable
+  - `setup_credential()` and `list_credentials()` methods exist
+  - `github_copilot` included in OAuth credentials summary
+
+**Notes:**
+- Most of Task 7 was already completed during Task 6
+- Added the friendly display name for consistent UX
+- Credential setup flow is now fully integrated
+- Ready for manual testing with actual GitHub OAuth flow
 

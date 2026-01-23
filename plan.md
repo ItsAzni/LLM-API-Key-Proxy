@@ -90,7 +90,7 @@ Implement GitHub Copilot as a provider for LLM-API-Key-Proxy following the offic
       "Add github_copilot to oauth_providers list",
       "Test credential setup flow"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "testing",
