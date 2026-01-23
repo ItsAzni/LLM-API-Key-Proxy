@@ -1060,6 +1060,33 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         "role": "assistant",
                         "content": output_content,
                     })
+                tool_calls = msg.get("tool_calls") or []
+                for tool_call in tool_calls:
+                    if tool_call.get("type") != "function":
+                        continue
+                    function = tool_call.get("function", {})
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tool_call.get("id", ""),
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments", ""),
+                    })
+                continue
+
+            # Handle tool messages (function outputs)
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id", "")
+                if isinstance(content, str):
+                    output = content
+                elif content is None:
+                    output = ""
+                else:
+                    output = json.dumps(content)
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": output,
+                })
                 continue
 
             # Handle user/developer messages
@@ -1377,8 +1404,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         )
                         yield chunk
 
-                # Handle response done event
-                elif event_type == "response.done":
+                # Handle response completion events
+                elif event_type in ("response.done", "response.completed"):
                     final_chunk = litellm.ModelResponse(
                         id=response_id,
                         created=created,
@@ -1393,6 +1420,45 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         ],
                     )
                     yield final_chunk
+                    break  # Exit stream loop - response is complete
+
+                elif event_type == "response.output_item.done":
+                    item = evt.get("item", {})
+                    item_type = item.get("type")
+                    if item_type in ("function_call", "tool_call"):
+                        call_id = item.get("call_id") or item.get("id")
+                        call_index = item.get("index", 0)
+                        name = item.get("name") or item.get("function", {}).get("name")
+                        arguments = item.get("arguments") or item.get("function", {}).get("arguments", "")
+                        if name:
+                            tool_call = {
+                                "index": call_index,
+                                "id": call_id or f"call_{uuid.uuid4().hex[:8]}",
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": arguments or "",
+                                },
+                            }
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {"tool_calls": [tool_call]},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            yield chunk
+                    continue
+
+                # Skip events that contain complete text already streamed via deltas
+                elif event_type in ("response.output_text.done", "response.content_part.done"):
+                    continue
 
                 # Handle content_part delta (alternative format)
                 elif event_type == "response.content_part.delta":

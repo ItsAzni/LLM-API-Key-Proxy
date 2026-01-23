@@ -970,7 +970,16 @@ class RotatingClient:
                             and usage.get("completion_tokens", 0) > 0
                         )
 
-                        if has_completion_tokens:
+                        # Check if provider already set a terminal finish_reason
+                        provider_finish_reason = choice.get("finish_reason")
+                        is_terminal_finish = provider_finish_reason in (
+                            "stop",
+                            "tool_calls",
+                            "length",
+                            "content_filter",
+                        )
+
+                        if has_completion_tokens or is_terminal_finish:
                             # FINAL CHUNK: Determine correct finish_reason
                             if has_tool_calls:
                                 # Tool calls always win
@@ -978,6 +987,9 @@ class RotatingClient:
                             elif accumulated_finish_reason:
                                 # Use accumulated reason (length, content_filter, etc.)
                                 choice["finish_reason"] = accumulated_finish_reason
+                            elif is_terminal_finish:
+                                # Preserve provider's terminal finish_reason
+                                choice["finish_reason"] = provider_finish_reason
                             else:
                                 # Default to stop
                                 choice["finish_reason"] = "stop"
