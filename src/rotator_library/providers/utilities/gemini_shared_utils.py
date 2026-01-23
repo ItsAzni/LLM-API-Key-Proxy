@@ -15,7 +15,8 @@ import copy
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -90,6 +91,89 @@ GEMINI3_TOOL_RENAMES: Dict[str, str] = {
 GEMINI3_TOOL_RENAMES_REVERSE: Dict[str, str] = {
     v: k for k, v in GEMINI3_TOOL_RENAMES.items()
 }
+
+
+# =============================================================================
+# TOOL NAME SANITIZATION
+# =============================================================================
+
+
+def sanitize_gemini_tool_name(
+    name: str, name_mapping: Dict[str, str], max_length: int = 52
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Sanitize tool name to comply with Gemini API rules.
+
+    Rules (from Gemini API error message):
+    - First char must be letter (a-z, A-Z) or underscore (_)
+    - Allowed chars: a-zA-Z0-9_.:-
+    - Max length: 64 characters
+    - Slashes (/) not allowed
+
+    Args:
+        name: Original tool name
+        name_mapping: Mutable dict to track original->sanitized mappings
+        max_length: Max length for sanitized name (default 52 to leave room for
+                    8-char "gemini3_" prefix + 4-char collision suffix "_99")
+
+    Returns:
+        Tuple of (sanitized_name, updated_name_mapping)
+
+    Handles collisions by appending numeric suffix (_2, _3, etc.)
+    """
+    if not name:
+        return name, name_mapping
+
+    original = name
+    sanitized = name
+
+    # Replace / with _ (most common issue)
+    sanitized = sanitized.replace("/", "_")
+
+    # Replace any character not in allowed set [a-zA-Z0-9_.:-] with underscore
+    # Gemini allows: letters, digits, underscores, dots, colons, dashes
+    sanitized = re.sub(r"[^a-zA-Z0-9_\.:\-]", "_", sanitized)
+
+    # First char must be letter or underscore (not digit, dot, colon, or dash)
+    if sanitized and not (sanitized[0].isalpha() or sanitized[0] == "_"):
+        sanitized = f"_{sanitized}"
+
+    # Truncate to max_length (default 52 to leave room for prefix + suffix)
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length]
+
+    # Handle collisions - check if this sanitized name already maps to a DIFFERENT original
+    base_sanitized = sanitized
+    suffix = 2
+    existing_values = set(name_mapping.values())
+    while (
+        sanitized in name_mapping and name_mapping[sanitized] != original
+    ) or (sanitized in existing_values and original not in existing_values):
+        # Check if sanitized name is already used for a different original
+        if sanitized in name_mapping:
+            if name_mapping[sanitized] == original:
+                break  # Same original, no collision
+        sanitized = f"{base_sanitized}_{suffix}"
+        suffix += 1
+        if suffix > 100:  # Safety limit
+            lib_logger.error(f"[Tool Name] Too many collisions for '{original}'")
+            break
+
+    # Final truncate to 64 chars (absolute max for Gemini API)
+    if len(sanitized) > 64:
+        sanitized = sanitized[:64]
+
+    # Store mapping for restoration (only if changed)
+    if sanitized != original:
+        name_mapping[sanitized] = original
+        lib_logger.debug(f"[Tool Name] Sanitized: '{original}' → '{sanitized}'")
+
+    return sanitized, name_mapping
+
+
+def restore_gemini_tool_name(sanitized_name: str, name_mapping: Dict[str, str]) -> str:
+    """Restore original tool name from sanitized version."""
+    return name_mapping.get(sanitized_name, sanitized_name)
 
 # Gemini finish reason mapping to OpenAI format
 FINISH_REASON_MAP: Dict[str, str] = {

@@ -19,6 +19,8 @@ from .utilities.gemini_shared_utils import (
     env_int,
     inline_schema_refs,
     recursively_parse_json_strings,
+    sanitize_gemini_tool_name,
+    restore_gemini_tool_name,
     GEMINI3_TOOL_RENAMES,
     GEMINI3_TOOL_RENAMES_REVERSE,
     FINISH_REASON_MAP,
@@ -412,6 +414,9 @@ class GeminiCliProvider(
         # Quota tracking instance variables (required by GeminiCliQuotaTracker mixin)
         self._learned_costs: Dict[str, Dict[str, float]] = {}
         self._learned_costs_loaded: bool = False
+
+        # Tool name sanitization mapping (sanitized -> original)
+        self._tool_name_mapping: Dict[str, str] = {}
 
 
     # =========================================================================
@@ -979,6 +984,11 @@ class GeminiCliProvider(
                 if is_gemini_3 and self._enable_gemini3_tool_fix:
                     function_name = self._strip_gemini3_prefix(function_name)
 
+                # Restore original tool name from sanitized version
+                function_name = restore_gemini_tool_name(
+                    function_name, self._tool_name_mapping
+                )
+
                 # Use provided ID or generate unique one with nanosecond precision
                 tool_call_id = (
                     function_call.get("id")
@@ -1284,6 +1294,9 @@ class GeminiCliProvider(
         - Parameter signature injection into descriptions
         - Strict schema enforcement (additionalProperties: false)
         """
+        # Clear tool name mapping at start of each request
+        self._tool_name_mapping = {}
+
         transformed_declarations = []
         is_gemini_3 = self._is_gemini_3(model)
 
@@ -1326,6 +1339,15 @@ class GeminiCliProvider(
                         },
                         "required": ["_confirm"],
                     }
+
+                # Sanitize tool name to comply with Gemini API rules
+                # (applies to ALL models, not just Gemini 3)
+                name = new_function.get("name", "")
+                if name:
+                    sanitized_name, self._tool_name_mapping = sanitize_gemini_tool_name(
+                        name, self._tool_name_mapping
+                    )
+                    new_function["name"] = sanitized_name
 
                 # Gemini 3 specific transformations
                 if is_gemini_3 and self._enable_gemini3_tool_fix:

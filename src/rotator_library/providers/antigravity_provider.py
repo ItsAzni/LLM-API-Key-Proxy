@@ -56,6 +56,8 @@ from .utilities.gemini_shared_utils import (
     inline_schema_refs,
     normalize_type_arrays,
     recursively_parse_json_strings,
+    sanitize_gemini_tool_name,
+    restore_gemini_tool_name,
     GEMINI3_TOOL_RENAMES,
     GEMINI3_TOOL_RENAMES_REVERSE,
     FINISH_REASON_MAP,
@@ -1409,71 +1411,19 @@ class AntigravityProvider(
 
     def _sanitize_tool_name(self, name: str) -> str:
         """
-        Sanitize tool name to comply with Antigravity API rules.
+        Sanitize tool name to comply with Gemini API rules.
 
-        Rules (from Gemini API error message):
-        - First char must be letter (a-z, A-Z) or underscore (_)
-        - Allowed chars: a-zA-Z0-9_.:-
-        - Max length: 64 characters
-        - Slashes (/) not allowed
-
-        Handles collisions by appending numeric suffix (_2, _3, etc.)
-
+        Uses shared sanitize_gemini_tool_name function.
         Returns sanitized name and stores mapping for later restoration.
         """
-        if not name:
-            return name
-
-        original = name
-        sanitized = name
-
-        # Replace / with _ (most common issue)
-        sanitized = sanitized.replace("/", "_")
-
-        # Replace any character not in allowed set [a-zA-Z0-9_.:-] with underscore
-        # Gemini allows: letters, digits, underscores, dots, colons, dashes
-        sanitized = re.sub(r"[^a-zA-Z0-9_\.:\-]", "_", sanitized)
-
-        # First char must be letter or underscore (not digit, dot, colon, or dash)
-        if sanitized and not (sanitized[0].isalpha() or sanitized[0] == "_"):
-            sanitized = f"_{sanitized}"
-
-        # Truncate to 60 chars (leave room for potential suffix)
-        if len(sanitized) > 60:
-            sanitized = sanitized[:60]
-
-        # Handle collisions - check if this sanitized name already maps to a DIFFERENT original
-        base_sanitized = sanitized
-        suffix = 2
-        existing_values = set(self._tool_name_mapping.values())
-        while (
-            sanitized in self._tool_name_mapping
-            and self._tool_name_mapping[sanitized] != original
-        ) or (sanitized in existing_values and original not in existing_values):
-            # Check if sanitized name is already used for a different original
-            if sanitized in self._tool_name_mapping:
-                if self._tool_name_mapping[sanitized] == original:
-                    break  # Same original, no collision
-            sanitized = f"{base_sanitized}_{suffix}"
-            suffix += 1
-            if suffix > 100:  # Safety limit
-                lib_logger.error(f"[Tool Name] Too many collisions for '{original}'")
-                break
-
-        # Truncate again if suffix made it too long
-        if len(sanitized) > 64:
-            sanitized = sanitized[:64]
-
-        # Store mapping for restoration (only if changed)
-        if sanitized != original:
-            self._tool_name_mapping[sanitized] = original
-            lib_logger.debug(f"[Tool Name] Sanitized: '{original}' → '{sanitized}'")
-
+        sanitized, self._tool_name_mapping = sanitize_gemini_tool_name(
+            name, self._tool_name_mapping
+        )
         return sanitized
 
     def _restore_tool_name(self, sanitized_name: str) -> str:
         """Restore original tool name from sanitized version."""
-        return self._tool_name_mapping.get(sanitized_name, sanitized_name)
+        return restore_gemini_tool_name(sanitized_name, self._tool_name_mapping)
 
     def _clear_tool_name_mapping(self) -> None:
         """Clear tool name mapping at start of each request."""
