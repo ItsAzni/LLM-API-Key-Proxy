@@ -243,6 +243,64 @@ class GitHubCopilotAuthBase:
             )
 
     # =========================================================================
+    # TOKEN INITIALIZATION
+    # =========================================================================
+
+    async def initialize_token(
+        self,
+        creds_or_path: str | Dict[str, Any],
+        force_interactive: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Initialize and validate OAuth token.
+
+        For GitHub Copilot, OAuth tokens are long-lived and don't require refresh.
+        This method validates the token exists and returns the credentials.
+
+        Args:
+            creds_or_path: Either a credentials dict or path to credentials file.
+            force_interactive: If True, forces re-authentication via device flow.
+
+        Returns:
+            Validated credentials dict.
+
+        Raises:
+            IOError: If credentials cannot be loaded or are invalid.
+        """
+        # Determine if input is a path or credentials dict
+        if isinstance(creds_or_path, str):
+            path = creds_or_path
+            display_name = Path(path).name
+            creds = await self._load_credentials(path)
+        else:
+            path = None
+            creds = creds_or_path
+            display_name = creds.get("_proxy_metadata", {}).get(
+                "display_name", "in-memory object"
+            )
+
+        lib_logger.debug(
+            f"Initializing {self.ENV_PREFIX} token for '{display_name}'..."
+        )
+
+        # Validate access token exists
+        access_token = creds.get("access_token")
+        if not access_token:
+            raise IOError(
+                f"{self.ENV_PREFIX} credentials at '{display_name}' missing access_token"
+            )
+
+        # GitHub OAuth tokens are long-lived, no refresh needed
+        # force_interactive is accepted for API compatibility but not used
+        _ = force_interactive  # Silence unused variable warning
+
+        lib_logger.debug(
+            f"{self.ENV_PREFIX} token for '{display_name}' is valid."
+        )
+
+        return creds
+
+    # =========================================================================
     # DEVICE FLOW OAUTH
     # =========================================================================
 
@@ -413,31 +471,31 @@ class GitHubCopilotAuthBase:
     # AUTH HEADER
     # =========================================================================
 
-    async def get_auth_header(self, credential_path: str) -> Dict[str, str]:
+    async def get_auth_header(self, credential_identifier: str) -> Dict[str, str]:
         """
         Get authorization header for GitHub Copilot API requests.
 
         Args:
-            credential_path: Path to credential file or env:// path
+            credential_identifier: Path to credential file or env:// path
 
         Returns:
             Dict with Authorization header
         """
         try:
-            creds = await self._load_credentials(credential_path)
+            creds = await self._load_credentials(credential_identifier)
             access_token = creds.get("access_token")
 
             if not access_token:
-                raise ValueError(f"No access_token found in credentials at '{credential_path}'")
+                raise ValueError(f"No access_token found in credentials at '{credential_identifier}'")
 
             return {"Authorization": f"Bearer {access_token}"}
 
         except Exception as e:
             # Try cached credentials as fallback
-            cached = self._credentials_cache.get(credential_path)
+            cached = self._credentials_cache.get(credential_identifier)
             if cached and cached.get("access_token"):
                 lib_logger.warning(
-                    f"Credential load failed for {credential_path}: {e}. Using cached token."
+                    f"Credential load failed for {credential_identifier}: {e}. Using cached token."
                 )
                 return {"Authorization": f"Bearer {cached['access_token']}"}
             raise

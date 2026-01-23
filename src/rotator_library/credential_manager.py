@@ -13,12 +13,14 @@ from .utils.paths import get_oauth_dir
 lib_logger = logging.getLogger("rotator_library")
 
 # Standard directories where tools like `gemini login` store credentials.
+# Providers with None use oauth_creds/ directory (no external CLI path).
 DEFAULT_OAUTH_DIRS = {
     "gemini_cli": Path.home() / ".gemini",
     "qwen_code": Path.home() / ".qwen",
     "iflow": Path.home() / ".iflow",
     "antigravity": Path.home() / ".antigravity",
     "codex": Path.home() / ".codex",
+    "github_copilot": None,  # Uses oauth_creds/ directory only
     # Add other providers like 'claude' here if they have a standard CLI path
 }
 
@@ -30,6 +32,7 @@ ENV_OAUTH_PROVIDERS = {
     "qwen_code": "QWEN_CODE",
     "iflow": "IFLOW",
     "codex": "CODEX",
+    "github_copilot": "GITHUB_COPILOT",
 }
 
 

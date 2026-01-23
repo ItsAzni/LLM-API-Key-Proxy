@@ -58,34 +58,254 @@ COPILOT_HEADERS = {
 # =============================================================================
 
 # Available models via GitHub Copilot
-# Based on PRD.md and reference implementation
+# Based on models.dev database and opencode reference
 AVAILABLE_MODELS = [
-    # GPT models
+    # GPT-5 series (reasoning models - use Responses API)
+    "gpt-5",
+    "gpt-5.1",
     "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1-codex-max",
+    "gpt-5.2",
+    "gpt-5-codex",
+    # GPT-5 non-reasoning (use Chat Completions API)
     "gpt-5-mini",
     "gpt-5-nano",
+    # GPT-4 series
     "gpt-4o",
+    "gpt-4.1",
+    # o-series (reasoning models - use Responses API)
+    "o3",
+    "o3-mini",
+    "o4-mini",
     # Claude models
-    "claude-haiku-4.5",
+    "claude-sonnet-4",
+    "claude-sonnet-4.5",
     "claude-opus-4",
+    "claude-opus-4.5",
+    "claude-opus-41",
+    "claude-haiku-4.5",
+    "claude-3.5-sonnet",
+    "claude-3.7-sonnet",
+    "claude-3.7-sonnet-thought",
     # Gemini models
-    "gemini-3-flash-preview",
     "gemini-2.0-flash-001",
+    "gemini-2.5-pro",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
     # Other models
     "grok-code-fast-1",
-    "o3",
-    "o4-mini",
 ]
 
-# Models that require the Responses API instead of Chat Completions
-# GPT-5 series and o-series models use the /responses endpoint
-RESPONSES_API_MODELS = {
-    "gpt-5.1-codex",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "o3",
-    "o4-mini",
-}
+
+def _is_responses_api_model(model: str) -> bool:
+    """
+    Check if a model requires the Responses API.
+
+    Based on opencode's shouldUseCopilotResponsesApi logic:
+    - GPT-5 and later use Responses API, EXCEPT gpt-5-mini and gpt-5-nano
+    - o3 and o4-mini also use Responses API
+
+    Args:
+        model: Model name (with or without provider prefix)
+
+    Returns:
+        True if the model uses Responses API
+    """
+    # Strip provider prefix if present
+    clean_model = model.split("/")[-1] if "/" in model else model
+
+    # o-series models use Responses API
+    if clean_model.startswith("o3") or clean_model.startswith("o4-mini"):
+        return True
+
+    # Check for GPT-5 or later
+    import re
+    match = re.match(r"^gpt-(\d+)", clean_model)
+    if match:
+        version = int(match.group(1))
+        if version >= 5:
+            # gpt-5-mini and gpt-5-nano use Chat Completions, not Responses API
+            if clean_model.startswith("gpt-5-mini") or clean_model.startswith("gpt-5-nano"):
+                return False
+            return True
+
+    return False
+
+
+def _is_claude_model(model: str) -> bool:
+    """Check if model is a Claude model."""
+    clean = model.split("/")[-1].lower() if "/" in model else model.lower()
+    return clean.startswith("claude")
+
+
+def _is_gemini_model(model: str) -> bool:
+    """Check if model is a Gemini model."""
+    clean = model.split("/")[-1].lower() if "/" in model else model.lower()
+    return clean.startswith("gemini")
+
+
+def _is_gpt5_or_o_series(model: str) -> bool:
+    """Check if model is GPT-5 or o-series (reasoning models)."""
+    clean = model.split("/")[-1].lower() if "/" in model else model.lower()
+    if clean.startswith("o3") or clean.startswith("o4"):
+        return True
+    import re
+    match = re.match(r"^gpt-(\d+)", clean)
+    if match and int(match.group(1)) >= 5:
+        return True
+    return False
+
+
+def _map_reasoning_effort_to_config(
+    reasoning_effort: Optional[str],
+    model: str,
+) -> Dict[str, Any]:
+    """
+    Map reasoning_effort to model-specific thinking configuration.
+
+    Similar to Antigravity provider's _get_thinking_config.
+
+    Args:
+        reasoning_effort: Effort level (low, medium, high, etc.)
+        model: Model name
+
+    Returns:
+        Dict with model-specific thinking parameters
+    """
+    clean_model = model.split("/")[-1] if "/" in model else model
+
+    # Normalize effort
+    if reasoning_effort is None:
+        effort = "auto"
+    elif isinstance(reasoning_effort, str):
+        effort = reasoning_effort.strip().lower() or "auto"
+    else:
+        effort = "auto"
+
+    valid_efforts = {
+        "auto", "disable", "off", "none",
+        "minimal", "low", "low_medium", "medium", "medium_high", "high"
+    }
+    if effort not in valid_efforts:
+        lib_logger.warning(
+            f"[GitHubCopilot] Unknown reasoning_effort: '{reasoning_effort}', using auto"
+        )
+        effort = "auto"
+
+    # GPT-5 and o-series: reasoning.effort
+    if _is_gpt5_or_o_series(clean_model):
+        if effort in ("disable", "off", "none"):
+            return {}  # No reasoning
+        if effort in ("minimal", "low"):
+            return {"reasoning": {"effort": "low", "summary": "auto"}}
+        if effort in ("low_medium", "medium"):
+            return {"reasoning": {"effort": "medium", "summary": "auto"}}
+        # auto, medium_high, high
+        return {"reasoning": {"effort": "high", "summary": "auto"}}
+
+    # Claude models: thinking_budget (tokens)
+    if _is_claude_model(clean_model):
+        if effort in ("disable", "off", "none"):
+            return {}  # No thinking
+        budgets = {
+            "auto": 16000,  # Middle ground
+            "minimal": 1024,
+            "low": 4096,
+            "low_medium": 8192,
+            "medium": 16000,
+            "medium_high": 24000,
+            "high": 32000,
+        }
+        return {"thinking": {"budget_tokens": budgets.get(effort, 16000)}}
+
+    # Gemini models: thinkingLevel or thinkingBudget
+    if _is_gemini_model(clean_model):
+        is_gemini_3 = "gemini-3" in clean_model
+
+        if is_gemini_3:
+            # Gemini 3: thinkingLevel (minimal/low/medium/high)
+            if effort in ("disable", "off", "none"):
+                return {"thinkingConfig": {"thinkingLevel": "minimal"}}
+            if effort in ("minimal", "low"):
+                return {"thinkingConfig": {"thinkingLevel": "low"}}
+            if effort in ("low_medium", "medium"):
+                return {"thinkingConfig": {"thinkingLevel": "medium"}}
+            return {"thinkingConfig": {"thinkingLevel": "high"}}
+        else:
+            # Gemini 2.5: thinkingBudget (tokens)
+            if effort in ("disable", "off", "none"):
+                return {"thinkingConfig": {"thinkingBudget": 0}}
+            budgets = {
+                "auto": -1,  # Auto
+                "minimal": 3072,
+                "low": 6144,
+                "low_medium": 9216,
+                "medium": 12288,
+                "medium_high": 18432,
+                "high": 24576,
+            }
+            return {"thinkingConfig": {"thinkingBudget": budgets.get(effort, -1)}}
+
+    return {}
+
+
+def _convert_tools_to_responses_format(
+    tools: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """
+    Convert OpenAI-format tools to Responses API format.
+
+    Handles special tool types like web_search and web_search_preview,
+    which are passed directly without function wrapping.
+
+    Args:
+        tools: List of OpenAI-format tools
+
+    Returns:
+        List of Responses API format tools
+    """
+    if not tools:
+        return []
+
+    responses_tools = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+
+        tool_type = tool.get("type", "function")
+
+        if tool_type == "function":
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            # Skip tools without a name
+            if not name:
+                continue
+            params = func.get("parameters", {})
+            # Ensure parameters is a valid object
+            if not isinstance(params, dict):
+                params = {"type": "object", "properties": {}}
+            responses_tools.append({
+                "type": "function",
+                "name": name,
+                "description": func.get("description") or "",
+                "parameters": params,
+                "strict": False,
+            })
+        elif tool_type in ("web_search", "web_search_preview"):
+            # Web search is a special built-in tool type
+            responses_tools.append({"type": tool_type})
+        elif tool_type == "code_interpreter":
+            # Code interpreter is another built-in tool type
+            responses_tools.append({"type": "code_interpreter"})
+        elif tool_type == "file_search":
+            # File search built-in tool
+            responses_tools.append({"type": "file_search"})
+        else:
+            # Unknown tool types - pass through as-is
+            responses_tools.append(tool)
+
+    return responses_tools
 
 
 # =============================================================================
@@ -139,26 +359,86 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         return True
 
+    # Cache for discovered models: {model_id: supported_endpoints}
+    _discovered_models: Dict[str, List[str]] = {}
+
     async def get_models(
-        self, api_key: str, client: httpx.AsyncClient  # noqa: ARG002
+        self, api_key: str, client: httpx.AsyncClient
     ) -> List[str]:
         """
-        Fetch available models from GitHub Copilot.
+        Fetch available models from GitHub Copilot's /models endpoint.
 
-        For now, returns a hardcoded list of known available models.
-        Future implementations may query the API for dynamic model discovery.
+        Dynamically discovers models and their supported endpoints.
+        Falls back to hardcoded list if API call fails.
 
         Args:
-            api_key: The credential path (not used for hardcoded list)
-            client: HTTP client instance (not used for hardcoded list)
+            api_key: The credential path for authentication
+            client: HTTP client instance
 
         Returns:
             List of model names prefixed with 'github_copilot/'
         """
-        # Unused parameters (required by interface): api_key, client
-        del api_key, client  # Silence unused parameter warnings
-        # Return hardcoded model list with provider prefix
+        try:
+            # Get auth header
+            auth_header = await self.get_auth_header(api_key)
+            headers = {
+                **auth_header,
+                "User-Agent": USER_AGENT,
+            }
+
+            # Fetch models from API
+            api_base = self._get_api_base(api_key)
+            response = await client.get(
+                f"{api_base}/models",
+                headers=headers,
+                timeout=10.0,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                models = []
+
+                for model in data.get("data", []):
+                    model_id = model.get("id")
+                    if not model_id:
+                        continue
+
+                    # Skip embedding models
+                    if "embedding" in model_id.lower():
+                        continue
+
+                    # Cache supported endpoints for this model
+                    supported_endpoints = model.get("supported_endpoints", [])
+                    self._discovered_models[model_id] = supported_endpoints
+
+                    models.append(f"github_copilot/{model_id}")
+
+                if models:
+                    lib_logger.debug(
+                        f"Discovered {len(models)} models from GitHub Copilot API"
+                    )
+                    return models
+
+        except Exception as e:
+            lib_logger.warning(
+                f"Failed to fetch models from GitHub Copilot API: {e}. Using fallback list."
+            )
+
+        # Fallback to hardcoded list
         return [f"github_copilot/{model}" for model in AVAILABLE_MODELS]
+
+    def _get_model_endpoints(self, model: str) -> List[str]:
+        """
+        Get the supported endpoints for a model from discovered data.
+
+        Args:
+            model: Model name (with or without provider prefix)
+
+        Returns:
+            List of supported endpoints (e.g., ['/responses', '/chat/completions'])
+        """
+        clean_model = model.split("/")[-1] if "/" in model else model
+        return self._discovered_models.get(clean_model, [])
 
     def get_credential_tier_name(self, credential: str) -> str:
         """
@@ -205,7 +485,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         Check if a model requires the Responses API.
 
-        GPT-5 series and o-series models use /responses instead of /chat/completions.
+        First checks discovered endpoints from /models API, then falls back
+        to heuristic based on model name patterns.
 
         Args:
             model: Model name (with or without provider prefix)
@@ -213,9 +494,19 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         Returns:
             True if the model uses Responses API
         """
-        # Strip provider prefix if present
         clean_model = model.split("/")[-1] if "/" in model else model
-        return clean_model in RESPONSES_API_MODELS
+
+        # Check if we have discovered endpoint info for this model
+        endpoints = self._discovered_models.get(clean_model, [])
+        if endpoints:
+            # If only /responses is supported, use Responses API
+            # If both are available, prefer /chat/completions for compatibility
+            if "/responses" in endpoints and "/chat/completions" not in endpoints:
+                return True
+            return False
+
+        # Fallback to heuristic if model wasn't discovered
+        return _is_responses_api_model(model)
 
     # =========================================================================
     # CHAT COMPLETIONS HELPERS
@@ -348,6 +639,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Check if this model uses Responses API
         if self._is_responses_api_model(model):
             lib_logger.debug(f"Model {model} using Responses API endpoint")
+            # Remove keys we pass explicitly to avoid duplicate keyword args
+            filtered_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k not in ("model", "messages", "stream", "credential_identifier", "credential_path")
+            }
             return await self._responses_api_completion(
                 client=client,
                 api_base=api_base,
@@ -355,7 +651,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 model=model,
                 messages=messages,
                 stream=stream,
-                **kwargs,
+                **filtered_kwargs,
             )
 
         # Build request payload for Chat Completions API
@@ -373,10 +669,22 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "presence_penalty",
             "frequency_penalty",
             "stop",
+            # Tool/function calling
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            # Structured output
+            "response_format",
         ]
         for param in optional_params:
             if param in kwargs and kwargs[param] is not None:
                 payload[param] = kwargs[param]
+
+        # Map reasoning_effort to model-specific thinking config
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None:
+            thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+            payload.update(thinking_config)
 
         endpoint = f"{api_base}/chat/completions"
 
@@ -791,6 +1099,26 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             payload["temperature"] = kwargs["temperature"]
         if "top_p" in kwargs and kwargs["top_p"] is not None:
             payload["top_p"] = kwargs["top_p"]
+
+        # Tool/function calling support - convert to Responses API format
+        if "tools" in kwargs and kwargs["tools"] is not None:
+            converted_tools = _convert_tools_to_responses_format(kwargs["tools"])
+            if converted_tools:
+                payload["tools"] = converted_tools
+        if "tool_choice" in kwargs and kwargs["tool_choice"] is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
+        if "parallel_tool_calls" in kwargs and kwargs["parallel_tool_calls"] is not None:
+            payload["parallel_tool_calls"] = kwargs["parallel_tool_calls"]
+
+        # Map reasoning_effort to model-specific thinking config
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None:
+            thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+            payload.update(thinking_config)
+
+        # Structured output
+        if "response_format" in kwargs and kwargs["response_format"] is not None:
+            payload["text"] = {"format": kwargs["response_format"]}
 
         endpoint = f"{api_base}/responses"
 

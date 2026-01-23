@@ -979,9 +979,27 @@ async def chat_completions(
 
         is_streaming = request_data.get("stream", False)
 
+        # Web search tool injection (enabled via ENABLE_WEB_SEARCH_TOOL env var)
+        # When enabled, injects a web_search tool that models can call for real-time info
+        enable_web_search = os.getenv("ENABLE_WEB_SEARCH_TOOL", "false").lower() in ("true", "1", "yes")
+        use_tool_loop = False
+
+        if enable_web_search:
+            # Inject web_search tool if a search provider is configured
+            request_data = inject_web_search_tool(request_data)
+            # Use tool loop for non-streaming if web search was injected
+            search_service = get_search_service()
+            use_tool_loop = search_service.is_configured
+
         if is_streaming:
-            # Direct streaming without tool loop for real-time response
-            response_generator = client.acompletion(request=request, **request_data)
+            if use_tool_loop:
+                # Streaming with tool loop support
+                response_generator = await execute_with_tool_loop(
+                    client, request_data, request=request
+                )
+            else:
+                # Direct streaming without tool loop
+                response_generator = client.acompletion(request=request, **request_data)
             return StreamingResponse(
                 streaming_response_wrapper(
                     request, request_data, response_generator, raw_logger
@@ -989,7 +1007,13 @@ async def chat_completions(
                 media_type="text/event-stream",
             )
         else:
-            response = await client.acompletion(request=request, **request_data)
+            if use_tool_loop:
+                # Non-streaming with tool loop
+                response = await execute_with_tool_loop(
+                    client, request_data, request=request
+                )
+            else:
+                response = await client.acompletion(request=request, **request_data)
             if raw_logger:
                 # Assuming response has status_code and headers attributes
                 # This might need adjustment based on the actual response object

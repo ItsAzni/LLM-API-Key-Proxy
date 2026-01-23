@@ -170,10 +170,10 @@ def has_web_search_tool_call(response: Any) -> Tuple[bool, Optional[str], Option
         return False, None, None
 
     # Check choices for tool calls
-    choices = response_dict.get("choices", [])
+    choices = response_dict.get("choices", []) or []
     for choice in choices:
-        message = choice.get("message", {})
-        tool_calls = message.get("tool_calls", [])
+        message = choice.get("message", {}) or {}
+        tool_calls = message.get("tool_calls") or []  # Handle None explicitly
 
         for tool_call in tool_calls:
             if tool_call.get("type") == "function":
@@ -215,10 +215,10 @@ def extract_all_web_search_tool_calls(response: Any) -> List[Tuple[str, str, Opt
         return result
 
     # Check choices for tool calls
-    choices = response_dict.get("choices", [])
+    choices = response_dict.get("choices", []) or []
     for choice in choices:
-        message = choice.get("message", {})
-        tool_calls = message.get("tool_calls", [])
+        message = choice.get("message", {}) or {}
+        tool_calls = message.get("tool_calls") or []  # Handle None explicitly
 
         for tool_call in tool_calls:
             if tool_call.get("type") == "function":
@@ -350,13 +350,13 @@ def build_assistant_message_with_tool_calls(response: Any) -> Dict[str, Any]:
     else:
         return {"role": "assistant", "content": "", "tool_calls": []}
 
-    choices = response_dict.get("choices", [])
+    choices = response_dict.get("choices", []) or []
     if not choices:
         return {"role": "assistant", "content": "", "tool_calls": []}
 
-    message = choices[0].get("message", {})
+    message = choices[0].get("message", {}) or {}
     return {
         "role": "assistant",
         "content": message.get("content") or "",
-        "tool_calls": message.get("tool_calls", []),
+        "tool_calls": message.get("tool_calls") or [],  # Handle None explicitly
     }
