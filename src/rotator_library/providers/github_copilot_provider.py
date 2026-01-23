@@ -121,12 +121,15 @@ def _is_responses_api_model(model: str) -> bool:
 
     # Check for GPT-5 or later
     import re
+
     match = re.match(r"^gpt-(\d+)", clean_model)
     if match:
         version = int(match.group(1))
         if version >= 5:
             # gpt-5-mini and gpt-5-nano use Chat Completions, not Responses API
-            if clean_model.startswith("gpt-5-mini") or clean_model.startswith("gpt-5-nano"):
+            if clean_model.startswith("gpt-5-mini") or clean_model.startswith(
+                "gpt-5-nano"
+            ):
                 return False
             return True
 
@@ -151,6 +154,7 @@ def _is_gpt5_or_o_series(model: str) -> bool:
     if clean.startswith("o3") or clean.startswith("o4"):
         return True
     import re
+
     match = re.match(r"^gpt-(\d+)", clean)
     if match and int(match.group(1)) >= 5:
         return True
@@ -184,8 +188,18 @@ def _map_reasoning_effort_to_config(
         effort = "auto"
 
     valid_efforts = {
-        "auto", "disable", "off", "none",
-        "minimal", "low", "low_medium", "medium", "medium_high", "high", "xhigh", "max"
+        "auto",
+        "disable",
+        "off",
+        "none",
+        "minimal",
+        "low",
+        "low_medium",
+        "medium",
+        "medium_high",
+        "high",
+        "xhigh",
+        "max",
     }
     if effort not in valid_efforts:
         lib_logger.warning(
@@ -291,13 +305,15 @@ def _convert_tools_to_responses_format(
             # Ensure parameters is a valid object
             if not isinstance(params, dict):
                 params = {"type": "object", "properties": {}}
-            responses_tools.append({
-                "type": "function",
-                "name": name,
-                "description": func.get("description") or "",
-                "parameters": params,
-                "strict": False,
-            })
+            responses_tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": func.get("description") or "",
+                    "parameters": params,
+                    "strict": False,
+                }
+            )
         elif tool_type in ("web_search", "web_search_preview"):
             # Web search is a special built-in tool type
             responses_tools.append({"type": tool_type})
@@ -368,9 +384,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
     # Cache for discovered models: {model_id: supported_endpoints}
     _discovered_models: Dict[str, List[str]] = {}
 
-    async def get_models(
-        self, api_key: str, client: httpx.AsyncClient
-    ) -> List[str]:
+    async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """
         Fetch available models from GitHub Copilot's /models endpoint.
 
@@ -583,7 +597,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         import os
 
         # Force agent mode via environment variable (default: true for better agentic behavior)
-        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "true").lower() not in ("false", "0", "no")
+        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "true").lower() not in (
+            "false",
+            "0",
+            "no",
+        )
         if force_agent:
             return True
 
@@ -695,8 +713,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             lib_logger.debug(f"Model {model} using Responses API endpoint")
             # Remove keys we pass explicitly to avoid duplicate keyword args
             filtered_kwargs = {
-                k: v for k, v in kwargs.items()
-                if k not in ("model", "messages", "stream", "credential_identifier", "credential_path")
+                k: v
+                for k, v in kwargs.items()
+                if k
+                not in (
+                    "model",
+                    "messages",
+                    "stream",
+                    "credential_identifier",
+                    "credential_path",
+                )
             }
             return await self._responses_api_completion(
                 client=client,
@@ -747,9 +773,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         )
 
         if stream:
-            return self._stream_chat_response(
-                client, endpoint, headers, payload, model
-            )
+            return self._stream_chat_response(client, endpoint, headers, payload, model)
         else:
             return await self._non_stream_chat_response(
                 client, endpoint, headers, payload, model
@@ -1033,44 +1057,54 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             if role == "assistant":
                 # Convert to Responses API message format
                 if isinstance(content, str):
-                    input_items.append({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": content}],
-                    })
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content}],
+                        }
+                    )
                 elif isinstance(content, list):
                     # Convert content parts
                     output_content = []
                     for part in content:
                         if isinstance(part, dict):
                             if part.get("type") == "text":
-                                output_content.append({
-                                    "type": "output_text",
-                                    "text": part.get("text", ""),
-                                })
+                                output_content.append(
+                                    {
+                                        "type": "output_text",
+                                        "text": part.get("text", ""),
+                                    }
+                                )
                             else:
                                 output_content.append(part)
                         else:
-                            output_content.append({
-                                "type": "output_text",
-                                "text": str(part),
-                            })
-                    input_items.append({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": output_content,
-                    })
+                            output_content.append(
+                                {
+                                    "type": "output_text",
+                                    "text": str(part),
+                                }
+                            )
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": output_content,
+                        }
+                    )
                 tool_calls = msg.get("tool_calls") or []
                 for tool_call in tool_calls:
                     if tool_call.get("type") != "function":
                         continue
                     function = tool_call.get("function", {})
-                    input_items.append({
-                        "type": "function_call",
-                        "call_id": tool_call.get("id", ""),
-                        "name": function.get("name", ""),
-                        "arguments": function.get("arguments", ""),
-                    })
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tool_call.get("id", ""),
+                            "name": function.get("name", ""),
+                            "arguments": function.get("arguments", ""),
+                        }
+                    )
                 continue
 
             # Handle tool messages (function outputs)
@@ -1082,20 +1116,24 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     output = ""
                 else:
                     output = json.dumps(content)
-                input_items.append({
-                    "type": "function_call_output",
-                    "call_id": tool_call_id,
-                    "output": output,
-                })
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": output,
+                    }
+                )
                 continue
 
             # Handle user/developer messages
             if isinstance(content, str):
                 # Simple string content
-                input_items.append({
-                    "role": role,
-                    "content": [{"type": "input_text", "text": content}],
-                })
+                input_items.append(
+                    {
+                        "role": role,
+                        "content": [{"type": "input_text", "text": content}],
+                    }
+                )
             elif isinstance(content, list):
                 # Structured content - convert types
                 converted_content = []
@@ -1103,36 +1141,55 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     if isinstance(part, dict):
                         part_type = part.get("type", "")
                         if part_type == "text":
-                            converted_content.append({
-                                "type": "input_text",
-                                "text": part.get("text", ""),
-                            })
+                            converted_content.append(
+                                {
+                                    "type": "input_text",
+                                    "text": part.get("text", ""),
+                                }
+                            )
                         elif part_type == "image_url":
                             # Convert image_url to input_image format
                             image_url = part.get("image_url", {})
-                            url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
-                            converted_content.append({
-                                "type": "input_image",
-                                "image_url": url,
-                            })
+                            url = (
+                                image_url.get("url", "")
+                                if isinstance(image_url, dict)
+                                else str(image_url)
+                            )
+                            converted_content.append(
+                                {
+                                    "type": "input_image",
+                                    "image_url": url,
+                                }
+                            )
                         else:
                             # Pass through other types
                             converted_content.append(part)
                     else:
-                        converted_content.append({
-                            "type": "input_text",
-                            "text": str(part),
-                        })
-                input_items.append({
-                    "role": role,
-                    "content": converted_content,
-                })
+                        converted_content.append(
+                            {
+                                "type": "input_text",
+                                "text": str(part),
+                            }
+                        )
+                input_items.append(
+                    {
+                        "role": role,
+                        "content": converted_content,
+                    }
+                )
             else:
                 # Fallback for unexpected content types
-                input_items.append({
-                    "role": role,
-                    "content": [{"type": "input_text", "text": str(content) if content else ""}],
-                })
+                input_items.append(
+                    {
+                        "role": role,
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": str(content) if content else "",
+                            }
+                        ],
+                    }
+                )
 
         return input_items
 
@@ -1188,7 +1245,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 payload["tools"] = converted_tools
         if "tool_choice" in kwargs and kwargs["tool_choice"] is not None:
             payload["tool_choice"] = kwargs["tool_choice"]
-        if "parallel_tool_calls" in kwargs and kwargs["parallel_tool_calls"] is not None:
+        if (
+            "parallel_tool_calls" in kwargs
+            and kwargs["parallel_tool_calls"] is not None
+        ):
             payload["parallel_tool_calls"] = kwargs["parallel_tool_calls"]
 
         # Map reasoning_effort to model-specific thinking config
@@ -1261,25 +1321,42 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             # Parse ISO timestamp if needed
             try:
                 from datetime import datetime
-                created = int(datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp())
+
+                created = int(
+                    datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                )
             except (ValueError, TypeError):
                 created = int(time.time())
 
         response_id = data.get("id", f"resp-{uuid.uuid4().hex[:8]}")
 
-        # Extract output text from the response
+        # Extract output text and reasoning from the response
         output_text = data.get("output_text", "")
+        reasoning_content = ""
 
         # If output_text is not directly available, extract from output array
-        if not output_text and "output" in data:
+        if "output" in data:
             for item in data.get("output", []):
                 if item.get("type") == "message" and item.get("role") == "assistant":
                     for content_part in item.get("content", []):
-                        if content_part.get("type") == "output_text":
+                        if (
+                            content_part.get("type") == "output_text"
+                            and not output_text
+                        ):
                             output_text = content_part.get("text", "")
-                            break
-                    if output_text:
-                        break
+                        elif content_part.get("type") == "reasoning":
+                            reasoning_content += content_part.get("text", "")
+                elif item.get("type") == "reasoning":
+                    summary = item.get("summary")
+                    if isinstance(summary, list):
+                        for part in summary:
+                            text = part.get("text")
+                            if text:
+                                reasoning_content += text
+                    else:
+                        text = item.get("text")
+                        if text:
+                            reasoning_content += text
 
         # Build choices in Chat Completions format
         choices = [
@@ -1288,8 +1365,15 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 "message": {
                     "role": "assistant",
                     "content": output_text,
+                    **(
+                        {"reasoning_content": reasoning_content}
+                        if reasoning_content
+                        else {}
+                    ),
                 },
-                "finish_reason": data.get("status", "completed") == "completed" and "stop" or "stop",
+                "finish_reason": data.get("status", "completed") == "completed"
+                and "stop"
+                or "stop",
             }
         ]
 
@@ -1306,7 +1390,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             usage = data["usage"]
             response_obj.usage = litellm.Usage(
                 prompt_tokens=usage.get("input_tokens", usage.get("prompt_tokens", 0)),
-                completion_tokens=usage.get("output_tokens", usage.get("completion_tokens", 0)),
+                completion_tokens=usage.get(
+                    "output_tokens", usage.get("completion_tokens", 0)
+                ),
                 total_tokens=usage.get("total_tokens", 0),
             )
 
@@ -1429,7 +1515,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         call_id = item.get("call_id") or item.get("id")
                         call_index = item.get("index", 0)
                         name = item.get("name") or item.get("function", {}).get("name")
-                        arguments = item.get("arguments") or item.get("function", {}).get("arguments", "")
+                        arguments = item.get("arguments") or item.get(
+                            "function", {}
+                        ).get("arguments", "")
                         if name:
                             tool_call = {
                                 "index": call_index,
@@ -1454,10 +1542,43 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 ],
                             )
                             yield chunk
+                    elif item_type == "reasoning":
+                        reasoning_text = ""
+                        summary = item.get("summary")
+                        if isinstance(summary, list):
+                            for part in summary:
+                                text = part.get("text")
+                                if text:
+                                    reasoning_text += text
+                        else:
+                            text = item.get("text")
+                            if text:
+                                reasoning_text += text
+                        if reasoning_text:
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "reasoning_content": reasoning_text,
+                                            "role": "assistant",
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            yield chunk
                     continue
 
                 # Skip events that contain complete text already streamed via deltas
-                elif event_type in ("response.output_text.done", "response.content_part.done"):
+                elif event_type in (
+                    "response.output_text.done",
+                    "response.content_part.done",
+                ):
                     continue
 
                 # Handle content_part delta (alternative format)
@@ -1476,6 +1597,26 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                         "index": 0,
                                         "delta": {
                                             "content": delta_text,
+                                            "role": "assistant",
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            yield chunk
+                    elif content_part.get("type") == "reasoning":
+                        reasoning_text = content_part.get("text", "")
+                        if reasoning_text:
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "reasoning_content": reasoning_text,
                                             "role": "assistant",
                                         },
                                         "finish_reason": None,
