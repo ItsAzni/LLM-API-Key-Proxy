@@ -185,7 +185,7 @@ def _map_reasoning_effort_to_config(
 
     valid_efforts = {
         "auto", "disable", "off", "none",
-        "minimal", "low", "low_medium", "medium", "medium_high", "high"
+        "minimal", "low", "low_medium", "medium", "medium_high", "high", "xhigh", "max"
     }
     if effort not in valid_efforts:
         lib_logger.warning(
@@ -193,15 +193,21 @@ def _map_reasoning_effort_to_config(
         )
         effort = "auto"
 
-    # GPT-5 and o-series: reasoning.effort
+    # GPT-5 and o-series: reasoning.effort (none/minimal/low/medium/high/xhigh)
     if _is_gpt5_or_o_series(clean_model):
         if effort in ("disable", "off", "none"):
             return {}  # No reasoning
-        if effort in ("minimal", "low"):
+        if effort == "minimal":
+            return {"reasoning": {"effort": "minimal", "summary": "auto"}}
+        if effort == "low":
             return {"reasoning": {"effort": "low", "summary": "auto"}}
         if effort in ("low_medium", "medium"):
             return {"reasoning": {"effort": "medium", "summary": "auto"}}
-        # auto, medium_high, high
+        if effort in ("medium_high", "high"):
+            return {"reasoning": {"effort": "high", "summary": "auto"}}
+        if effort in ("xhigh", "max"):
+            return {"reasoning": {"effort": "xhigh", "summary": "auto"}}
+        # auto - default to high
         return {"reasoning": {"effort": "high", "summary": "auto"}}
 
     # Claude models: thinking_budget (tokens)
@@ -576,8 +582,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         import os
 
-        # Force agent mode via environment variable
-        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() in ("true", "1", "yes")
+        # Force agent mode via environment variable (default: true for better agentic behavior)
+        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "true").lower() not in ("false", "0", "no")
         if force_agent:
             return True
 
