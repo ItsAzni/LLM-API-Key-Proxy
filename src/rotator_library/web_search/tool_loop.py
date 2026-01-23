@@ -178,7 +178,8 @@ async def _streaming_tool_loop(
 
         # Stream chunks in real-time while accumulating for tool detection
         async for chunk in stream:
-            yield chunk  # Stream immediately to client!
+            sanitized_chunk = _strip_tool_call_finish_reason(chunk)
+            yield sanitized_chunk  # Stream immediately to client!
             _accumulate_chunk(accumulated_response, chunk)
 
         # After stream ends, check for tool calls
@@ -320,6 +321,31 @@ def _accumulate_chunk(accumulated: Dict[str, Any], chunk: str) -> None:
 
     if finish_reason:
         accumulated["finish_reason"] = finish_reason
+
+
+def _strip_tool_call_finish_reason(chunk: str) -> str:
+    """Remove tool_calls finish_reason so the client keeps streaming."""
+    if not chunk.startswith("data: "):
+        return chunk
+
+    data_str = chunk[6:].strip()
+    if data_str == "[DONE]":
+        return chunk
+
+    try:
+        data = json.loads(data_str)
+    except json.JSONDecodeError:
+        return chunk
+
+    choices = data.get("choices", [])
+    if not choices:
+        return chunk
+
+    if choices[0].get("finish_reason") == "tool_calls":
+        choices[0]["finish_reason"] = None
+        return f"data: {json.dumps(data)}\n\n"
+
+    return chunk
 
 
 def _extract_tool_calls_from_accumulated(
