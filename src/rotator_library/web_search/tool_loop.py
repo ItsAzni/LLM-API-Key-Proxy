@@ -87,7 +87,9 @@ async def _non_streaming_tool_loop(
         current_request["stream"] = False
 
         # Make the completion call
-        response = await client.acompletion(request=request, **current_request, **kwargs)
+        response = await client.acompletion(
+            request=request, **current_request, **kwargs
+        )
 
         # Check for web_search tool calls
         tool_calls = extract_all_web_search_tool_calls(response)
@@ -98,10 +100,14 @@ async def _non_streaming_tool_loop(
 
         if not search_service.is_configured:
             # No search provider configured but model tried to use web_search
-            logger.warning("Model called web_search but no search provider is configured")
+            logger.warning(
+                "Model called web_search but no search provider is configured"
+            )
             return response
 
-        logger.info(f"Tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)")
+        logger.info(
+            f"Tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)"
+        )
 
         filtered_tool_calls = []
         for query, tool_call_id, freshness in tool_calls:
@@ -183,10 +189,14 @@ async def _streaming_tool_loop(
             return
 
         if not search_service.is_configured:
-            logger.warning("Model called web_search but no search provider is configured")
+            logger.warning(
+                "Model called web_search but no search provider is configured"
+            )
             return
 
-        logger.info(f"Streaming tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)")
+        logger.info(
+            f"Streaming tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)"
+        )
 
         filtered_tool_calls = []
         for query, tool_call_id, freshness in tool_calls:
@@ -216,7 +226,9 @@ async def _streaming_tool_loop(
 
     # Max iterations reached or early stop - make final call without tools
     if not early_stop:
-        logger.warning(f"Streaming tool loop reached max iterations ({max_tool_iterations})")
+        logger.warning(
+            f"Streaming tool loop reached max iterations ({max_tool_iterations})"
+        )
     final_request = dict(request_data)
     final_request["messages"] = messages
     final_request["stream"] = True
@@ -233,6 +245,8 @@ def _create_empty_accumulated_response() -> Dict[str, Any]:
     return {
         "content": "",
         "tool_calls": [],
+        "tool_call_id_map": {},
+        "next_tool_call_index": 0,
         "finish_reason": None,
     }
 
@@ -269,14 +283,27 @@ def _accumulate_chunk(accumulated: Dict[str, Any], chunk: str) -> None:
     # Accumulate tool calls
     if delta.get("tool_calls"):
         for tc in delta["tool_calls"]:
-            index = tc.get("index", 0)
+            index = tc.get("index")
+            call_id = tc.get("id")
+            if index is None:
+                if call_id in accumulated["tool_call_id_map"]:
+                    index = accumulated["tool_call_id_map"][call_id]
+                else:
+                    index = accumulated["next_tool_call_index"]
+                    accumulated["next_tool_call_index"] += 1
+                    if call_id:
+                        accumulated["tool_call_id_map"][call_id] = index
+            elif call_id and call_id not in accumulated["tool_call_id_map"]:
+                accumulated["tool_call_id_map"][call_id] = index
             # Extend list if needed
             while len(accumulated["tool_calls"]) <= index:
-                accumulated["tool_calls"].append({
-                    "id": "",
-                    "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                })
+                accumulated["tool_calls"].append(
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                )
 
             tool_call = accumulated["tool_calls"][index]
 
@@ -296,7 +323,7 @@ def _accumulate_chunk(accumulated: Dict[str, Any], chunk: str) -> None:
 
 
 def _extract_tool_calls_from_accumulated(
-    accumulated: Dict[str, Any]
+    accumulated: Dict[str, Any],
 ) -> List[tuple[str, str, Optional[str]]]:
     """
     Extract web_search tool calls from accumulated response.
@@ -317,13 +344,15 @@ def _extract_tool_calls_from_accumulated(
                     if query and tool_call_id:
                         result.append((query, tool_call_id, freshness))
                 except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse tool call arguments: {func.get('arguments')}")
+                    logger.warning(
+                        f"Failed to parse tool call arguments: {func.get('arguments')}"
+                    )
 
     return result
 
 
 def _build_assistant_message_from_accumulated(
-    accumulated: Dict[str, Any]
+    accumulated: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Build an assistant message from accumulated streaming response."""
     message = {
