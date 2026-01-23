@@ -1619,7 +1619,10 @@ async def _get_ollama_model_registry(
     global _ollama_model_registry, _ollama_model_registry_updated
 
     now = time.time()
-    if _ollama_model_registry and (now - _ollama_model_registry_updated) < _OLLAMA_REGISTRY_TTL:
+    if (
+        _ollama_model_registry
+        and (now - _ollama_model_registry_updated) < _OLLAMA_REGISTRY_TTL
+    ):
         return _ollama_model_registry
 
     # Refresh the registry
@@ -1627,7 +1630,7 @@ async def _get_ollama_model_registry(
 
     new_registry = {}
     for model_id in model_ids:
-        display_name = generate_model_display_name(model_id)
+        display_name = generate_model_display_name(model_id, include_provider=True)
         new_registry[display_name] = model_id
         # Also allow lookup by model_id directly
         new_registry[model_id] = model_id
@@ -1697,7 +1700,7 @@ async def ollama_list_models(
 
     models = []
     for model_id in model_ids:
-        display_name = generate_model_display_name(model_id)
+        display_name = generate_model_display_name(model_id, include_provider=True)
 
         # Try to get context length from model info service
         context_length = 128000  # Default
@@ -1812,7 +1815,11 @@ async def ollama_chat(
             request.client.host if request.client else "unknown",
             request.client.port if request.client else 0,
         ),
-        request_data={"model": model_id, "ollama_model": body.model, "stream": body.stream},
+        request_data={
+            "model": model_id,
+            "ollama_model": body.model,
+            "stream": body.stream,
+        },
     )
 
     if body.stream:
