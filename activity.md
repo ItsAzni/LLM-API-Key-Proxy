@@ -3,8 +3,8 @@
 ## Current Status
 
 **Last Updated:** 2026-01-23
-**Tasks Completed:** 1/10
-**Current Task:** Create GitHub Copilot Auth Base class (COMPLETED)
+**Tasks Completed:** 2/10
+**Current Task:** Create GitHub Copilot Provider class (COMPLETED)
 
 ---
 
@@ -39,3 +39,41 @@
 - Token never expires (GitHub OAuth tokens are long-lived)
 
 <!-- Agent will append entries here -->
+
+### 2026-01-23 - Task 2: Create GitHub Copilot Provider class
+
+**Status:** COMPLETED
+
+**Changes Made:**
+- Created `src/rotator_library/providers/github_copilot_provider.py`
+- Inherits from `GitHubCopilotAuthBase` and `ProviderInterface`
+- Defined `provider_env_name = "github_copilot"`
+- Defined `tier_priorities` for copilot and copilot-enterprise tiers
+- Configured `skip_cost_calculation = True` (Copilot subscription covers costs)
+- Defined `AVAILABLE_MODELS` list with 12 models:
+  - GPT: gpt-5.1-codex, gpt-5-mini, gpt-5-nano, gpt-4o
+  - Claude: claude-haiku-4.5, claude-opus-4
+  - Gemini: gemini-3-flash-preview, gemini-2.0-flash-001
+  - Others: grok-code-fast-1, o3, o4-mini
+- Defined `RESPONSES_API_MODELS` set for GPT-5/o-series models
+- Implemented `has_custom_logic()` returning `True`
+- Implemented `get_models()` returning hardcoded model list with provider prefix
+- Implemented `get_credential_tier_name()` to detect enterprise credentials
+- Implemented `_get_api_base()` for enterprise URL routing
+- Implemented `_is_responses_api_model()` helper for API endpoint selection
+
+**Files Modified:**
+- `src/rotator_library/providers/github_copilot_provider.py` (NEW)
+
+**Verification:**
+- Syntax check passed (`python -m py_compile`)
+- Import test passed
+- Class instantiation verified
+- Provider auto-discovery confirmed (registered in `PROVIDER_PLUGINS`)
+
+**Notes:**
+- Provider is automatically registered via the plugin discovery system
+- Uses hardcoded model list (dynamic discovery can be added later)
+- Enterprise support via different API base URL
+- Responses API models (GPT-5, o-series) will use `/responses` endpoint
+
