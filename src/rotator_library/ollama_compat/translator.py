@@ -26,24 +26,27 @@ from .models import (
 )
 
 
-def generate_model_display_name(model_id: str) -> str:
+def generate_model_display_name(model_id: str, include_provider: bool = False) -> str:
     """
     Generate a human-readable display name from a model ID.
 
     Args:
         model_id: Internal model ID (e.g., "antigravity/claude-sonnet-4")
+        include_provider: If True, append provider name in parentheses
 
     Returns:
-        Display name (e.g., "Claude Sonnet 4")
+        Display name (e.g., "Claude Sonnet 4" or "Claude Sonnet 4 (Antigravity)")
 
     Examples:
-        antigravity/claude-sonnet-4 -> Claude Sonnet 4
+        antigravity/claude-sonnet-4 -> Claude Sonnet 4 (or "Claude Sonnet 4 (Antigravity)" if include_provider=True)
         gemini/gemini-2.5-flash -> Gemini 2.5 Flash
         openai/gpt-4o -> GPT 4o
         anthropic/claude-3-opus -> Claude 3 Opus
     """
-    # Strip provider prefix
+    # Extract provider prefix if present
+    provider = None
     if "/" in model_id:
+        provider = model_id.split("/")[0]
         name = model_id.split("/")[-1]
     else:
         name = model_id
@@ -64,7 +67,14 @@ def generate_model_display_name(model_id: str) -> str:
         else:
             result.append(word.capitalize())
 
-    return " ".join(result)
+    display_name = " ".join(result)
+
+    # Append provider name in parentheses if requested
+    if include_provider and provider:
+        provider_display = provider.replace("-", " ").replace("_", " ").title()
+        display_name = f"{display_name} ({provider_display})"
+
+    return display_name
 
 
 def model_display_name_to_id(
@@ -98,7 +108,9 @@ def model_display_name_to_id(
     return None
 
 
-def ollama_to_openai_messages(messages: List[OllamaChatMessage]) -> List[Dict[str, Any]]:
+def ollama_to_openai_messages(
+    messages: List[OllamaChatMessage],
+) -> List[Dict[str, Any]]:
     """
     Convert Ollama message format to OpenAI format.
 
@@ -513,7 +525,9 @@ def openai_to_ollama_response(
                 args = {}
             tool_calls.append(
                 OllamaToolCall(
-                    function=OllamaToolCallFunction(name=func.get("name", ""), arguments=args)
+                    function=OllamaToolCallFunction(
+                        name=func.get("name", ""), arguments=args
+                    )
                 )
             )
 

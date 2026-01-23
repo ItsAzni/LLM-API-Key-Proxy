@@ -1718,7 +1718,7 @@ async def _get_ollama_model_registry(
 
     new_registry = {}
     for model_id in model_ids:
-        display_name = generate_model_display_name(model_id)
+        display_name = generate_model_display_name(model_id, include_provider=True)
         new_registry[display_name] = model_id
         # Also allow lookup by model_id directly
         new_registry[model_id] = model_id
@@ -1750,6 +1750,26 @@ def _resolve_ollama_model(display_name: str, registry: Dict[str, str]) -> Option
     return None
 
 
+@app.get("/api/version")
+async def ollama_version():
+    """
+    Ollama-compatible endpoint to return version info.
+    Required for remote Ollama host detection by Raycast.
+
+    No authentication required (matches Ollama behavior).
+    """
+    return {"version": "0.5.4"}
+
+
+@app.get("/")
+async def ollama_root():
+    """
+    Root endpoint for Ollama compatibility.
+    Some clients check this to verify Ollama is running.
+    """
+    return "Ollama is running"
+
+
 @app.get("/api/tags")
 async def ollama_list_models(
     request: Request,
@@ -1772,7 +1792,7 @@ async def ollama_list_models(
 
     models = []
     for model_id in model_ids:
-        display_name = generate_model_display_name(model_id)
+        display_name = generate_model_display_name(model_id, include_provider=True)
 
         # Try to get context length from model info service
         context_length = 128000  # Default
