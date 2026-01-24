@@ -44,8 +44,65 @@ lib_logger = logging.getLogger("rotator_library")
 # GitHub Copilot API base URLs
 COPILOT_API_BASE = "https://api.githubcopilot.com"
 
-# User agent for API requests
-USER_AGENT = "LLM-API-Key-Proxy/1.0"
+# OpenCode version cache (fetched once on first use)
+_opencode_version_cache: Optional[str] = None
+_OPENCODE_FALLBACK_VERSION = "1.1.34"  # Fallback if GitHub fetch fails
+
+
+def _fetch_opencode_version() -> str:
+    """
+    Fetch the latest OpenCode version from GitHub releases.
+
+    Caches the result so it only fetches once per process lifetime.
+    Falls back to a hardcoded version if the fetch fails.
+
+    Returns:
+        Version string like "1.1.34"
+    """
+    global _opencode_version_cache
+
+    if _opencode_version_cache is not None:
+        return _opencode_version_cache
+
+    try:
+        import urllib.request
+        import json as json_module
+
+        url = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "LLM-API-Key-Proxy",
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json_module.loads(response.read().decode())
+            tag = data.get("tag_name", "")
+            # Strip leading 'v' if present (e.g., "v1.0.220" -> "1.0.220")
+            version = tag.lstrip("v") if tag else _OPENCODE_FALLBACK_VERSION
+            _opencode_version_cache = version
+            lib_logger.debug(f"Fetched OpenCode version from GitHub: {version}")
+            return version
+
+    except Exception as e:
+        lib_logger.warning(
+            f"Failed to fetch OpenCode version from GitHub: {e}. "
+            f"Using fallback version {_OPENCODE_FALLBACK_VERSION}"
+        )
+        _opencode_version_cache = _OPENCODE_FALLBACK_VERSION
+        return _OPENCODE_FALLBACK_VERSION
+
+
+def _get_user_agent() -> str:
+    """Get the User-Agent string mimicking OpenCode."""
+    version = _fetch_opencode_version()
+    return f"opencode/{version}"
+
+
+# User agent for API requests (dynamically fetched from GitHub)
+USER_AGENT = _get_user_agent()
 
 # Required headers for Copilot API calls
 COPILOT_HEADERS = {
