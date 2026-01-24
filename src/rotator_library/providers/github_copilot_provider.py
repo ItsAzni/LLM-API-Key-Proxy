@@ -626,18 +626,24 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         Detect if a request should be marked as agent-initiated.
 
-        Behavior controlled by GITHUB_COPILOT_FORCE_AGENT environment variable:
-
-        GITHUB_COPILOT_FORCE_AGENT=true:
-            - Always returns True (x-initiator: "agent" for ALL requests)
-            - Mimics the copilot-force-agent-header plugin behavior
-            - Use this to always appear as an "agent" even for first messages
+        Behavior controlled by environment variables:
 
         GITHUB_COPILOT_FORCE_AGENT=false (default):
-            - Uses OpenCode's standard behavior
+            Uses OpenCode's standard behavior:
             - Returns True only if last message role is NOT "user"
             - First user message → x-initiator: "user"
             - Agent continuation → x-initiator: "agent"
+
+        GITHUB_COPILOT_FORCE_AGENT=true:
+            Forces agent mode with optional probability for first messages:
+            - Non-first messages: Always x-initiator: "agent"
+            - First messages: Controlled by GITHUB_COPILOT_USER_INITIATOR_RATIO
+
+        GITHUB_COPILOT_USER_INITIATOR_RATIO (only when FORCE_AGENT=true):
+            Controls probability of "user" for first messages:
+            - 0 (default): Always "agent" for first messages
+            - N > 0: 1/N probability of "user" (e.g., 10 = 10% user, 90% agent)
+            This makes traffic patterns look more natural.
 
         Args:
             messages: List of message dictionaries
@@ -646,18 +652,51 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             True if request should use x-initiator: "agent"
         """
         import os
+        import random
 
         # GITHUB_COPILOT_FORCE_AGENT: Force all requests to be agent-initiated
         # Disabled by default to match OpenCode's standard behavior
-        # Enable with: GITHUB_COPILOT_FORCE_AGENT=true
         force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() in (
             "true",
             "1",
             "yes",
         )
+
         if force_agent:
+            # Check if this is a "first message" (no assistant/tool content yet)
+            is_first_message = True
+            if messages:
+                for msg in messages:
+                    role = msg.get("role", "")
+                    if role in ("assistant", "tool"):
+                        is_first_message = False
+                        break
+                    # Also check Responses API types
+                    msg_type = msg.get("type", "")
+                    if msg_type in self.RESPONSES_API_AGENT_TYPES:
+                        is_first_message = False
+                        break
+
+            if is_first_message:
+                # For first messages, optionally use probability to sometimes return "user"
+                try:
+                    ratio = int(os.getenv("GITHUB_COPILOT_USER_INITIATOR_RATIO", "0"))
+                except ValueError:
+                    ratio = 0
+
+                if ratio > 0:
+                    # 1/ratio probability of using "user"
+                    user_probability = 1.0 / ratio
+                    if random.random() < user_probability:
+                        lib_logger.debug(
+                            f"First message: randomly using x-initiator: user (1/{ratio} probability)"
+                        )
+                        return False  # Use "user"
+
+            # Force agent for all other cases
             return True
 
+        # Standard OpenCode behavior when FORCE_AGENT=false
         if not messages:
             return False
 
