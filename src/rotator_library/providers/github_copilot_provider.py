@@ -505,8 +505,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         Check if a model requires the Responses API.
 
-        First checks discovered endpoints from /models API, then falls back
-        to heuristic based on model name patterns.
+        Based on OpenCode's shouldUseCopilotResponsesApi logic:
+        - GPT-5 and later use Responses API (for reasoning support)
+        - EXCEPT gpt-5-mini and gpt-5-nano which use Chat Completions
+        - o3 and o4-mini also use Responses API
 
         Args:
             model: Model name (with or without provider prefix)
@@ -514,18 +516,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         Returns:
             True if the model uses Responses API
         """
-        clean_model = model.split("/")[-1] if "/" in model else model
-
-        # Check if we have discovered endpoint info for this model
-        endpoints = self._discovered_models.get(clean_model, [])
-        if endpoints:
-            # If only /responses is supported, use Responses API
-            # If both are available, prefer /chat/completions for compatibility
-            if "/responses" in endpoints and "/chat/completions" not in endpoints:
-                return True
-            return False
-
-        # Fallback to heuristic if model wasn't discovered
+        # Always use the heuristic based on model name patterns
+        # This matches OpenCode behavior: GPT-5+ uses Responses API for reasoning
         return _is_responses_api_model(model)
 
     # =========================================================================
