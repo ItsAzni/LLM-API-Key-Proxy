@@ -379,6 +379,7 @@ if ENABLE_REQUEST_LOGGING:
 if ENABLE_RAW_LOGGING:
     logging.info("Raw I/O logging is enabled (proxy boundary, unmodified HTTP data).")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY")
+WEB_SEARCH_MAX_ITERATIONS = int(os.getenv("WEB_SEARCH_MAX_ITERATIONS", "15"))
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 
 # Keys that should NOT be treated as provider API keys
@@ -1022,7 +1023,7 @@ async def chat_completions(
             if use_tool_loop:
                 # Streaming with tool loop support
                 response_generator = await execute_with_tool_loop(
-                    client, request_data, request=request
+                    client, request_data, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
                 )
             else:
                 # Direct streaming without tool loop
@@ -1037,7 +1038,7 @@ async def chat_completions(
             if use_tool_loop:
                 # Non-streaming with tool loop
                 response = await execute_with_tool_loop(
-                    client, request_data, request=request
+                    client, request_data, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
                 )
             else:
                 response = await client.acompletion(request=request, **request_data)
@@ -1954,7 +1955,7 @@ async def ollama_chat(
         if use_server_tool_loop:
             # Streaming response with tool loop
             openai_stream = await execute_with_tool_loop(
-                client, openai_request, request=request
+                client, openai_request, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
             )
         else:
             openai_stream = client.acompletion(request=request, **openai_request)
@@ -1991,7 +1992,7 @@ async def ollama_chat(
         openai_request["stream"] = False
         if use_server_tool_loop:
             response = await execute_with_tool_loop(
-                client, openai_request, request=request
+                client, openai_request, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
             )
         else:
             response = await client.acompletion(request=request, **openai_request)
