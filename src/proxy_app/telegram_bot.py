@@ -809,8 +809,8 @@ def format_provider_detail(provider: str, stats: Dict[str, Any]) -> str:
 
     for idx, cred in enumerate(credentials, 1):
         identifier = cred.get("identifier", f"cred-{idx}")
-        email = cred.get("email", identifier)
-        tier = cred.get("tier", "")
+        email = cred.get("email") or identifier
+        tier = cred.get("tier") or ""
         status = cred.get("status", "unknown")
 
         # Status icon
