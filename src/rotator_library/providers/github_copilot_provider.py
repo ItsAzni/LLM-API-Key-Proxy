@@ -1712,6 +1712,31 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 ],
                             )
                             yield chunk
+                    elif item_type == "message":
+                        # Handle message item - extract content from output_text parts
+                        # This is a fallback for when deltas weren't received
+                        message_content = item.get("content", [])
+                        for content_part in message_content:
+                            if content_part.get("type") == "output_text":
+                                text = content_part.get("text", "")
+                                if text:
+                                    chunk = litellm.ModelResponse(
+                                        id=response_id,
+                                        created=created,
+                                        model=f"github_copilot/{model}",
+                                        object="chat.completion.chunk",
+                                        choices=[
+                                            {
+                                                "index": 0,
+                                                "delta": {
+                                                    "content": text,
+                                                    "role": "assistant",
+                                                },
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    )
+                                    yield chunk
                     continue
 
                 # Skip events that contain complete text already streamed via deltas
