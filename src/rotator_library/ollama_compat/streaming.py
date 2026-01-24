@@ -215,7 +215,9 @@ async def ollama_streaming_wrapper(
                 if tc_chunk.get("function"):
                     func = tc_chunk["function"]
                     if func.get("name"):
-                        accumulated_tool_calls[index]["name"] += func["name"]
+                        # Tool names are atomic, not streamed - only set if empty
+                        if not accumulated_tool_calls[index]["name"]:
+                            accumulated_tool_calls[index]["name"] = func["name"]
                     if func.get("arguments"):
                         accumulated_tool_calls[index]["arguments"] += func["arguments"]
 
