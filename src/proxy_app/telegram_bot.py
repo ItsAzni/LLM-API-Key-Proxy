@@ -345,6 +345,168 @@ def chunk_message(
 
 
 # =============================================================================
+# Format Adapters (Modular Usage Manager -> Legacy Format)
+# =============================================================================
+
+
+def get_primary_window(windows: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Get the primary window (daily or api_authoritative) from windows dict."""
+    if not windows:
+        return None
+    return windows.get("daily") or windows.get("api_authoritative") or next(iter(windows.values()), None)
+
+
+def get_window_remaining_pct(window: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Calculate remaining percentage from a window."""
+    if not window:
+        return None
+
+    remaining = window.get("remaining")
+    limit = window.get("limit")
+
+    if remaining is not None and limit and limit > 0:
+        return int((remaining / limit) * 100)
+
+    if limit and limit > 0:
+        request_count = window.get("request_count", 0)
+        return max(0, int(((limit - request_count) / limit) * 100))
+
+    return None
+
+
+def format_timestamp_to_iso(timestamp: Optional[float]) -> Optional[str]:
+    """Convert Unix timestamp to ISO format string."""
+    if not timestamp:
+        return None
+    try:
+        from datetime import timezone
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def adapt_stats_response(stats: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Adapt modular usage manager stats to the legacy format expected by formatting functions.
+
+    Transforms:
+    - credentials: dict -> array
+    - group_usage with windows -> model_groups with computed fields
+    - Aggregates quota_groups at provider level
+    """
+    if "error" in stats:
+        return stats
+
+    adapted = {
+        "providers": {},
+        "summary": stats.get("summary", {}),
+        "timestamp": stats.get("timestamp"),
+        "data_source": stats.get("data_source"),
+    }
+
+    for provider_name, prov_stats in stats.get("providers", {}).items():
+        credentials_dict = prov_stats.get("credentials", {})
+
+        # Handle both dict and array format
+        if isinstance(credentials_dict, list):
+            # Already an array - use legacy format
+            adapted["providers"][provider_name] = prov_stats
+            continue
+
+        # Convert credentials dict to array and adapt format
+        adapted_credentials = []
+        quota_groups_aggregated: Dict[str, Dict[str, Any]] = {}
+
+        for stable_id, cred in credentials_dict.items():
+            # Build adapted credential
+            totals = cred.get("totals", {})
+            adapted_cred = {
+                "identifier": cred.get("identifier", stable_id),
+                "email": cred.get("email"),
+                "tier": cred.get("tier"),
+                "status": cred.get("status", "unknown"),
+                "requests": totals.get("request_count", 0),
+                "tokens": {
+                    "input_cached": totals.get("prompt_tokens_cache_read", 0),
+                    "input_uncached": totals.get("prompt_tokens", 0),
+                    "output": totals.get("output_tokens", 0),
+                },
+                "approx_cost": totals.get("approx_cost"),
+                "model_groups": {},
+            }
+
+            # Convert group_usage to model_groups format
+            for group_name, group_usage in cred.get("group_usage", {}).items():
+                window = get_primary_window(group_usage.get("windows", {}))
+                remaining_pct = get_window_remaining_pct(window)
+
+                requests_used = window.get("request_count", 0) if window else 0
+                requests_max = window.get("limit") if window else None
+                reset_at = window.get("reset_at") if window else None
+
+                is_exhausted = group_usage.get("fair_cycle_exhausted", False)
+
+                adapted_cred["model_groups"][group_name] = {
+                    "remaining_pct": remaining_pct,
+                    "requests_used": requests_used,
+                    "requests_max": requests_max,
+                    "is_exhausted": is_exhausted,
+                    "reset_time_iso": format_timestamp_to_iso(reset_at) if reset_at else None,
+                }
+
+                # Aggregate for provider-level quota_groups
+                if group_name not in quota_groups_aggregated:
+                    quota_groups_aggregated[group_name] = {
+                        "total_requests_used": 0,
+                        "total_requests_max": 0,
+                        "remaining_pcts": [],
+                        "earliest_reset": None,
+                    }
+
+                agg = quota_groups_aggregated[group_name]
+                agg["total_requests_used"] += requests_used
+                if requests_max:
+                    agg["total_requests_max"] += requests_max
+                if remaining_pct is not None:
+                    agg["remaining_pcts"].append(remaining_pct)
+                if reset_at:
+                    if agg["earliest_reset"] is None or reset_at < agg["earliest_reset"]:
+                        agg["earliest_reset"] = reset_at
+
+            adapted_credentials.append(adapted_cred)
+
+        # Build provider-level quota_groups
+        quota_groups = {}
+        for group_name, agg in quota_groups_aggregated.items():
+            total_pct = None
+            if agg["total_requests_max"] > 0:
+                remaining = agg["total_requests_max"] - agg["total_requests_used"]
+                total_pct = max(0, int((remaining / agg["total_requests_max"]) * 100))
+            elif agg["remaining_pcts"]:
+                total_pct = int(sum(agg["remaining_pcts"]) / len(agg["remaining_pcts"]))
+
+            quota_groups[group_name] = {
+                "total_requests_used": agg["total_requests_used"],
+                "total_requests_max": agg["total_requests_max"],
+                "total_remaining_pct": total_pct,
+                "next_reset_time_iso": format_timestamp_to_iso(agg["earliest_reset"]) if agg["earliest_reset"] else None,
+            }
+
+        adapted["providers"][provider_name] = {
+            "credential_count": prov_stats.get("credential_count", 0),
+            "active_count": prov_stats.get("active_count", 0),
+            "exhausted_count": prov_stats.get("exhausted_count", 0),
+            "total_requests": prov_stats.get("total_requests", 0),
+            "tokens": prov_stats.get("tokens", {}),
+            "approx_cost": prov_stats.get("approx_cost"),
+            "credentials": adapted_credentials,
+            "quota_groups": quota_groups,
+        }
+
+    return adapted
+
+
+# =============================================================================
 # API Client
 # =============================================================================
 
@@ -383,7 +545,8 @@ async def fetch_quota_stats(provider: Optional[str] = None) -> Optional[Dict[str
             elif response.status_code != 200:
                 return {"error": f"HTTP {response.status_code}: {response.text[:100]}"}
 
-            return response.json()
+            # Adapt new modular format to legacy format
+            return adapt_stats_response(response.json())
 
     except httpx.ConnectError:
         return {"error": "Connection failed. Is the proxy running?"}
@@ -433,7 +596,8 @@ async def post_refresh_action(
             elif response.status_code != 200:
                 return {"error": f"HTTP {response.status_code}"}
 
-            return response.json()
+            # Adapt new modular format to legacy format
+            return adapt_stats_response(response.json())
 
     except Exception as e:
         return {"error": str(e)}

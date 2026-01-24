@@ -1960,7 +1960,7 @@ async def ollama_chat(
                 client, openai_request, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
             )
         else:
-            openai_stream = client.acompletion(request=request, **openai_request)
+            openai_stream = await client.acompletion(request=request, **openai_request)
 
         async def is_disconnected():
             return await request.is_disconnected()
