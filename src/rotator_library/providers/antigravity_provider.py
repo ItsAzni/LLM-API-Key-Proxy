@@ -30,6 +30,7 @@ import random
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
@@ -72,7 +73,7 @@ from ..error_handler import EmptyResponseError, TransientQuotaError
 from ..utils.paths import get_logs_dir, get_cache_dir
 
 if TYPE_CHECKING:
-    from ..usage_manager import UsageManager
+    from ..usage import UsageManager
 
 
 # =============================================================================
@@ -169,6 +170,30 @@ EMPTY_RESPONSE_RETRY_DELAY = env_int("ANTIGRAVITY_EMPTY_RESPONSE_RETRY_DELAY", 3
 # inject corrective messages and retry up to this many times
 MALFORMED_CALL_MAX_RETRIES = max(1, env_int("ANTIGRAVITY_MALFORMED_CALL_RETRIES", 2))
 MALFORMED_CALL_RETRY_DELAY = env_int("ANTIGRAVITY_MALFORMED_CALL_DELAY", 1)
+
+# =============================================================================
+# INTERNAL RETRY COUNTING (for usage tracking)
+# =============================================================================
+# Tracks the number of API attempts made per request, including internal retries
+# for empty responses, bare 429s, and malformed function calls.
+#
+# Uses ContextVar for thread-safety: each async task (request) gets its own
+# isolated value, so concurrent requests don't interfere with each other.
+#
+# The count is:
+# - Reset to 1 at the start of _streaming_with_retry
+# - Incremented each time we retry (before the next attempt)
+# - Read by on_request_complete() hook to report actual API call count
+#
+# Example: Request gets bare 429 twice, then succeeds
+#   Attempt 1: bare 429 → count stays 1, increment to 2, retry
+#   Attempt 2: bare 429 → count is 2, increment to 3, retry
+#   Attempt 3: success → count is 3
+#   on_request_complete returns count_override=3
+#
+_internal_attempt_count: ContextVar[int] = ContextVar(
+    "antigravity_attempt_count", default=1
+)
 
 # System instruction configuration
 # When true (default), prepend the Antigravity agent system instruction (identity, tool_calling, etc.)
@@ -326,7 +351,30 @@ If you are unsure about a tool's parameters, YOU MUST read the schema definition
 """
 
 # Parallel tool usage encouragement instruction
-DEFAULT_PARALLEL_TOOL_INSTRUCTION = """When multiple independent operations are needed, prefer making parallel tool calls in a single response rather than sequential calls across multiple responses. This reduces round-trips and improves efficiency. Only use sequential calls when one tool's output is required as input for another."""
+DEFAULT_PARALLEL_TOOL_INSTRUCTION = """<instructions name="parallel tool calling">
+
+Using parallel tool calling is MANDATORY. Be proactive about it. DO NO WAIT for the user to request "parallel calls"
+
+PARALLEL CALLS SHOULD BE AND _IS THE PRIMARY WAY YOU USE TOOLS IN THIS ENVIRONMENT_
+
+When you have to perform multi-step operations such as read multiple files, spawn task subagents, bash commands, multiple edits... _THE USER WANTS YOU TO MAKE PARALLEL TOOL CALLS_ instead of separate sequential calls. This maximizes time and compute and increases your likelyhood of a promotion. Sequential tool calling is only encouraged when relying on the output of a call for the next one(s)
+
+- WHAT CAN BE DONE IN PARALLEL, MUST BE, AND WILL BE DONE IN PARALLEL
+- INDIVIDUAL TOOL CALLS TO GATHER CONTEXT IS HEAVILY DISCOURAGED (please make parallel calls!)
+- PARALLEL TOOL CALLING IS YOUR BEST FRIEND AND WILL INCREASE USER'S HAPPINESS
+
+- Make parallel tool calls to manage ressources more efficiently, plan your tool calls ahead, then execute them in parallel.
+- Make parallel calls PROPERLY, be mindful of dependencies between calls.
+
+When researching anything, IT IS BETTER TO READ SPECULATIVELY, THEN TO READ SEQUENTIALLY. For example, if you need to read multiple files to gather context, read them all in parallel instead of reading one, then the next, etc.
+
+This environment has a powerful tool to remove unnecessary context, so you can always read more than needed and then trim down later, no need to use limit and offset parameters on the read tool.
+
+When making code changes, IT IS BETTER TO MAKE MULTIPLE EDITS IN PARALLEL RATHER THAN ONE AT A TIME.
+
+Do as much as you can in parallel, be efficient with you API requests, no single tool call spam, this is crucial as the user pays PER API request, so make them count!
+
+</instructions>"""
 
 # Interleaved thinking support for Claude models
 # Allows Claude to think between tool calls and after receiving tool results
@@ -754,16 +802,19 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         "$id",
         "$ref",
         "$defs",
-        "$schema",  # Rejected by 'parameters' key
+        "$schema",
+        "$comment",
+        "$vocabulary",
+        "$dynamicRef",
+        "$dynamicAnchor",
         "definitions",
-        "default",  # Rejected by 'parameters' key
-        "examples",  # Rejected by 'parameters' key
+        "default",  # Rejected by 'parameters' key, sometimes
+        "examples",  # Rejected by 'parameters' key, sometimes
         "title",  # May cause issues in nested objects
     }
 
-    # Validation keywords - only remove at schema-definition level,
-    # NOT when they appear as property names under "properties"
-    # Note: These are common property names that could be used by tools:
+    # Validation keywords to strip ONLY for Claude (Gemini accepts these)
+    # These are common property names that could be used by tools:
     # - "pattern" (glob, grep, regex tools)
     # - "format" (export, date/time tools)
     # - "minimum"/"maximum" (range tools)
@@ -771,28 +822,56 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # Keywords to strip for ALL targets (both Claude and Gemini):
     # Gemini's Proto-based API rejects these with "Unknown name" errors.
     # Note: $schema, default, examples, title moved to meta_keywords (always stripped)
-    unsupported_validation_keywords = {
+    validation_keywords_claude_only = {
+        # Array validation - Gemini accepts
         "minItems",
         "maxItems",
-        "uniqueItems",
+        # String validation - Gemini accepts
         "pattern",
         "minLength",
         "maxLength",
+        "format",
+        # Number validation - Gemini accepts
         "minimum",
         "maximum",
+        # Object validation - Gemini accepts
+        "minProperties",
+        "maxProperties",
+        # Composition - Gemini accepts
+        "not",
+        "prefixItems",
+    }
+
+    # Validation keywords to strip for ALL models (Gemini and Claude)
+    validation_keywords_all_models = {
+        # Number validation - Gemini rejects
         "exclusiveMinimum",
         "exclusiveMaximum",
         "multipleOf",
-        "format",
-        "minProperties",
-        "maxProperties",
+        # Array validation - Gemini rejects
+        "uniqueItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "unevaluatedItems",
+        # Object validation - Gemini rejects
         "propertyNames",
+        "unevaluatedProperties",
+        "dependentRequired",
+        "dependentSchemas",
+        # Content validation - Gemini rejects
         "contentEncoding",
         "contentMediaType",
         "contentSchema",
+        # Meta annotations - Gemini rejects
+        "examples",
         "deprecated",
         "readOnly",
         "writeOnly",
+        # Conditional - Gemini rejects
+        "if",
+        "then",
+        "else",
     }
 
     # Handle 'anyOf', 'oneOf', and 'allOf' for Claude
@@ -890,9 +969,16 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         if key == "const":
             continue
 
-        # Strip unsupported validation keywords for ALL targets (both Claude and Gemini)
-        # Gemini's Proto-based API rejects these with "Unknown name" errors
-        if key in unsupported_validation_keywords:
+        # Strip Claude-only keywords when not targeting Gemini
+        if key in validation_keywords_claude_only:
+            if for_gemini:
+                # Gemini accepts these - preserve them
+                cleaned[key] = value
+            # For Claude: skip - not supported
+            continue
+
+        # Strip keywords unsupported by ALL models (both Gemini and Claude)
+        if key in validation_keywords_all_models:
             continue
 
         # Special handling for additionalProperties:
@@ -924,7 +1010,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
             for prop_name, prop_schema in value.items():
                 # Log warning if property name matches a validation keyword
                 # This helps debug potential issues where the old code would have dropped it
-                if prop_name in unsupported_validation_keywords:
+                if prop_name in validation_keywords_claude_only:
                     lib_logger.debug(
                         f"[Schema] Preserving property '{prop_name}' (matches validation keyword name)"
                     )
@@ -4825,6 +4911,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         current_gemini_contents = gemini_contents
         current_payload = payload
 
+        # Reset internal attempt counter for this request (thread-safe via ContextVar)
+        _internal_attempt_count.set(1)
+
         for attempt in range(EMPTY_RESPONSE_MAX_ATTEMPTS):
             chunk_count = 0
 
@@ -4852,6 +4941,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         f"[Antigravity] Empty stream from {model}, "
                         f"attempt {attempt + 1}/{EMPTY_RESPONSE_MAX_ATTEMPTS}. Retrying..."
                     )
+                    # Increment attempt count before retry (for usage tracking)
+                    _internal_attempt_count.set(_internal_attempt_count.get() + 1)
                     await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
                     continue
                 else:
@@ -4954,6 +5045,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                                 malformed_retry_count, current_payload
                             )
 
+                    # Increment attempt count before retry (for usage tracking)
+                    _internal_attempt_count.set(_internal_attempt_count.get() + 1)
                     await asyncio.sleep(MALFORMED_CALL_RETRY_DELAY)
                     continue  # Retry with modified payload
                 else:
@@ -4981,6 +5074,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                             lib_logger.warning(
                                 f"[Antigravity] Bare 429 from {model}, "
                                 f"attempt {attempt + 1}/{EMPTY_RESPONSE_MAX_ATTEMPTS}. Retrying..."
+                            )
+                            # Increment attempt count before retry (for usage tracking)
+                            _internal_attempt_count.set(
+                                _internal_attempt_count.get() + 1
                             )
                             await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
                             continue
@@ -5073,3 +5170,51 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         except Exception as e:
             lib_logger.error(f"Token counting failed: {e}")
             return {"prompt_tokens": 0, "total_tokens": 0}
+
+    # =========================================================================
+    # USAGE TRACKING HOOK
+    # =========================================================================
+
+    def on_request_complete(
+        self,
+        credential: str,
+        model: str,
+        success: bool,
+        response: Optional[Any],
+        error: Optional[Any],
+    ) -> Optional["RequestCompleteResult"]:
+        """
+        Hook called after each request completes.
+
+        Reports the actual number of API calls made, including internal retries
+        for empty responses, bare 429s, and malformed function calls.
+
+        This uses the ContextVar pattern for thread-safe retry counting:
+        - _internal_attempt_count is set to 1 at start of _streaming_with_retry
+        - Incremented before each retry
+        - Read here to report the actual count
+
+        Example: Request gets 2 bare 429s then succeeds
+            → 3 API calls made
+            → Returns count_override=3
+            → Usage manager records 3 requests instead of 1
+
+        Returns:
+            RequestCompleteResult with count_override set to actual attempt count
+        """
+        from ..core.types import RequestCompleteResult
+
+        # Get the attempt count for this request
+        attempt_count = _internal_attempt_count.get()
+
+        # Reset for safety (though ContextVar should isolate per-task)
+        _internal_attempt_count.set(1)
+
+        # Log if we made extra attempts
+        if attempt_count > 1:
+            lib_logger.debug(
+                f"[Antigravity] Request to {model} used {attempt_count} API calls "
+                f"(includes internal retries)"
+            )
+
+        return RequestCompleteResult(count_override=attempt_count)
