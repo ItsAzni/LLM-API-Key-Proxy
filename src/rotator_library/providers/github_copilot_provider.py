@@ -288,6 +288,8 @@ def _map_reasoning_effort_to_config(
             "medium": 16000,
             "medium_high": 24000,
             "high": 32000,
+            "xhigh": 32000,  # Map xhigh to highest supported
+            "max": 32000,  # Map max to highest supported
         }
         return {"thinking": {"budget_tokens": budgets.get(effort, 16000)}}
 
@@ -316,6 +318,8 @@ def _map_reasoning_effort_to_config(
                 "medium": 12288,
                 "medium_high": 18432,
                 "high": 24576,
+                "xhigh": 24576,  # Map xhigh to highest supported
+                "max": 24576,  # Map max to highest supported
             }
             return {"thinkingConfig": {"thinkingBudget": budgets.get(effort, -1)}}
 

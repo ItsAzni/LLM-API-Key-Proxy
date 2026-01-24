@@ -2432,12 +2432,18 @@ class AntigravityProvider(
             "medium",
             "medium_high",
             "high",
+            "xhigh",
+            "max",
         }
         if effort not in valid_efforts:
             lib_logger.warning(
                 f"[Antigravity] Unknown reasoning_effort: '{reasoning_effort}', using auto"
             )
             effort = "auto"
+
+        # Map xhigh/max to high (highest supported level for Antigravity models)
+        if effort in ("xhigh", "max"):
+            effort = "high"
 
         # Gemini 3 Flash: minimal/low/medium/high
         if is_gemini_3_flash:

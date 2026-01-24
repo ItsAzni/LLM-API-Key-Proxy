@@ -239,7 +239,11 @@ def _build_reasoning_param(
             summary = o_sum
 
     if effort not in valid_efforts:
-        effort = "medium"
+        # If xhigh/max requested but not supported, fall back to highest available (high)
+        if effort in ("xhigh", "max") and "high" in valid_efforts:
+            effort = "high"
+        else:
+            effort = "medium"
     if summary not in valid_summaries:
         summary = "auto"
 
