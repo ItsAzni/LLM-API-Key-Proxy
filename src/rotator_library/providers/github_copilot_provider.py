@@ -624,28 +624,36 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
     def _detect_agent_initiated(self, messages: List[Dict[str, Any]]) -> bool:
         """
-        Detect if the conversation is agent-initiated.
+        Detect if a request should be marked as agent-initiated.
 
-        Based on opencode's copilot-force-agent-header plugin:
-        - Returns True if ANY message has role "assistant" or "tool"
-        - Also checks for Responses API alternate input types
+        Behavior controlled by GITHUB_COPILOT_FORCE_AGENT environment variable:
 
-        This enables better agentic behavior from GitHub Copilot models.
+        GITHUB_COPILOT_FORCE_AGENT=true:
+            - Always returns True (x-initiator: "agent" for ALL requests)
+            - Mimics the copilot-force-agent-header plugin behavior
+            - Use this to always appear as an "agent" even for first messages
+
+        GITHUB_COPILOT_FORCE_AGENT=false (default):
+            - Uses OpenCode's standard behavior
+            - Returns True only if last message role is NOT "user"
+            - First user message → x-initiator: "user"
+            - Agent continuation → x-initiator: "agent"
 
         Args:
             messages: List of message dictionaries
 
         Returns:
-            True if conversation contains assistant/tool messages
+            True if request should use x-initiator: "agent"
         """
         import os
 
-        # Force agent mode via environment variable (default: false to match opencode behavior)
-        # When false, x-initiator is set dynamically based on whether last message is from user
-        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() not in (
-            "false",
-            "0",
-            "no",
+        # GITHUB_COPILOT_FORCE_AGENT: Force all requests to be agent-initiated
+        # Disabled by default to match OpenCode's standard behavior
+        # Enable with: GITHUB_COPILOT_FORCE_AGENT=true
+        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() in (
+            "true",
+            "1",
+            "yes",
         )
         if force_agent:
             return True
