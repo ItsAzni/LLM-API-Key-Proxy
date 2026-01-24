@@ -102,9 +102,9 @@ def _is_responses_api_model(model: str) -> bool:
     """
     Check if a model requires the Responses API.
 
-    Based on opencode's shouldUseCopilotResponsesApi logic:
-    - GPT-5 and later use Responses API, EXCEPT gpt-5-mini and gpt-5-nano
-    - o3 and o4-mini also use Responses API
+    Based on opencode's shouldUseCopilotResponsesApi logic (provider.ts:52-54):
+    - GPT-5 and later use Responses API, EXCEPT gpt-5-mini
+    - Note: gpt-5-nano DOES use Responses API (unlike gpt-5-mini)
 
     Args:
         model: Model name (with or without provider prefix)
@@ -115,21 +115,16 @@ def _is_responses_api_model(model: str) -> bool:
     # Strip provider prefix if present
     clean_model = model.split("/")[-1] if "/" in model else model
 
-    # o-series models use Responses API
-    if clean_model.startswith("o3") or clean_model.startswith("o4-mini"):
-        return True
-
-    # Check for GPT-5 or later
+    # Check for GPT-5 or later (matching OpenCode's isGpt5OrLater + shouldUseCopilotResponsesApi)
     import re
 
     match = re.match(r"^gpt-(\d+)", clean_model)
     if match:
         version = int(match.group(1))
         if version >= 5:
-            # gpt-5-mini and gpt-5-nano use Chat Completions, not Responses API
-            if clean_model.startswith("gpt-5-mini") or clean_model.startswith(
-                "gpt-5-nano"
-            ):
+            # Only gpt-5-mini uses Chat Completions, not Responses API
+            # Note: gpt-5-nano DOES use Responses API per OpenCode
+            if clean_model.startswith("gpt-5-mini"):
                 return False
             return True
 
