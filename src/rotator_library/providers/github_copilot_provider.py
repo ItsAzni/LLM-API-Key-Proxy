@@ -765,6 +765,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         if reasoning_effort is not None:
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
             payload.update(thinking_config)
+            lib_logger.debug(
+                "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
+                reasoning_effort,
+                json.dumps(thinking_config, default=str)[:500],
+            )
 
         endpoint = f"{api_base}/chat/completions"
 
@@ -949,6 +954,26 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     "index": index,
                                     "delta": {
                                         "content": delta["content"],
+                                        "role": delta.get("role", "assistant"),
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        yield chunk
+
+                    # Handle reasoning_content delta (for models that support reasoning via Chat Completions)
+                    if "reasoning_content" in delta:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": index,
+                                    "delta": {
+                                        "reasoning_content": delta["reasoning_content"],
                                         "role": delta.get("role", "assistant"),
                                     },
                                     "finish_reason": None,
@@ -1467,6 +1492,22 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
                 # Handle different event types
                 event_type = evt.get("type", "")
+
+                if event_type == "response.output_item.done":
+                    item = evt.get("item", {})
+                    if item.get("type") == "reasoning":
+                        lib_logger.debug(
+                            "[GitHubCopilot] reasoning item event: %s",
+                            json.dumps(item, default=str)[:500],
+                        )
+
+                if event_type == "response.content_part.delta":
+                    content_part = evt.get("part", {})
+                    if content_part.get("type") == "reasoning":
+                        lib_logger.debug(
+                            "[GitHubCopilot] reasoning part delta: %s",
+                            str(content_part.get("text", ""))[:500],
+                        )
 
                 # Handle content delta events
                 if event_type == "response.output_text.delta":
