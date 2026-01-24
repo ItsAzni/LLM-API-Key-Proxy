@@ -1104,8 +1104,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     if finish_reason:
                         # Send accumulated tool calls if any
                         if current_tool_calls and finish_reason == "tool_calls":
+                            # Include index in each tool call for proper accumulation
                             tool_calls_list = [
-                                current_tool_calls[i]
+                                {"index": i, **current_tool_calls[i]}
                                 for i in sorted(current_tool_calls.keys())
                             ]
                             chunk = litellm.ModelResponse(
@@ -1541,6 +1542,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         created = int(time.time())
         response_id = f"resp-{uuid.uuid4().hex[:8]}"
 
+        # Track tool call indices - Responses API may not include index in events
+        tool_call_index_counter = 0
+
         async with client.stream(
             "POST",
             endpoint,
@@ -1646,7 +1650,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     item_type = item.get("type")
                     if item_type in ("function_call", "tool_call"):
                         call_id = item.get("call_id") or item.get("id")
-                        call_index = item.get("index", 0)
+                        # Use our own counter to ensure unique indices for each tool call
+                        # The API may not include index or may send all as index 0
+                        call_index = tool_call_index_counter
+                        tool_call_index_counter += 1
                         name = item.get("name") or item.get("function", {}).get("name")
                         arguments = item.get("arguments") or item.get(
                             "function", {}
