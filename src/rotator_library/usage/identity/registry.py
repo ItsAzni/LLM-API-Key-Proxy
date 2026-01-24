@@ -54,16 +54,22 @@ class CredentialRegistry:
             return self._cache[accessor].stable_id
 
         # Determine if OAuth or API key
-        if self._is_oauth_path(accessor):
+        is_oauth = self._is_oauth_path(accessor)
+        if is_oauth:
             stable_id = self._get_oauth_stable_id(accessor)
         else:
             stable_id = self._get_api_key_stable_id(accessor)
+
+        # For OAuth credentials, the stable_id is typically the email
+        # Use it as display_name for human-readable identification
+        display_name = stable_id if is_oauth and "@" in stable_id else None
 
         # Cache the result
         info = CredentialInfo(
             accessor=accessor,
             stable_id=stable_id,
             provider=provider,
+            display_name=display_name,
         )
         self._cache[accessor] = info
         self._id_to_accessor[stable_id] = accessor

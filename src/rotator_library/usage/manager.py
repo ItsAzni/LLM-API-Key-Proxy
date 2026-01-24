@@ -269,6 +269,7 @@ class UsageManager:
             # Register credentials
             for accessor in credentials:
                 stable_id = self._registry.get_stable_id(accessor, self.provider)
+                reg_info = self._registry.get_info(accessor, self.provider)
 
                 # Create or update state
                 if stable_id not in self._states:
@@ -276,11 +277,15 @@ class UsageManager:
                         stable_id=stable_id,
                         provider=self.provider,
                         accessor=accessor,
+                        display_name=reg_info.display_name,
                         created_at=time.time(),
                     )
                 else:
                     # Update accessor in case it changed
                     self._states[stable_id].accessor = accessor
+                    # Update display_name if set in registry
+                    if reg_info.display_name:
+                        self._states[stable_id].display_name = reg_info.display_name
 
                 # Apply overrides
                 if priorities and accessor in priorities:
