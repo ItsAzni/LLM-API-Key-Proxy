@@ -687,6 +687,8 @@ class CodexQuotaTracker:
         self,
         quota_results: Dict[str, Dict[str, Any]],
         usage_manager: "UsageManager",
+        force: bool = False,
+        is_initial_fetch: bool = False,
     ) -> int:
         """
         Store Codex quota baselines into UsageManager.
@@ -698,6 +700,8 @@ class CodexQuotaTracker:
         Args:
             quota_results: Dict from fetch_initial_baselines mapping cred_path -> quota data
             usage_manager: UsageManager instance to store baselines in
+            force: If True, always use API values (for manual refresh)
+            is_initial_fetch: If True, this is the first fetch on startup
 
         Returns:
             Number of baselines successfully stored

@@ -174,7 +174,7 @@ async def _streaming_tool_loop(
 
         accumulated_response = _create_empty_accumulated_response()
 
-        stream = client.acompletion(request=request, **current_request, **kwargs)
+        stream = await client.acompletion(request=request, **current_request, **kwargs)
 
         done_chunk = None
 
@@ -244,7 +244,7 @@ async def _streaming_tool_loop(
     final_request.pop("tools", None)
     final_request.pop("tool_choice", None)
 
-    stream = client.acompletion(request=request, **final_request, **kwargs)
+    stream = await client.acompletion(request=request, **final_request, **kwargs)
     async for chunk in stream:
         yield chunk
 
