@@ -588,8 +588,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         import os
 
-        # Force agent mode via environment variable (default: true for better agentic behavior)
-        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "true").lower() not in (
+        # Force agent mode via environment variable (default: false to match opencode behavior)
+        # When false, x-initiator is set dynamically based on whether last message is from user
+        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() not in (
             "false",
             "0",
             "no",
@@ -600,22 +601,22 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         if not messages:
             return False
 
-        # Check Chat Completions format: any message with assistant/tool role
-        for msg in messages:
-            role = msg.get("role", "")
-            if role in ("assistant", "tool"):
-                return True
+        # Match OpenCode's behavior: only check if the LAST message's role is NOT "user"
+        # This means:
+        # - First user message → x-initiator: "user"
+        # - User message after assistant response → x-initiator: "user" (new user turn)
+        # - Tool result after function call → x-initiator: "agent" (continuing agent flow)
+        last_msg = messages[-1]
+        last_role = last_msg.get("role", "user")
+
+        # For Chat Completions format: check last message role
+        if last_role != "user":
+            return True
 
         # Check Responses API format: last input with agent type
-        # (messages might be in Responses API input format already)
-        if messages:
-            last_msg = messages[-1]
-            msg_type = last_msg.get("type", "")
-            if msg_type in self.RESPONSES_API_AGENT_TYPES:
-                return True
-            # Also check if last message role is assistant
-            if last_msg.get("role") == "assistant":
-                return True
+        msg_type = last_msg.get("type", "")
+        if msg_type in self.RESPONSES_API_AGENT_TYPES:
+            return True
 
         return False
 
