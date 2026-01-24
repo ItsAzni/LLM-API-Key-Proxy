@@ -2,7 +2,10 @@
 Web Search Module for LLM-API-Key-Proxy.
 
 Provides web search as a tool that LLMs can call.
-Supports multiple providers with automatic fallback:
+Supports multiple providers with automatic fallback.
+Priority order is configurable via WEB_SEARCH_PRIORITY env var.
+
+Default priority:
 1. Exa MCP (free, no API key required)
 2. Tavily (if configured)
 3. Brave Search (if configured)
@@ -14,7 +17,7 @@ intercepts tool calls, executes searches, and continues the conversation loop.
 from .exa_service import ExaService, get_exa_service
 from .tavily_service import TavilyService, get_tavily_service
 from .brave_service import BraveService, get_brave_service
-from .search_service import SearchService, get_search_service
+from .search_service import SearchService, get_search_service, get_search_priority
 from .tool_handler import (
     WEB_SEARCH_TOOL_DEFINITION,
     inject_web_search_tool,
@@ -38,6 +41,7 @@ __all__ = [
     # Unified search
     "SearchService",
     "get_search_service",
+    "get_search_priority",
     # Tool handling
     "WEB_SEARCH_TOOL_DEFINITION",
     "inject_web_search_tool",

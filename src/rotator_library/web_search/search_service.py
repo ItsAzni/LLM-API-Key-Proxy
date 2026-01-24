@@ -1,20 +1,69 @@
 """
 Unified Search Service with fallback support.
 
-Provides a unified interface for web search that tries providers in order:
-1. Exa MCP (free, no API key required)
-2. Tavily (if configured)
-3. Brave (if configured)
+Provides a unified interface for web search that tries providers in order.
+Default priority: Exa → Tavily → Brave
+Configurable via WEB_SEARCH_PRIORITY environment variable.
 """
 
 import logging
-from typing import Dict, Any, Optional
+import os
+from typing import Dict, Any, Optional, List
 
 from .exa_service import get_exa_service
 from .tavily_service import get_tavily_service
 from .brave_service import get_brave_service
 
 logger = logging.getLogger("rotator_library.web_search")
+
+
+# Valid provider names
+VALID_PROVIDERS = {"exa", "tavily", "brave"}
+
+# Default priority order
+DEFAULT_PRIORITY = ["exa", "tavily", "brave"]
+
+
+def get_search_priority() -> List[str]:
+    """
+    Get the configured search provider priority order.
+
+    Reads from WEB_SEARCH_PRIORITY environment variable.
+    Format: comma-separated list of provider names (e.g., "tavily,exa,brave")
+
+    Returns:
+        List of provider names in priority order
+    """
+    priority_str = os.environ.get("WEB_SEARCH_PRIORITY", "").strip()
+
+    if not priority_str:
+        return DEFAULT_PRIORITY.copy()
+
+    # Parse the priority string
+    priority = []
+    for provider in priority_str.split(","):
+        provider = provider.strip().lower()
+        if provider in VALID_PROVIDERS:
+            if provider not in priority:  # Avoid duplicates
+                priority.append(provider)
+        elif provider:
+            logger.warning(
+                f"Unknown web search provider '{provider}' in WEB_SEARCH_PRIORITY. "
+                f"Valid providers: {', '.join(sorted(VALID_PROVIDERS))}"
+            )
+
+    if not priority:
+        logger.warning(
+            f"WEB_SEARCH_PRIORITY contains no valid providers. Using default: {DEFAULT_PRIORITY}"
+        )
+        return DEFAULT_PRIORITY.copy()
+
+    # Add any missing providers at the end (so they're still available as fallbacks)
+    for provider in DEFAULT_PRIORITY:
+        if provider not in priority:
+            priority.append(provider)
+
+    return priority
 
 
 # Mapping from normalized freshness to Brave API format
@@ -30,10 +79,10 @@ class SearchService:
     """
     Unified search service with automatic fallback.
 
-    Priority order:
-    1. Exa MCP (always available - free, no API key)
-    2. Tavily (if configured)
-    3. Brave (if configured and others fail)
+    Priority order is configurable via WEB_SEARCH_PRIORITY environment variable.
+    Default: Exa → Tavily → Brave
+
+    Example: WEB_SEARCH_PRIORITY=tavily,brave,exa
     """
 
     _instance: Optional["SearchService"] = None
@@ -43,6 +92,17 @@ class SearchService:
         self.tavily = get_tavily_service()
         self.brave = get_brave_service()
 
+        # Map provider names to service instances
+        self._providers = {
+            "exa": self.exa,
+            "tavily": self.tavily,
+            "brave": self.brave,
+        }
+
+        # Get priority order from config
+        self._priority = get_search_priority()
+        logger.info(f"Web search provider priority: {' → '.join(self._priority)}")
+
     @property
     def is_configured(self) -> bool:
         """Check if at least one search provider is configured."""
@@ -51,13 +111,75 @@ class SearchService:
 
     @property
     def configured_providers(self) -> list[str]:
-        """Get list of configured provider names."""
-        providers = ["exa"]  # Exa is always available
-        if self.tavily.is_configured:
-            providers.append("tavily")
-        if self.brave.is_configured:
-            providers.append("brave")
+        """Get list of configured provider names in priority order."""
+        providers = []
+        for name in self._priority:
+            if name == "exa":
+                providers.append("exa")  # Exa is always available
+            elif name == "tavily" and self.tavily.is_configured:
+                providers.append("tavily")
+            elif name == "brave" and self.brave.is_configured:
+                providers.append("brave")
         return providers
+
+    async def _search_with_provider(
+        self,
+        provider_name: str,
+        query: str,
+        max_results: Optional[int],
+        freshness: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Attempt search with a specific provider.
+
+        Returns result dict on success, None on failure.
+        """
+        if provider_name == "exa":
+            logger.debug(f"Attempting Exa MCP search for: {query}")
+            result = await self.exa.search(query, max_results=max_results)
+
+            if "error" not in result or result.get("answer") or result.get("results"):
+                result["provider"] = "exa"
+                logger.info(f"Exa MCP search successful for: {query}")
+                return result
+            return None
+
+        elif provider_name == "tavily":
+            if not self.tavily.is_configured:
+                return None
+
+            logger.debug(f"Attempting Tavily search for: {query} (freshness={freshness})")
+            result = await self.tavily.search(
+                query,
+                max_results=max_results,
+                time_range=freshness,
+            )
+
+            if "error" not in result or result.get("results"):
+                result["provider"] = "tavily"
+                logger.info(f"Tavily search successful for: {query}")
+                return result
+            return None
+
+        elif provider_name == "brave":
+            if not self.brave.is_configured:
+                return None
+
+            brave_freshness = BRAVE_FRESHNESS_MAP.get(freshness) if freshness else None
+            logger.debug(f"Attempting Brave search for: {query} (freshness={brave_freshness})")
+            result = await self.brave.search(
+                query,
+                max_results=max_results,
+                freshness=brave_freshness,
+            )
+
+            if "error" not in result or result.get("results"):
+                result["provider"] = "brave"
+                logger.info(f"Brave search successful for: {query}")
+                return result
+            return None
+
+        return None
 
     async def search(
         self,
@@ -68,7 +190,7 @@ class SearchService:
         """
         Execute a web search with automatic fallback.
 
-        Tries Exa first (free), then Tavily, then Brave.
+        Tries providers in configured priority order.
 
         Args:
             query: The search query
@@ -89,67 +211,28 @@ class SearchService:
         if freshness == "any":
             freshness = None
 
-        # Try Exa MCP first (free, no API key)
-        logger.debug(f"Attempting Exa MCP search for: {query}")
-        result = await self.exa.search(
-            query,
-            max_results=max_results,
-            # Exa doesn't support freshness filtering directly
-        )
-
-        if "error" not in result or result.get("answer") or result.get("results"):
-            result["provider"] = "exa"
-            logger.info(f"Exa MCP search successful for: {query}")
-            return result
-
-        # Exa failed, record error
-        error_msg = result.get("error", "Unknown Exa error")
-        errors.append(f"Exa: {error_msg}")
-        logger.warning(f"Exa MCP search failed: {error_msg}")
-
-        # Try Tavily as first paid fallback
-        if self.tavily.is_configured:
-            logger.debug(f"Attempting Tavily search for: {query} (freshness={freshness})")
-            result = await self.tavily.search(
-                query,
-                max_results=max_results,
-                time_range=freshness,  # Tavily uses same values: day, week, month, year
+        # Try providers in priority order
+        for provider_name in self._priority:
+            result = await self._search_with_provider(
+                provider_name, query, max_results, freshness
             )
 
-            if "error" not in result or result.get("results"):
-                result["provider"] = "tavily"
-                logger.info(f"Tavily search successful for: {query}")
+            if result is not None:
                 return result
 
-            # Tavily failed, record error
-            error_msg = result.get("error", "Unknown Tavily error")
-            errors.append(f"Tavily: {error_msg}")
-            logger.warning(f"Tavily search failed: {error_msg}")
-
-        # Try Brave as last fallback
-        if self.brave.is_configured:
-            # Map freshness to Brave format
-            brave_freshness = BRAVE_FRESHNESS_MAP.get(freshness) if freshness else None
-
-            logger.debug(f"Attempting Brave search for: {query} (freshness={brave_freshness})")
-            result = await self.brave.search(
-                query,
-                max_results=max_results,
-                freshness=brave_freshness,
-            )
-
-            if "error" not in result or result.get("results"):
-                result["provider"] = "brave"
-                logger.info(f"Brave search successful for: {query}")
-                return result
-
-            # Brave failed, record error
-            error_msg = result.get("error", "Unknown Brave error")
-            errors.append(f"Brave: {error_msg}")
-            logger.warning(f"Brave search failed: {error_msg}")
+            # Record error for this provider
+            provider_service = self._providers.get(provider_name)
+            if provider_service:
+                # Check if provider was even configured
+                if provider_name == "exa" or (
+                    hasattr(provider_service, "is_configured")
+                    and provider_service.is_configured
+                ):
+                    errors.append(f"{provider_name.capitalize()}: search failed")
+                    logger.warning(f"{provider_name.capitalize()} search failed for: {query}")
 
         # All providers failed
-        error_msg = " | ".join(errors)
+        error_msg = " | ".join(errors) if errors else "No configured providers available"
         logger.error(f"All search providers failed for: {query}")
         return {
             "results": [],
