@@ -26,6 +26,9 @@ from .utilities.gemini_shared_utils import (
     FINISH_REASON_MAP,
     CODE_ASSIST_ENDPOINT,
     GEMINI_CLI_ENDPOINT_FALLBACKS,
+    # Tier utilities
+    TIER_PRIORITIES,
+    DEFAULT_TIER_PRIORITY,
 )
 from ..transaction_logger import ProviderLogger
 from .utilities.gemini_tool_handler import GeminiToolHandler
@@ -148,22 +151,12 @@ class GeminiCliProvider(
     # Provider name for env var lookups (QUOTA_GROUPS_GEMINI_CLI_*)
     provider_env_name: str = "gemini_cli"
 
-    # Tier name -> priority mapping (Single Source of Truth)
-    # Same tier names as Antigravity (coincidentally), but defined separately
-    tier_priorities = {
-        # Priority 1: Highest paid tier (Google AI Ultra - name unconfirmed)
-        # "google-ai-ultra": 1,  # Uncomment when tier name is confirmed
-        # Priority 2: Standard paid tier
-        "standard-tier": 2,
-        # Priority 3: Free tier
-        "free-tier": 3,
-        # Priority 10: Legacy/Unknown (lowest)
-        "legacy-tier": 10,
-        "unknown": 10,
-    }
+    # Tier name -> priority mapping (from centralized tier utilities)
+    # Lower numbers = higher priority (ULTRA=1 > PRO=2 > FREE=3)
+    tier_priorities = TIER_PRIORITIES
 
     # Default priority for tiers not in the mapping
-    default_tier_priority: int = 10
+    default_tier_priority: int = DEFAULT_TIER_PRIORITY
 
     # Usage reset configs for Gemini CLI
     # Verified 2026-01-07: 24-hour fixed window from first request for ALL tiers
@@ -195,11 +188,11 @@ class GeminiCliProvider(
     # Priority 1 (paid ultra): 5x concurrent requests
     # Priority 2 (standard paid): 3x concurrent requests
     # Others: Use sequential fallback (2x) or balanced default (1x)
-    default_priority_multipliers = {1: 5, 2: 3}
+    default_priority_multipliers = {1: 2, 2: 1}
 
     # For sequential mode, lower priority tiers still get 2x to maintain stickiness
     # For balanced mode, this doesn't apply (falls back to 1x)
-    default_sequential_fallback_multiplier = 2
+    default_sequential_fallback_multiplier = 1
 
     @staticmethod
     def parse_quota_error(
@@ -417,7 +410,6 @@ class GeminiCliProvider(
 
         # Tool name sanitization mapping (sanitized -> original)
         self._tool_name_mapping: Dict[str, str] = {}
-
 
     # =========================================================================
     # CREDENTIAL TIER LOOKUP (Provider-specific - uses cache)

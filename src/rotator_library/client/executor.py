@@ -15,6 +15,7 @@ with streaming vs non-streaming handled as a parameter.
 import asyncio
 import json
 import logging
+import os
 import random
 import time
 from typing import (
@@ -50,7 +51,10 @@ from ..core.errors import (
     should_retry_same_key,
     mask_credential,
 )
-from ..core.constants import DEFAULT_MAX_RETRIES
+from ..core.constants import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+)
 from ..request_sanitizer import sanitize_request_payload
 from ..transaction_logger import TransactionLogger
 from ..failure_logger import log_failure
@@ -904,6 +908,29 @@ class RequestExecutor:
                                         cred_context.mark_failure(classified)
                                         raise
 
+                                    # Check for small cooldown - retry same key instead of rotating
+                                    small_cooldown_threshold = int(
+                                        os.environ.get(
+                                            "SMALL_COOLDOWN_RETRY_THRESHOLD",
+                                            DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+                                        )
+                                    )
+                                    if (
+                                        classified.retry_after is not None
+                                        and 0
+                                        < classified.retry_after
+                                        < small_cooldown_threshold
+                                        and attempt < self._max_retries - 1
+                                    ):
+                                        remaining = deadline - time.time()
+                                        if classified.retry_after <= remaining:
+                                            lib_logger.info(
+                                                f"Retrying {mask_credential(cred)} in {classified.retry_after:.1f}s "
+                                                f"(small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
+                                            )
+                                            await asyncio.sleep(classified.retry_after)
+                                            continue  # Retry same key
+
                                     cred_context.mark_failure(classified)
                                     break  # Rotate
 
@@ -1100,11 +1127,29 @@ class RequestExecutor:
             cred_context.mark_failure(classified)
             return ErrorAction.FAIL
 
-        # Check if should retry same key
-        if should_retry_same_key(classified) and attempt < self._max_retries - 1:
+        # Check if should retry same key (including small cooldown auto-retry)
+        small_cooldown_threshold = int(
+            os.environ.get(
+                "SMALL_COOLDOWN_RETRY_THRESHOLD", DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD
+            )
+        )
+        is_small_cooldown = (
+            classified.retry_after is not None
+            and 0 < classified.retry_after < small_cooldown_threshold
+        )
+
+        if (
+            should_retry_same_key(classified, small_cooldown_threshold)
+            and attempt < self._max_retries - 1
+        ):
             wait_time = classified.retry_after or (2**attempt) + random.uniform(0, 1)
+            retry_reason = (
+                f" (small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
+                if is_small_cooldown
+                else ""
+            )
             lib_logger.info(
-                f"Retrying {mask_credential(credential)} in {wait_time:.1f}s"
+                f"Retrying {mask_credential(credential)} in {wait_time:.1f}s{retry_reason}"
             )
             await asyncio.sleep(wait_time)
             return ErrorAction.RETRY_SAME

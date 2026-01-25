@@ -93,6 +93,14 @@ DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD: int = 300  # 5 minutes
 # Override: FAIR_CYCLE_QUOTA_THRESHOLD_{PROVIDER}=<float>
 DEFAULT_FAIR_CYCLE_QUOTA_THRESHOLD: float = 1.0
 
+# Fair cycle reset cooldown threshold in seconds
+# When all credentials are exhausted, the fair cycle will only reset if ALL
+# credentials have cooldowns longer than this threshold. If any credential has
+# a shorter cooldown, the system will wait for it to expire instead of resetting.
+# This prevents premature cycle resets when credentials have short temporary cooldowns.
+# Override: FAIR_CYCLE_RESET_COOLDOWN_THRESHOLD_{PROVIDER}=<seconds>
+DEFAULT_FAIR_CYCLE_RESET_COOLDOWN_THRESHOLD: int = 90  # 1.5 minutes
+
 # =============================================================================
 # CUSTOM CAPS DEFAULTS
 # =============================================================================
@@ -132,3 +140,12 @@ COOLDOWN_TRANSIENT_ERROR: int = 30
 
 # Default rate limit cooldown when retry_after not provided (seconds)
 COOLDOWN_RATE_LIMIT_DEFAULT: int = 60
+
+# =============================================================================
+# SMALL COOLDOWN AUTO-RETRY
+# =============================================================================
+# When retry_after is below this threshold, automatically retry with the same
+# credential instead of rotating. This avoids unnecessary rotation for very
+# short rate limits (e.g., 2-3 second capacity bursts).
+# Override: SMALL_COOLDOWN_RETRY_THRESHOLD=<seconds>
+DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD: int = 10  # 10 seconds

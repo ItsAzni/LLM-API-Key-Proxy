@@ -235,6 +235,10 @@ class UsageManager:
         self._key_locks: Dict[str, asyncio.Lock] = {}
         self._key_conditions: Dict[str, asyncio.Condition] = {}
 
+        # Track which credentials are currently active in the proxy session
+        # (vs. historical data loaded from storage)
+        self._active_stable_ids: Set[str] = set()
+
     async def initialize(
         self,
         credentials: List[str],
@@ -266,9 +270,11 @@ class UsageManager:
                         fair_cycle_global
                     )
 
-            # Register credentials
+            # Register credentials and track active ones
+            self._active_stable_ids.clear()
             for accessor in credentials:
                 stable_id = self._registry.get_stable_id(accessor, self.provider)
+                self._active_stable_ids.add(stable_id)
                 reg_info = self._registry.get_info(accessor, self.provider)
 
                 # Create or update state
@@ -293,14 +299,41 @@ class UsageManager:
                 if tiers and accessor in tiers:
                     self._states[stable_id].tier = tiers[accessor]
 
-                # Set max concurrent if configured, applying priority multiplier
-                if self._max_concurrent_per_key is not None:
-                    base_concurrent = self._max_concurrent_per_key
-                    # Apply priority multiplier from config
-                    priority = self._states[stable_id].priority
-                    multiplier = self._config.get_effective_multiplier(priority)
-                    effective_concurrent = base_concurrent * multiplier
-                    self._states[stable_id].max_concurrent = effective_concurrent
+                # Debug: Log state before max_concurrent calculation
+                old_max_concurrent = self._states[stable_id].max_concurrent
+
+                # Always set max concurrent, applying priority multiplier
+                # Uses configured value or defaults to 1 if not set
+                base_concurrent = (
+                    self._max_concurrent_per_key
+                    if self._max_concurrent_per_key is not None
+                    else 1
+                )
+                priority = self._states[stable_id].priority
+                multiplier = self._config.get_effective_multiplier(priority)
+                effective_concurrent = base_concurrent * multiplier
+                self._states[stable_id].max_concurrent = effective_concurrent
+
+            # Clean up stale windows from tier changes
+            # This handles the case where a credential's tier changed and now has
+            # windows from the old tier that should be removed
+            # Also populate window_definitions for each credential based on tier
+            total_removed = 0
+            for stable_id, state in self._states.items():
+                # Populate window definitions for this credential's tier
+                state.window_definitions = self._get_window_definitions_for_state(state)
+
+                valid_windows = self._get_valid_window_names_for_state(state)
+                removed = self._cleanup_stale_windows_for_state(state, valid_windows)
+                total_removed += removed
+
+            if total_removed > 0:
+                lib_logger.info(
+                    f"Cleaned up {total_removed} stale window(s) for {self.provider}"
+                )
+                # Mark storage dirty so changes get saved
+                if self._storage:
+                    self._storage.mark_dirty()
 
             self._initialized = True
             lib_logger.debug(
@@ -808,7 +841,7 @@ class UsageManager:
         """
         stats = {
             "provider": self.provider,
-            "credential_count": len(self._states),
+            "credential_count": len(self._active_stable_ids),
             "rotation_mode": self._config.rotation_mode.value,
             "credentials": {},
         }
@@ -830,6 +863,10 @@ class UsageManager:
         )
 
         for stable_id, state in self._states.items():
+            # Skip credentials not currently active in the proxy
+            if stable_id not in self._active_stable_ids:
+                continue
+
             now = time.time()
 
             # Determine credential status with proper granularity
@@ -1486,6 +1523,223 @@ class UsageManager:
         await self._save_if_needed()
 
         return None
+
+    # =========================================================================
+    # WINDOW CLEANUP
+    # =========================================================================
+
+    def _get_valid_window_names_for_state(self, state: CredentialState) -> Set[str]:
+        """
+        Get the set of valid window names for a credential based on its tier.
+
+        Uses the provider's usage_reset_configs to determine which window(s)
+        should exist for this credential's tier/priority.
+
+        Args:
+            state: The credential state
+
+        Returns:
+            Set of valid window names (e.g., {"5h"} or {"168h"})
+        """
+        plugin_class = self._provider_plugins.get(self.provider)
+        if not plugin_class:
+            # No plugin - use current config windows as valid
+            return {w.name for w in self._config.windows}
+
+        # Check if provider defines usage_reset_configs
+        usage_reset_configs = getattr(plugin_class, "usage_reset_configs", None)
+        if not usage_reset_configs:
+            # No tier-specific configs - use current config windows
+            return {w.name for w in self._config.windows}
+
+        # Get tier priorities mapping
+        tier_priorities = getattr(plugin_class, "tier_priorities", {})
+        default_priority = getattr(plugin_class, "default_tier_priority", 10)
+
+        # Resolve credential's priority from tier
+        priority = state.priority
+        if priority is None and state.tier:
+            priority = tier_priorities.get(state.tier, default_priority)
+        if priority is None:
+            priority = default_priority
+
+        # Find matching usage config for this priority
+        matching_config = None
+        for key, config in usage_reset_configs.items():
+            if isinstance(key, frozenset) and priority in key:
+                matching_config = config
+                break
+        if matching_config is None:
+            matching_config = usage_reset_configs.get("default")
+
+        if matching_config is None:
+            # No matching config - use current windows
+            return {w.name for w in self._config.windows}
+
+        # Generate window name from window_seconds
+        window_seconds = matching_config.window_seconds
+        if window_seconds == 86400:
+            window_name = "daily"
+        elif window_seconds % 3600 == 0:
+            window_name = f"{window_seconds // 3600}h"
+        else:
+            window_name = "window"
+
+        return {window_name}
+
+    def _get_window_definitions_for_state(
+        self, state: CredentialState
+    ) -> List["WindowDefinition"]:
+        """
+        Get the window definitions for a credential based on its tier.
+
+        Uses the provider's usage_reset_configs to determine which window(s)
+        should be used for this credential's tier/priority.
+
+        Args:
+            state: The credential state
+
+        Returns:
+            List of WindowDefinition objects for this credential's tier
+        """
+        from .config import WindowDefinition
+
+        plugin_class = self._provider_plugins.get(self.provider)
+        if not plugin_class:
+            # No plugin - use current config windows
+            return list(self._config.windows) if self._config.windows else []
+
+        # Check if provider defines usage_reset_configs
+        usage_reset_configs = getattr(plugin_class, "usage_reset_configs", None)
+        if not usage_reset_configs:
+            # No tier-specific configs - use current config windows
+            return list(self._config.windows) if self._config.windows else []
+
+        # Get tier priorities mapping
+        tier_priorities = getattr(plugin_class, "tier_priorities", {})
+        default_priority = getattr(plugin_class, "default_tier_priority", 10)
+
+        # Resolve credential's priority from tier
+        priority = state.priority
+        if priority is None and state.tier:
+            priority = tier_priorities.get(state.tier, default_priority)
+        if priority is None:
+            priority = default_priority
+
+        # Find matching usage config for this priority
+        matching_config = None
+        for key, config in usage_reset_configs.items():
+            if isinstance(key, frozenset) and priority in key:
+                matching_config = config
+                break
+        if matching_config is None:
+            matching_config = usage_reset_configs.get("default")
+
+        if matching_config is None:
+            # No matching config - use current windows
+            return list(self._config.windows) if self._config.windows else []
+
+        # Generate window name from window_seconds
+        window_seconds = matching_config.window_seconds
+        if window_seconds == 86400:
+            window_name = "daily"
+        elif window_seconds % 3600 == 0:
+            window_name = f"{window_seconds // 3600}h"
+        else:
+            window_name = "window"
+
+        # Create WindowDefinition for this tier
+        return [
+            WindowDefinition.rolling(
+                name=window_name,
+                duration_seconds=window_seconds,
+                is_primary=True,
+                applies_to=matching_config.field_name or "model",
+            )
+        ]
+
+    def _cleanup_stale_windows_for_state(
+        self, state: CredentialState, valid_windows: Set[str]
+    ) -> int:
+        """
+        Remove windows that don't match the credential's current tier config.
+
+        This handles the case where a credential's tier changed and now has
+        windows from the old tier that should be cleaned up.
+
+        Args:
+            state: The credential state to clean up
+            valid_windows: Set of valid window names for this credential
+
+        Returns:
+            Number of windows removed
+        """
+        removed_count = 0
+
+        # Clean up model_usage windows
+        for model_name, model_stats in state.model_usage.items():
+            windows_to_remove = [
+                name for name in model_stats.windows.keys() if name not in valid_windows
+            ]
+            for window_name in windows_to_remove:
+                del model_stats.windows[window_name]
+                removed_count += 1
+                lib_logger.debug(
+                    f"Removed stale window '{window_name}' from model "
+                    f"'{model_name}' for {mask_credential(state.accessor, style='full')}"
+                )
+
+        # Clean up group_usage windows
+        for group_name, group_stats in state.group_usage.items():
+            windows_to_remove = [
+                name for name in group_stats.windows.keys() if name not in valid_windows
+            ]
+            for window_name in windows_to_remove:
+                del group_stats.windows[window_name]
+                removed_count += 1
+                lib_logger.debug(
+                    f"Removed stale window '{window_name}' from group "
+                    f"'{group_name}' for {mask_credential(state.accessor, style='full')}"
+                )
+
+        return removed_count
+
+    async def clear_cooldown_if_exists(
+        self,
+        accessor: str,
+        model_or_group: Optional[str] = None,
+    ) -> bool:
+        """
+        Clear a cooldown if one exists for the given scope.
+
+        Used during baseline refresh to clear cooldowns when API
+        reports quota is available.
+
+        Args:
+            accessor: Credential accessor (path or key)
+            model_or_group: Scope of cooldown to clear (None = global)
+
+        Returns:
+            True if a cooldown was cleared, False if none existed
+        """
+        stable_id = self._registry.get_stable_id(accessor, self.provider)
+        state = self._states.get(stable_id)
+        if not state:
+            return False
+
+        key = model_or_group or "_global_"
+        cooldown = state.cooldowns.get(key)
+
+        if cooldown and cooldown.is_active:
+            await self._tracking.clear_cooldown(state, model_or_group)
+            lib_logger.info(
+                f"Cleared cooldown for {key} on "
+                f"{mask_credential(accessor, style='full')} - API shows quota available "
+                f"(was: {cooldown.reason}, source: {cooldown.source})"
+            )
+            return True
+
+        return False
 
     def _apply_quota_update(
         self,

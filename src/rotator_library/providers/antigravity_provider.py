@@ -63,6 +63,9 @@ from .utilities.gemini_shared_utils import (
     GEMINI3_TOOL_RENAMES_REVERSE,
     FINISH_REASON_MAP,
     DEFAULT_SAFETY_SETTINGS,
+    # Tier utilities
+    TIER_PRIORITIES,
+    DEFAULT_TIER_PRIORITY,
 )
 from ..transaction_logger import AntigravityProviderLogger
 from .utilities.gemini_tool_handler import GeminiToolHandler
@@ -170,6 +173,12 @@ EMPTY_RESPONSE_RETRY_DELAY = env_int("ANTIGRAVITY_EMPTY_RESPONSE_RETRY_DELAY", 3
 # inject corrective messages and retry up to this many times
 MALFORMED_CALL_MAX_RETRIES = max(1, env_int("ANTIGRAVITY_MALFORMED_CALL_RETRIES", 2))
 MALFORMED_CALL_RETRY_DELAY = env_int("ANTIGRAVITY_MALFORMED_CALL_DELAY", 1)
+
+# 503 MODEL_CAPACITY_EXHAUSTED retry configuration
+# When server returns 503 (capacity exhausted), retry with longer delay
+# since rotating credentials is pointless - all credentials are equally affected
+CAPACITY_EXHAUSTED_MAX_ATTEMPTS = max(1, env_int("ANTIGRAVITY_503_MAX_ATTEMPTS", 10))
+CAPACITY_EXHAUSTED_RETRY_DELAY = env_int("ANTIGRAVITY_503_RETRY_DELAY", 5)
 
 # =============================================================================
 # INTERNAL RETRY COUNTING (for usage tracking)
@@ -1078,22 +1087,12 @@ class AntigravityProvider(
     # Provider name for env var lookups (QUOTA_GROUPS_ANTIGRAVITY_*)
     provider_env_name: str = "antigravity"
 
-    # Tier name -> priority mapping (Single Source of Truth)
-    # Lower numbers = higher priority
-    tier_priorities = {
-        # Priority 1: Highest paid tier (Google AI Ultra - name unconfirmed)
-        # "google-ai-ultra": 1,  # Uncomment when tier name is confirmed
-        # Priority 2: Standard paid tier
-        "standard-tier": 2,
-        # Priority 3: Free tier
-        "free-tier": 3,
-        # Priority 10: Legacy/Unknown (lowest)
-        "legacy-tier": 10,
-        "unknown": 10,
-    }
+    # Tier name -> priority mapping (from centralized tier utilities)
+    # Lower numbers = higher priority (ULTRA=1 > PRO=2 > FREE=3)
+    tier_priorities = TIER_PRIORITIES
 
     # Default priority for tiers not in the mapping
-    default_tier_priority: int = 10
+    default_tier_priority: int = DEFAULT_TIER_PRIORITY
 
     # Usage reset configs keyed by priority sets
     # Priorities 1-2 (paid tiers) get 5h window, others get 7d window
@@ -1160,11 +1159,11 @@ class AntigravityProvider(
     # Priority 1 (paid ultra): 5x concurrent requests
     # Priority 2 (standard paid): 3x concurrent requests
     # Others: Use sequential fallback (2x) or balanced default (1x)
-    default_priority_multipliers = {1: 5, 2: 3}
+    default_priority_multipliers = {1: 2, 2: 1}
 
     # For sequential mode, lower priority tiers still get 2x to maintain stickiness
     # For balanced mode, this doesn't apply (falls back to 1x)
-    default_sequential_fallback_multiplier = 2
+    default_sequential_fallback_multiplier = 1
 
     # Custom caps examples (commented - uncomment and modify as needed)
     # default_custom_caps = {
@@ -1515,9 +1514,80 @@ class AntigravityProvider(
         """Clear tool name mapping at start of each request."""
         self._tool_name_mapping.clear()
 
-    def _get_antigravity_headers(self) -> Dict[str, str]:
-        """Return the Antigravity API headers. Used by quota tracker mixin."""
-        return ANTIGRAVITY_HEADERS
+    def _get_credential_email(self, credential_path: str) -> Optional[str]:
+        """
+        Extract email from credential file's _proxy_metadata.
+
+        Args:
+            credential_path: Path to the credential file
+
+        Returns:
+            Email address if found, None otherwise
+        """
+        # Skip env:// paths
+        if self._parse_env_credential_path(credential_path) is not None:
+            return None
+
+        try:
+            # Try to get from cached credentials first
+            if (
+                hasattr(self, "_credentials_cache")
+                and credential_path in self._credentials_cache
+            ):
+                creds = self._credentials_cache[credential_path]
+                return creds.get("_proxy_metadata", {}).get("email")
+
+            # Fall back to reading file
+            with open(credential_path, "r") as f:
+                creds = json.load(f)
+            return creds.get("_proxy_metadata", {}).get("email")
+        except Exception:
+            return None
+
+    def _get_antigravity_headers(
+        self, credential_path: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Return the Antigravity API headers, optionally with device profile.
+
+        If credential_path is provided and has a valid email, builds dynamic
+        Client-Metadata header with device profile for hardware ID binding.
+        Otherwise returns static default headers.
+
+        Args:
+            credential_path: Optional credential path for device profile lookup
+
+        Returns:
+            Dict of HTTP headers for Antigravity API
+        """
+        # Start with static headers (User-Agent, X-Goog-Api-Client)
+        headers = {
+            "User-Agent": ANTIGRAVITY_HEADERS["User-Agent"],
+            "X-Goog-Api-Client": ANTIGRAVITY_HEADERS["X-Goog-Api-Client"],
+        }
+
+        # Try to build dynamic Client-Metadata with device profile
+        if credential_path:
+            email = self._get_credential_email(credential_path)
+            if email:
+                try:
+                    from .utilities.device_profile import (
+                        get_or_create_device_profile,
+                        build_client_metadata_header,
+                    )
+
+                    profile = get_or_create_device_profile(email)
+                    if profile:
+                        headers["Client-Metadata"] = build_client_metadata_header(
+                            profile
+                        )
+                        return headers
+                except Exception as e:
+                    lib_logger.debug(f"Failed to build device profile headers: {e}")
+
+        # Fallback to static Client-Metadata
+        headers["Client-Metadata"] = ANTIGRAVITY_HEADERS["Client-Metadata"]
+        return headers
 
     # NOTE: _load_tier_from_file() is inherited from GeminiCredentialManager mixin
     # NOTE: get_credential_tier_name() is inherited from GeminiCredentialManager mixin
@@ -4222,7 +4292,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                **ANTIGRAVITY_HEADERS,
+                **self._get_antigravity_headers(api_key),
             }
             payload = {
                 "project": _generate_project_id(),
@@ -4473,7 +4543,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
-            **ANTIGRAVITY_HEADERS,
+            **self._get_antigravity_headers(credential_path),
         }
 
         # Keep a mutable reference to gemini_contents for retry injection
@@ -5071,6 +5141,38 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     return
 
             except httpx.HTTPStatusError as e:
+                # Handle 503 MODEL_CAPACITY_EXHAUSTED - retry internally
+                # since rotating credentials is pointless (affects all equally)
+                if e.response.status_code == 503:
+                    error_body = ""
+                    try:
+                        error_body = (
+                            e.response.text if hasattr(e.response, "text") else ""
+                        )
+                    except Exception:
+                        pass
+
+                    if "MODEL_CAPACITY_EXHAUSTED" in error_body:
+                        if attempt < CAPACITY_EXHAUSTED_MAX_ATTEMPTS - 1:
+                            lib_logger.warning(
+                                f"[Antigravity] 503 MODEL_CAPACITY_EXHAUSTED from {model}, "
+                                f"attempt {attempt + 1}/{CAPACITY_EXHAUSTED_MAX_ATTEMPTS}. "
+                                f"Waiting {CAPACITY_EXHAUSTED_RETRY_DELAY}s..."
+                            )
+                            # NOTE: Do NOT increment _internal_attempt_count here - 503 capacity
+                            # exhausted errors don't consume quota, so retries are "free"
+                            await asyncio.sleep(CAPACITY_EXHAUSTED_RETRY_DELAY)
+                            continue
+                        else:
+                            # Max attempts reached - propagate error
+                            lib_logger.warning(
+                                f"[Antigravity] 503 MODEL_CAPACITY_EXHAUSTED after "
+                                f"{CAPACITY_EXHAUSTED_MAX_ATTEMPTS} attempts. Giving up."
+                            )
+                            raise
+                    # Other 503 errors - raise immediately
+                    raise
+
                 if e.response.status_code == 429:
                     # Check if this is a bare 429 (no retry info) vs real quota exhaustion
                     quota_info = self.parse_quota_error(e)
