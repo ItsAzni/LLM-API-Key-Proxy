@@ -1,68 +1,121 @@
 /**
  * TypeScript interfaces for the /v1/quota-stats API response.
+ * Updated for modular usage manager format.
  */
 
 export interface TokenStats {
   input_cached: number;
   input_uncached: number;
+  input_cache_pct?: number;
   output: number;
 }
 
-export interface QuotaGroup {
-  total_requests_used: number;
-  total_requests_max: number;
-  total_remaining_pct: number | null;
-  next_reset_time_iso?: string;
-}
-
-export interface ModelGroup {
-  requests_used: number;
-  requests_max?: number;
-  remaining_pct: number | null;
-  is_exhausted: boolean;
-  reset_time_iso?: string;
-}
-
-export interface CredentialStats {
-  identifier: string;
-  email?: string;
-  tier?: string;
-  status: "active" | "cooldown" | "exhausted" | "unknown";
-  requests: number;
-  tokens: TokenStats;
+export interface WindowStats {
+  request_count: number;
+  success_count: number;
+  failure_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  thinking_tokens: number;
+  output_tokens: number;
+  prompt_tokens_cache_read: number;
+  prompt_tokens_cache_write: number;
+  total_tokens: number;
+  limit: number | null;
+  remaining: number | null;
+  max_recorded_requests: number;
+  max_recorded_at: number | null;
+  reset_at: number | null;
   approx_cost: number | null;
-  model_groups?: Record<string, ModelGroup>;
-  key_cooldown_remaining?: number;
+  first_used_at: number | null;
+  last_used_at: number | null;
 }
 
-export interface ProviderStats {
-  credential_count: number;
-  active_count: number;
-  on_cooldown_count: number;
-  exhausted_count: number;
-  total_requests: number;
-  tokens: TokenStats;
-  approx_cost: number | null;
-  quota_groups?: Record<string, QuotaGroup>;
-  credentials: CredentialStats[];
-  // Global/lifetime stats
-  global?: {
-    total_requests: number;
-    tokens: TokenStats;
+export interface ModelUsage {
+  windows: Record<string, WindowStats>;
+  totals: {
+    request_count: number;
+    success_count: number;
+    failure_count: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    thinking_tokens: number;
+    output_tokens: number;
+    prompt_tokens_cache_read: number;
+    prompt_tokens_cache_write: number;
+    total_tokens: number;
     approx_cost: number | null;
+    first_used_at: number | null;
+    last_used_at: number | null;
   };
 }
 
-export interface Summary {
-  total_credentials: number;
-  total_requests: number;
-  tokens: TokenStats;
-  approx_total_cost: number | null;
+export interface GroupUsage extends ModelUsage {
+  fair_cycle_exhausted: boolean;
+  fair_cycle_reason: string | null;
+  cooldown_remaining: number | null;
+  cooldown_source: string | null;
+  custom_cap?: {
+    limit: number;
+    used: number;
+    remaining: number;
+    remaining_pct: number;
+  };
 }
 
-export interface GlobalSummary {
+export interface Totals {
+  request_count: number;
+  success_count: number;
+  failure_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  thinking_tokens: number;
+  output_tokens: number;
+  prompt_tokens_cache_read: number;
+  prompt_tokens_cache_write: number;
+  total_tokens: number;
+  approx_cost: number | null;
+  first_used_at: number | null;
+  last_used_at: number | null;
+}
+
+export interface CredentialStats {
+  stable_id: string;
+  accessor_masked?: string;
+  full_path?: string;
+  identifier: string;
+  email: string | null;
+  tier: string | null;
+  priority?: number;
+  active_requests?: number;
+  status: "active" | "cooldown" | "exhausted" | "mixed" | "unknown";
+  totals?: Totals;
+  model_usage?: Record<string, ModelUsage>;
+  group_usage?: Record<string, GroupUsage>;
+  cooldowns?: Record<string, unknown>;
+  fair_cycle?: Record<string, unknown>;
+}
+
+export interface ProviderStats {
+  provider?: string;
+  credential_count: number;
+  rotation_mode?: string;
+  active_count: number;
+  exhausted_count: number;
+  on_cooldown_count?: number;
+  total_requests: number;
+  tokens: TokenStats;
+  approx_cost: number | null;
+  quota_groups?: Record<string, unknown>;
+  // credentials can be dict (new format) or array (legacy format)
+  credentials: Record<string, CredentialStats> | CredentialStats[];
+}
+
+export interface Summary {
   total_providers: number;
   total_credentials: number;
+  active_credentials: number;
+  exhausted_credentials: number;
   total_requests: number;
   tokens: TokenStats;
   approx_total_cost: number | null;
@@ -71,7 +124,6 @@ export interface GlobalSummary {
 export interface QuotaStats {
   providers: Record<string, ProviderStats>;
   summary: Summary;
-  global_summary?: GlobalSummary;
   timestamp: number;
   data_source: string;
 }

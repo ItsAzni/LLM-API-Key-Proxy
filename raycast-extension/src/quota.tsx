@@ -9,7 +9,7 @@ import {
   openExtensionPreferences,
 } from "@raycast/api";
 import { useCachedPromise } from "@raycast/utils";
-import React, { useState } from "react";
+import React from "react";
 import {
   QuotaStats,
   QuotaStatsWithRefresh,
@@ -20,7 +20,6 @@ import {
 import {
   formatTokenStats,
   formatCost,
-  formatCooldown,
   formatResetTime,
   getProviderStatusIcon,
   getProviderStatusText,
@@ -28,11 +27,15 @@ import {
   getCredentialStatusText,
   getProgressColor,
   getProgressIcon,
+  credentialsToArray,
+  aggregateProviderQuotaGroups,
+  getCredentialQuotaInfo,
+  getPrimaryWindow,
+  getWindowRemainingPct,
 } from "./utils";
 
 export default function QuotaCommand() {
   const { proxyUrl, apiKey } = getPreferenceValues<Preferences>();
-  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
 
   const headers: Record<string, string> = {};
   if (apiKey) {
@@ -184,8 +187,12 @@ export default function QuotaCommand() {
                     <List.Item.Detail.Metadata>
                       <List.Item.Detail.Metadata.Label title="Current Session" />
                       <List.Item.Detail.Metadata.Label
+                        title="Providers"
+                        text={data.summary.total_providers.toString()}
+                      />
+                      <List.Item.Detail.Metadata.Label
                         title="Credentials"
-                        text={data.summary.total_credentials.toString()}
+                        text={`${data.summary.active_credentials}/${data.summary.total_credentials} active`}
                       />
                       <List.Item.Detail.Metadata.Label
                         title="Requests"
@@ -200,26 +207,6 @@ export default function QuotaCommand() {
                         text={formatCost(data.summary.approx_total_cost)}
                       />
                       <List.Item.Detail.Metadata.Separator />
-
-                      {/* Global/Lifetime Stats */}
-                      {data.global_summary && (
-                        <>
-                          <List.Item.Detail.Metadata.Label title="Lifetime Total" />
-                          <List.Item.Detail.Metadata.Label
-                            title="All-time Requests"
-                            text={data.global_summary.total_requests.toString()}
-                          />
-                          <List.Item.Detail.Metadata.Label
-                            title="All-time Tokens"
-                            text={formatTokenStats(data.global_summary.tokens)}
-                          />
-                          <List.Item.Detail.Metadata.Label
-                            title="All-time Cost"
-                            text={formatCost(data.global_summary.approx_total_cost)}
-                          />
-                          <List.Item.Detail.Metadata.Separator />
-                        </>
-                      )}
 
                       <List.Item.Detail.Metadata.Label
                         title="Data Source"
@@ -281,11 +268,17 @@ function ProviderListItem({
   onRefresh: () => void;
   onForceRefresh: () => void;
 }) {
-  // Get the primary quota group's remaining percentage for display
-  const quotaGroups = stats.quota_groups ? Object.entries(stats.quota_groups) : [];
-  const primaryQuota = quotaGroups.length > 0 ? quotaGroups[0][1] : null;
-  const remainingPct = primaryQuota?.total_remaining_pct;
-  const nextReset = primaryQuota?.next_reset_time_iso;
+  // Aggregate quota groups from credentials for provider-level summary
+  const quotaGroups = aggregateProviderQuotaGroups(stats.credentials);
+  const quotaGroupEntries = Object.entries(quotaGroups);
+
+  // Prioritize 'claude' group if it exists, otherwise use first available
+  const claudeQuota = quotaGroups["claude"];
+  const primaryQuota = claudeQuota || (quotaGroupEntries.length > 0 ? quotaGroupEntries[0][1] : null);
+  const primaryGroupName = claudeQuota ? "claude" : (quotaGroupEntries.length > 0 ? quotaGroupEntries[0][0] : null);
+
+  const remainingPct = primaryQuota?.remainingPct;
+  const nextReset = primaryQuota?.earliestReset;
 
   // Build accessories with quota info - using tag for colored percentage
   const accessories: List.Item.Accessory[] = [
@@ -294,8 +287,9 @@ function ProviderListItem({
 
   // Add remaining quota percentage if available (as colored tag)
   if (remainingPct !== null && remainingPct !== undefined) {
+    const label = primaryGroupName ? `${primaryGroupName}: ${remainingPct}%` : `${remainingPct}%`;
     accessories.push({
-      tag: { value: `${remainingPct}%`, color: getProgressColor(remainingPct) },
+      tag: { value: label, color: getProgressColor(remainingPct) },
     });
   }
 
@@ -310,7 +304,7 @@ function ProviderListItem({
       subtitle={getProviderStatusText(stats)}
       icon={getProviderStatusIcon(stats)}
       accessories={accessories}
-      detail={<ProviderDetail name={name} stats={stats} />}
+      detail={<ProviderDetail name={name} stats={stats} quotaGroups={quotaGroups} />}
       actions={
         <ActionPanel>
           <Action
@@ -331,7 +325,17 @@ function ProviderListItem({
   );
 }
 
-function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats }) {
+function ProviderDetail({
+  name,
+  stats,
+  quotaGroups
+}: {
+  name: string;
+  stats: ProviderStats;
+  quotaGroups: ReturnType<typeof aggregateProviderQuotaGroups>;
+}) {
+  const credentials = credentialsToArray(stats.credentials);
+
   return (
     <List.Item.Detail
       metadata={
@@ -347,6 +351,12 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
             title="Credentials"
             text={`${stats.active_count}/${stats.credential_count} active`}
           />
+          {stats.rotation_mode && (
+            <List.Item.Detail.Metadata.Label
+              title="Rotation Mode"
+              text={stats.rotation_mode}
+            />
+          )}
           <List.Item.Detail.Metadata.Separator />
 
           {/* Usage */}
@@ -366,20 +376,24 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
           <List.Item.Detail.Metadata.Separator />
 
           {/* Quota Groups */}
-          {stats.quota_groups && Object.keys(stats.quota_groups).length > 0 && (
+          {Object.keys(quotaGroups).length > 0 && (
             <>
               <List.Item.Detail.Metadata.Label title="Quota Groups" />
-              {Object.entries(stats.quota_groups).map(([groupName, group]) => (
+              {Object.entries(quotaGroups).map(([groupName, group]) => (
                 <React.Fragment key={groupName}>
                   <List.Item.Detail.Metadata.Label
                     title={groupName}
-                    text={`${group.total_requests_used}/${group.total_requests_max} (${group.total_remaining_pct ?? "?"}% remaining)`}
-                    icon={getProgressIcon(group.total_remaining_pct)}
+                    text={
+                      group.totalLimit > 0
+                        ? `${group.totalUsed}/${group.totalLimit} (${group.remainingPct ?? "?"}% remaining)`
+                        : `${group.remainingPct ?? "?"}% remaining`
+                    }
+                    icon={getProgressIcon(group.remainingPct)}
                   />
-                  {group.next_reset_time_iso && (
+                  {group.earliestReset && (
                     <List.Item.Detail.Metadata.Label
                       title={`  ↳ Resets`}
-                      text={formatResetTime(group.next_reset_time_iso)}
+                      text={formatResetTime(group.earliestReset)}
                       icon={Icon.Clock}
                     />
                   )}
@@ -389,65 +403,35 @@ function ProviderDetail({ name, stats }: { name: string; stats: ProviderStats })
             </>
           )}
 
-          {/* Global/Lifetime Stats */}
-          {stats.global && (
-            <>
-              <List.Item.Detail.Metadata.Label title="Lifetime Stats" />
-              <List.Item.Detail.Metadata.Label
-                title="All-time Requests"
-                text={stats.global.total_requests.toString()}
-              />
-              <List.Item.Detail.Metadata.Label
-                title="All-time Tokens"
-                text={formatTokenStats(stats.global.tokens)}
-              />
-              <List.Item.Detail.Metadata.Label
-                title="All-time Cost"
-                text={formatCost(stats.global.approx_cost)}
-              />
-              <List.Item.Detail.Metadata.Separator />
-            </>
-          )}
-
           {/* Credentials */}
           <List.Item.Detail.Metadata.Label title="Credentials" />
-          {stats.credentials.map((cred) => {
-            // Get the primary/lowest remaining quota across all model groups
-            const modelGroups = cred.model_groups ? Object.entries(cred.model_groups) : [];
-            let lowestPct: number | null = null;
-            let earliestReset: string | undefined = undefined;
-            let claudeUsed = 0;
-            let claudeMax = 0;
+          {credentials.map((cred) => {
+            // Build status text
+            const statusText = `${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""}`;
+            const quotaInfo = getCredentialQuotaInfo(cred);
+            const { lowestPct } = quotaInfo;
 
-            for (const [groupName, group] of modelGroups) {
-              if (group.remaining_pct !== null) {
-                if (lowestPct === null || group.remaining_pct < lowestPct) {
-                  lowestPct = group.remaining_pct;
-                }
-              }
-              if (group.reset_time_iso) {
-                if (!earliestReset || group.reset_time_iso < earliestReset) {
-                  earliestReset = group.reset_time_iso;
-                }
-              }
-              // Only count Claude requests
-              if (groupName.toLowerCase() === "claude") {
-                claudeUsed = group.requests_used || 0;
-                claudeMax = group.requests_max || 0;
+            // Get claude quota info
+            let claudeText = "";
+            if (cred.group_usage && cred.group_usage["claude"]) {
+              const groupUsage = cred.group_usage["claude"];
+              const window = getPrimaryWindow(groupUsage.windows);
+              if (window) {
+                const pct = getWindowRemainingPct(window);
+                const requestsText = window.limit
+                  ? `${window.request_count}/${window.limit}`
+                  : `${window.request_count}`;
+                const pctText = pct !== null ? ` (${pct}%)` : "";
+                const resetText = window.reset_at ? ` → ${formatResetTime(window.reset_at)}` : "";
+                claudeText = ` • ${requestsText}${pctText}${resetText}`;
               }
             }
 
-            // Build display text with quota info
-            const statusText = `${getCredentialStatusText(cred)}${cred.tier ? ` (${cred.tier})` : ""}`;
-            const requestsText = claudeMax > 0 ? ` • ${claudeUsed}/${claudeMax}` : "";
-            const quotaText = lowestPct !== null ? ` • ${lowestPct}%` : "";
-            const resetText = earliestReset ? ` • ${formatResetTime(earliestReset)}` : "";
-
             return (
               <List.Item.Detail.Metadata.Label
-                key={cred.identifier}
-                title={cred.email || cred.identifier}
-                text={`${statusText}${requestsText}${quotaText}${resetText}`}
+                key={cred.stable_id}
+                title={(cred.email?.split("@")[0]) || cred.identifier}
+                text={`${statusText}${claudeText}`}
                 icon={lowestPct !== null
                   ? getProgressIcon(lowestPct)
                   : getCredentialStatusIcon(cred)
