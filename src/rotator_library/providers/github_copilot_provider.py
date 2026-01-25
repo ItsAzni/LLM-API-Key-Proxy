@@ -580,6 +580,57 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
     # CHAT COMPLETIONS HELPERS
     # =========================================================================
 
+    def _sanitize_messages(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Sanitize messages to ensure tool calls have required fields.
+
+        GitHub Copilot API requires tool calls to have both 'id' and
+        'function.name'. This method filters out invalid tool calls.
+
+        Args:
+            messages: List of message dictionaries
+
+        Returns:
+            Sanitized list of messages
+        """
+        sanitized = []
+        for msg in messages:
+            msg_copy = dict(msg)
+            role = msg_copy.get("role", "")
+
+            # Handle assistant messages with tool_calls
+            if role == "assistant" and "tool_calls" in msg_copy:
+                tool_calls = msg_copy.get("tool_calls", [])
+                if tool_calls:
+                    valid_tool_calls = []
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        # Check for required fields
+                        tc_id = tc.get("id")
+                        func = tc.get("function", {})
+                        func_name = func.get("name") if isinstance(func, dict) else None
+
+                        # Skip tool calls missing id or function name
+                        if not tc_id or not func_name:
+                            lib_logger.warning(
+                                f"[GitHubCopilot] Skipping invalid tool call: "
+                                f"id={tc_id!r}, name={func_name!r}"
+                            )
+                            continue
+                        valid_tool_calls.append(tc)
+
+                    if valid_tool_calls:
+                        msg_copy["tool_calls"] = valid_tool_calls
+                    else:
+                        # Remove tool_calls if none are valid
+                        del msg_copy["tool_calls"]
+
+            sanitized.append(msg_copy)
+        return sanitized
+
     def _detect_vision_content(self, messages: List[Dict[str, Any]]) -> bool:
         """
         Detect if messages contain vision/image content.
@@ -830,10 +881,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 **filtered_kwargs,
             )
 
+        # Sanitize messages to remove invalid tool calls
+        sanitized_messages = self._sanitize_messages(messages)
+
         # Build request payload for Chat Completions API
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": sanitized_messages,
             "stream": stream,
         }
 
@@ -1219,11 +1273,20 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     if tool_call.get("type") != "function":
                         continue
                     function = tool_call.get("function", {})
+                    call_id = tool_call.get("id", "")
+                    func_name = function.get("name", "") if isinstance(function, dict) else ""
+                    # Skip invalid tool calls missing required fields
+                    if not call_id or not func_name:
+                        lib_logger.warning(
+                            f"[GitHubCopilot] Skipping invalid tool call in Responses API conversion: "
+                            f"id={call_id!r}, name={func_name!r}"
+                        )
+                        continue
                     input_items.append(
                         {
                             "type": "function_call",
-                            "call_id": tool_call.get("id", ""),
-                            "name": function.get("name", ""),
+                            "call_id": call_id,
+                            "name": func_name,
                             "arguments": function.get("arguments", ""),
                         }
                     )
