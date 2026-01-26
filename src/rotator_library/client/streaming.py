@@ -296,36 +296,27 @@ class StreamingHandler:
             if delta.get("tool_calls"):
                 chunk_has_tool_calls = True
 
-            # Detect final chunk: has usage with completion_tokens > 0
+            # Detect final chunk: has REAL usage with completion_tokens > 0
+            # NOTE: litellm.ModelResponse.model_dump() adds default usage with zeros
+            # and sets finish_reason="stop" as defaults, so we can't trust those.
+            # Only consider it a final chunk when completion_tokens > 0.
             has_completion_tokens = (
                 usage
                 and isinstance(usage, dict)
                 and usage.get("completion_tokens", 0) > 0
             )
 
-            # Check if provider already set a terminal finish_reason
-            provider_finish_reason = choice.get("finish_reason")
-            is_terminal_finish = provider_finish_reason in (
-                "stop",
-                "tool_calls",
-                "length",
-                "content_filter",
-            )
-
-            if has_completion_tokens or is_terminal_finish:
+            if has_completion_tokens:
                 # FINAL CHUNK: Determine correct finish_reason
                 if has_tool_calls or chunk_has_tool_calls:
                     choice["finish_reason"] = "tool_calls"
                 elif accumulated_finish_reason:
                     choice["finish_reason"] = accumulated_finish_reason
-                elif is_terminal_finish:
-                    # Preserve provider's terminal finish_reason
-                    choice["finish_reason"] = provider_finish_reason
                 else:
                     choice["finish_reason"] = "stop"
                 finish_reason = choice["finish_reason"]
             else:
-                # FIX 4: INTERMEDIATE CHUNK: Set finish_reason to null (not present)
+                # FIX 4: INTERMEDIATE CHUNK: Set finish_reason to null
                 choice["finish_reason"] = None
 
         return ProcessedChunk(

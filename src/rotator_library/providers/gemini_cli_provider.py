@@ -1073,7 +1073,9 @@ class GeminiCliProvider(
                 )  # Output (content)
                 cached_tokens = usage.get("cachedContentTokenCount", 0)  # Input subset
 
-                openai_chunk["usage"] = {
+                # Store usage for final chunk instead of including on every chunk
+                # OpenAI format expects usage only on the final chunk
+                usage_dict = {
                     "prompt_tokens": prompt_tokens,  # Input only
                     "completion_tokens": candidate_tokens
                     + thoughts_tokens,  # All output
@@ -1082,15 +1084,19 @@ class GeminiCliProvider(
 
                 # Add input breakdown: cached tokens
                 if cached_tokens > 0:
-                    openai_chunk["usage"]["prompt_tokens_details"] = {
+                    usage_dict["prompt_tokens_details"] = {
                         "cached_tokens": cached_tokens
                     }
 
                 # Add output breakdown: reasoning tokens
                 if thoughts_tokens > 0:
-                    openai_chunk["usage"]["completion_tokens_details"] = {
+                    usage_dict["completion_tokens_details"] = {
                         "reasoning_tokens": thoughts_tokens
                     }
+
+                # Store usage in accumulator for final chunk
+                if accumulator is not None:
+                    accumulator["last_usage"] = usage_dict
 
             yield openai_chunk
 
@@ -1519,6 +1525,7 @@ class GeminiCliProvider(
                     "has_tool_calls": False,
                     "tool_idx": 0,
                     "is_complete": False,
+                    "last_usage": None,  # Track usage for final chunk
                 }
 
                 # Build headers matching native gemini-cli client fingerprint
@@ -1583,25 +1590,28 @@ class GeminiCliProvider(
                                             f"Could not decode JSON from Gemini CLI: {line}"
                                         )
 
-                            # Emit final chunk if stream ended without usageMetadata
-                            # Client will determine the correct finish_reason
-                            if not accumulator.get("is_complete"):
-                                final_chunk = {
-                                    "id": f"chatcmpl-geminicli-{time.time()}",
-                                    "object": "chat.completion.chunk",
-                                    "created": int(time.time()),
-                                    "model": model,
-                                    "choices": [
-                                        {"index": 0, "delta": {}, "finish_reason": None}
-                                    ],
-                                    # Include minimal usage to signal this is the final chunk
-                                    "usage": {
-                                        "prompt_tokens": 0,
-                                        "completion_tokens": 1,
-                                        "total_tokens": 1,
-                                    },
+                            # Always emit a final chunk with usage for proper OpenAI format
+                            # This ensures finish_reason and usage are only on the final chunk
+                            final_chunk = {
+                                "id": f"chatcmpl-geminicli-{time.time()}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [
+                                    {"index": 0, "delta": {}, "finish_reason": None}
+                                ],
+                            }
+                            # Include accumulated usage or minimal fallback
+                            if accumulator.get("last_usage"):
+                                final_chunk["usage"] = accumulator["last_usage"]
+                            else:
+                                # Fallback minimal usage if none was received
+                                final_chunk["usage"] = {
+                                    "prompt_tokens": 0,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 1,
                                 }
-                                yield litellm.ModelResponse(**final_chunk)
+                            yield litellm.ModelResponse(**final_chunk)
 
                             # Success - exit the endpoint fallback loop
                             return

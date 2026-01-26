@@ -4097,8 +4097,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             "choices": [choice],
         }
 
-        if usage:
-            response["usage"] = usage
+        # NOTE: Don't include usage on every chunk - only on the final chunk
+        # Gemini API sends cumulative usageMetadata on every chunk, but OpenAI
+        # format expects usage only on the final chunk. The streaming handler
+        # uses completion_tokens > 0 to detect the final chunk.
+        # Usage will be added by the synthetic final chunk in _handle_streaming.
 
         return response
 
@@ -4887,19 +4890,20 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Only emit synthetic final chunk if we actually received real data
         # If no data was received, the caller will detect zero chunks and retry
         if accumulator.get("yielded_any"):
-            # If stream ended without usageMetadata chunk, emit a final chunk
-            if not accumulator.get("is_complete"):
-                final_chunk = {
-                    "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-                }
-                # Only include usage if we received real data during streaming
-                if accumulator.get("last_usage"):
-                    final_chunk["usage"] = accumulator["last_usage"]
-                yield litellm.ModelResponse(**final_chunk)
+            # Always emit a final chunk with usage for proper OpenAI format
+            # This ensures finish_reason and usage are only on the final chunk
+            final_chunk = {
+                "id": accumulator.get("response_id")
+                or f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            }
+            # Include accumulated usage on final chunk
+            if accumulator.get("last_usage"):
+                final_chunk["usage"] = accumulator["last_usage"]
+            yield litellm.ModelResponse(**final_chunk)
 
             # Log final assembled response for provider logging
             if file_logger:
