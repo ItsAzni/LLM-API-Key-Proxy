@@ -976,12 +976,32 @@ async def chat_completions(
             or request_data.get("generation_config", {})
             or {}
         )
-        reasoning_effort = request_data.get("reasoning_effort") or generation_cfg.get(
-            "reasoning_effort"
+        # Support nested "reasoning": {"effort": "high"} format (used by some clients like Raycast)
+        reasoning_cfg = request_data.get("reasoning", {}) or {}
+
+        # Support multiple parameter formats:
+        # 1. Top-level: "reasoning_effort": "high"
+        # 2. Top-level alias: "effort": "high"
+        # 3. Nested: "reasoning": {"effort": "high"}
+        # 4. In generationConfig: "generationConfig": {"reasoning_effort": "high"}
+        reasoning_effort = (
+            request_data.get("reasoning_effort")
+            or request_data.get("effort")
+            or reasoning_cfg.get("effort")
+            or reasoning_cfg.get("reasoning_effort")
+            or generation_cfg.get("reasoning_effort")
+            or generation_cfg.get("effort")
         )
         thinking_budget = request_data.get("thinking_budget") or generation_cfg.get(
             "thinking_budget"
         )
+
+        # Normalize to "reasoning_effort" in request_data for downstream processing
+        if reasoning_effort is not None:
+            request_data["reasoning_effort"] = reasoning_effort
+            # Remove aliases to avoid confusion
+            request_data.pop("effort", None)
+            request_data.pop("reasoning", None)
 
         logging.getLogger("rotator_library").debug(
             f"Handling reasoning parameters: model={model}, reasoning_effort={reasoning_effort}"
