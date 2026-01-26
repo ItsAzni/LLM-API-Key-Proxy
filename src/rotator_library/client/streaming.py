@@ -249,9 +249,11 @@ class StreamingHandler:
         """
         Process a single streaming chunk.
 
-        Handles finish_reason logic:
-        - Strip from intermediate chunks
-        - Apply correct finish_reason on final chunk
+        Handles:
+        - finish_reason logic: Strip from intermediate chunks, apply on final
+        - object field: Always "chat.completion.chunk" for streaming
+        - message field: Remove for streaming (only delta should be present)
+        - reasoning_content: Rename to "reasoning" for broader compatibility
 
         Args:
             chunk: Raw chunk from LiteLLM
@@ -269,6 +271,9 @@ class StreamingHandler:
         else:
             chunk_dict = chunk
 
+        # FIX 1: Ensure object is always "chat.completion.chunk" for streaming
+        chunk_dict["object"] = "chat.completion.chunk"
+
         # Extract metadata before modifying
         usage = chunk_dict.get("usage")
         finish_reason = None
@@ -276,7 +281,16 @@ class StreamingHandler:
 
         if "choices" in chunk_dict and chunk_dict["choices"]:
             choice = chunk_dict["choices"][0]
+
+            # FIX 2: Remove "message" field from streaming chunks (only delta should exist)
+            if "message" in choice:
+                del choice["message"]
+
             delta = choice.get("delta", {})
+
+            # FIX 3: Rename "reasoning_content" to "reasoning" for broader compatibility
+            if delta and "reasoning_content" in delta:
+                delta["reasoning"] = delta.pop("reasoning_content")
 
             # Check for tool_calls
             if delta.get("tool_calls"):
@@ -311,7 +325,7 @@ class StreamingHandler:
                     choice["finish_reason"] = "stop"
                 finish_reason = choice["finish_reason"]
             else:
-                # INTERMEDIATE CHUNK: Never emit finish_reason
+                # FIX 4: INTERMEDIATE CHUNK: Set finish_reason to null (not present)
                 choice["finish_reason"] = None
 
         return ProcessedChunk(
