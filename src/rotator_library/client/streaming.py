@@ -78,6 +78,9 @@ class StreamingHandler:
         completion_tokens = 0
         thinking_tokens = 0
 
+        # State for tracking <thinking> blocks in content (Claude via Antigravity)
+        in_thinking_block = False
+
         # Use manual iteration to allow continue after partial JSON errors
         stream_iterator = stream.__aiter__()
 
@@ -97,10 +100,11 @@ class StreamingHandler:
                     error_buffer.reset()
 
                     # Process chunk
-                    processed = self._process_chunk(
+                    processed, in_thinking_block = self._process_chunk(
                         chunk,
                         accumulated_finish_reason,
                         has_tool_calls,
+                        in_thinking_block,
                     )
 
                     # Update tracking state
@@ -245,7 +249,8 @@ class StreamingHandler:
         chunk: Any,
         accumulated_finish_reason: Optional[str],
         has_tool_calls: bool,
-    ) -> ProcessedChunk:
+        in_thinking_block: bool = False,
+    ) -> tuple[ProcessedChunk, bool]:
         """
         Process a single streaming chunk.
 
@@ -254,14 +259,16 @@ class StreamingHandler:
         - object field: Always "chat.completion.chunk" for streaming
         - message field: Remove for streaming (only delta should be present)
         - reasoning_content: Rename to "reasoning" for broader compatibility
+        - <thinking> tags: Parse from content and move to reasoning field
 
         Args:
             chunk: Raw chunk from LiteLLM
             accumulated_finish_reason: Current accumulated finish reason
             has_tool_calls: Whether any chunk has had tool_calls
+            in_thinking_block: Whether we're currently inside a <thinking> block
 
         Returns:
-            ProcessedChunk with SSE string and metadata
+            Tuple of (ProcessedChunk with SSE string and metadata, updated in_thinking_block state)
         """
         # Convert chunk to dict
         if hasattr(chunk, "model_dump"):
@@ -291,6 +298,43 @@ class StreamingHandler:
             # FIX 3: Rename "reasoning_content" to "reasoning" for broader compatibility
             if delta and "reasoning_content" in delta:
                 delta["reasoning"] = delta.pop("reasoning_content")
+
+            # FIX 5: Parse <thinking> tags from content (Claude via Antigravity)
+            # Claude models send thinking as <thinking>...</thinking> in content
+            if delta and "content" in delta and delta["content"]:
+                content = delta["content"]
+                new_content = ""
+                reasoning = delta.get("reasoning", "")
+
+                i = 0
+                while i < len(content):
+                    if not in_thinking_block:
+                        # Look for <thinking> tag
+                        if content[i:].startswith("<thinking>"):
+                            in_thinking_block = True
+                            i += len("<thinking>")
+                            continue
+                        else:
+                            new_content += content[i]
+                            i += 1
+                    else:
+                        # Inside thinking block - look for </thinking>
+                        if content[i:].startswith("</thinking>"):
+                            in_thinking_block = False
+                            i += len("</thinking>")
+                            continue
+                        else:
+                            reasoning += content[i]
+                            i += 1
+
+                # Update delta with separated content
+                if reasoning:
+                    delta["reasoning"] = reasoning
+                if new_content:
+                    delta["content"] = new_content
+                elif "content" in delta and not new_content:
+                    # All content was thinking, remove content field
+                    del delta["content"]
 
             # Check for tool_calls
             if delta.get("tool_calls"):
@@ -324,7 +368,7 @@ class StreamingHandler:
             usage=usage,
             finish_reason=finish_reason,
             has_tool_calls=chunk_has_tool_calls,
-        )
+        ), in_thinking_block
 
     def _try_extract_error(
         self,
