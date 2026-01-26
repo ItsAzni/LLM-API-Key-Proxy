@@ -1440,6 +1440,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         reasoning_effort = kwargs.get("reasoning_effort")
         if reasoning_effort is not None:
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+            lib_logger.debug(
+                "[GitHubCopilot] Mapped thinking_config: %s",
+                json.dumps(thinking_config, default=str),
+            )
             payload.update(thinking_config)
 
         # Structured output
@@ -1449,7 +1453,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         endpoint = f"{api_base}/responses"
 
         lib_logger.debug(
-            f"Copilot Responses API request to {model}: {json.dumps(payload, default=str)[:500]}..."
+            "[GitHubCopilot] Responses API request: model=%s, reasoning=%s",
+            model,
+            json.dumps(payload.get("reasoning"), default=str),
         )
 
         if stream:
@@ -1660,8 +1666,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     item = evt.get("item", {})
                     if item.get("type") == "reasoning":
                         lib_logger.debug(
-                            "[GitHubCopilot] reasoning item event: %s",
-                            json.dumps(item, default=str)[:500],
+                            "[GitHubCopilot] reasoning item: %s",
+                            json.dumps(item, default=str)[:300],
                         )
 
                 if event_type == "response.content_part.delta":
@@ -1669,7 +1675,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     if content_part.get("type") == "reasoning":
                         lib_logger.debug(
                             "[GitHubCopilot] reasoning part delta: %s",
-                            str(content_part.get("text", ""))[:500],
+                            str(content_part.get("text", ""))[:200],
                         )
 
                 # Handle content delta events
@@ -1686,6 +1692,28 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     "index": 0,
                                     "delta": {
                                         "content": delta_text,
+                                        "role": "assistant",
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        yield chunk
+
+                # Handle reasoning summary delta events (GPT-5.2 and o-series)
+                elif event_type == "response.reasoning_summary_text.delta":
+                    delta_text = evt.get("delta", "")
+                    if delta_text:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "reasoning_content": delta_text,
                                         "role": "assistant",
                                     },
                                     "finish_reason": None,
@@ -1750,35 +1778,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             )
                             yield chunk
                     elif item_type == "reasoning":
-                        reasoning_text = ""
-                        summary = item.get("summary")
-                        if isinstance(summary, list):
-                            for part in summary:
-                                text = part.get("text")
-                                if text:
-                                    reasoning_text += text
-                        else:
-                            text = item.get("text")
-                            if text:
-                                reasoning_text += text
-                        if reasoning_text:
-                            chunk = litellm.ModelResponse(
-                                id=response_id,
-                                created=created,
-                                model=f"github_copilot/{model}",
-                                object="chat.completion.chunk",
-                                choices=[
-                                    {
-                                        "index": 0,
-                                        "delta": {
-                                            "reasoning_content": reasoning_text,
-                                            "role": "assistant",
-                                        },
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            )
-                            yield chunk
+                        # Skip - reasoning was already streamed via response.reasoning_summary_text.delta
+                        # Emitting it again here would cause duplicates
+                        pass
                     elif item_type == "message":
                         # Handle message item - extract content from output_text parts
                         # This is a fallback for when deltas weren't received
