@@ -299,8 +299,8 @@ class StreamingHandler:
             if delta and "reasoning_content" in delta:
                 delta["reasoning"] = delta.pop("reasoning_content")
 
-            # FIX 5: Parse <thinking> tags from content (Claude via Antigravity)
-            # Claude models send thinking as <thinking>...</thinking> in content
+            # FIX 5: Parse <thinking> and <think> tags from content (Claude via Antigravity)
+            # Claude models send thinking as <thinking>...</thinking> or <think>...</think> in content
             if delta and "content" in delta and delta["content"]:
                 content = delta["content"]
                 new_content = ""
@@ -309,19 +309,27 @@ class StreamingHandler:
                 i = 0
                 while i < len(content):
                     if not in_thinking_block:
-                        # Look for <thinking> tag
+                        # Look for <thinking> or <think> tag
                         if content[i:].startswith("<thinking>"):
                             in_thinking_block = True
                             i += len("<thinking>")
+                            continue
+                        elif content[i:].startswith("<think>"):
+                            in_thinking_block = True
+                            i += len("<think>")
                             continue
                         else:
                             new_content += content[i]
                             i += 1
                     else:
-                        # Inside thinking block - look for </thinking>
+                        # Inside thinking block - look for </thinking> or </think>
                         if content[i:].startswith("</thinking>"):
                             in_thinking_block = False
                             i += len("</thinking>")
+                            continue
+                        elif content[i:].startswith("</think>"):
+                            in_thinking_block = False
+                            i += len("</think>")
                             continue
                         else:
                             reasoning += content[i]
