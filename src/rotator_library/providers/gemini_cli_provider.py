@@ -1098,7 +1098,16 @@ class GeminiCliProvider(
                 if accumulator is not None:
                     accumulator["last_usage"] = usage_dict
 
+                # Include usage on first chunk (for Anthropic message_start which needs input_tokens)
+                is_first_chunk = accumulator is not None and not accumulator.get("yielded_any")
+                if is_first_chunk and usage_dict:
+                    openai_chunk["usage"] = usage_dict
+
             yield openai_chunk
+
+            # Mark that we've yielded at least one chunk
+            if accumulator is not None:
+                accumulator["yielded_any"] = True
 
     def _stream_to_completion_response(
         self, chunks: List[litellm.ModelResponse]
@@ -1526,6 +1535,7 @@ class GeminiCliProvider(
                     "tool_idx": 0,
                     "is_complete": False,
                     "last_usage": None,  # Track usage for final chunk
+                    "yielded_any": False,  # Track if first chunk has been yielded
                 }
 
                 # Build headers matching native gemini-cli client fingerprint

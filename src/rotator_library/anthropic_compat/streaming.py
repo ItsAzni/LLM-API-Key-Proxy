@@ -128,7 +128,11 @@ async def anthropic_streaming_wrapper(
                 stop_reason_final = stop_reason
 
                 # Build final usage dict with cached tokens
-                final_usage = {"output_tokens": output_tokens}
+                # Include input_tokens since usage may only arrive on final chunk
+                final_usage = {
+                    "input_tokens": input_tokens - cached_tokens,
+                    "output_tokens": output_tokens,
+                }
                 if cached_tokens > 0:
                     final_usage["cache_read_input_tokens"] = cached_tokens
                     final_usage["cache_creation_input_tokens"] = 0
@@ -416,7 +420,11 @@ async def anthropic_streaming_wrapper(
         yield f'event: content_block_stop\ndata: {{"type": "content_block_stop", "index": {current_block_index}}}\n\n'
 
         # Build final usage with cached tokens
-        final_usage = {"output_tokens": 0}
+        # Include input_tokens since usage may only arrive on final chunk
+        final_usage = {
+            "input_tokens": input_tokens - cached_tokens,
+            "output_tokens": 0,
+        }
         if cached_tokens > 0:
             final_usage["cache_read_input_tokens"] = cached_tokens
             final_usage["cache_creation_input_tokens"] = 0

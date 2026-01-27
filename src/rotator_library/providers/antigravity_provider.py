@@ -4097,11 +4097,12 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             "choices": [choice],
         }
 
-        # NOTE: Don't include usage on every chunk - only on the final chunk
-        # Gemini API sends cumulative usageMetadata on every chunk, but OpenAI
-        # format expects usage only on the final chunk. The streaming handler
-        # uses completion_tokens > 0 to detect the final chunk.
-        # Usage will be added by the synthetic final chunk in _handle_streaming.
+        # Include usage on the FIRST chunk (for Anthropic message_start which needs input_tokens)
+        # and on the final chunk. Don't include on intermediate chunks for OpenAI compatibility.
+        # The streaming handler uses completion_tokens > 0 to detect the final chunk.
+        is_first_chunk = accumulator is not None and not accumulator.get("yielded_any")
+        if usage and is_first_chunk:
+            response["usage"] = usage
 
         return response
 

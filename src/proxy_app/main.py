@@ -691,6 +691,19 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+
+
+# Middleware to normalize double slashes in URL paths
+@app.middleware("http")
+async def normalize_double_slashes(request: Request, call_next):
+    """Normalize double slashes in URL path (e.g., //v1/models -> /v1/models)."""
+    if "//" in request.scope["path"]:
+        # Replace multiple slashes with single slash
+        import re
+        request.scope["path"] = re.sub(r"/+", "/", request.scope["path"])
+    return await call_next(request)
+
+
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
