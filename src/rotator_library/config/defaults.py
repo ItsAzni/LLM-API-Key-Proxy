@@ -17,6 +17,7 @@ See DOCUMENTATION.md for detailed descriptions of each setting.
 """
 
 from typing import Dict, Optional
+import os
 
 # =============================================================================
 # ROTATION & SELECTION DEFAULTS
@@ -37,7 +38,8 @@ DEFAULT_ROTATION_TOLERANCE: float = 3.0
 DEFAULT_MAX_RETRIES: int = 2
 
 # Maximum retries for GitHub Copilot (higher due to aggressive rate limiting)
-MAX_RETRIES_GITHUB_COPILOT: int = 20
+# Override: MAX_RETRIES_GITHUB_COPILOT=<int>
+MAX_RETRIES_GITHUB_COPILOT: int = int(os.getenv("MAX_RETRIES_GITHUB_COPILOT", "5"))
 
 # Global request timeout in seconds
 # This controls how long a request can wait for an available credential.
@@ -148,7 +150,7 @@ COOLDOWN_RATE_LIMIT_DEFAULT: int = 60
 # When a 429 response has a very small retry_after (e.g., 1s), we enforce
 # this minimum to prevent hammering rate-limited endpoints.
 # Override: COOLDOWN_RATE_LIMIT_MIN=<seconds>
-COOLDOWN_RATE_LIMIT_MIN: int = 5
+COOLDOWN_RATE_LIMIT_MIN: int = int(os.getenv("COOLDOWN_RATE_LIMIT_MIN", "5"))
 
 # =============================================================================
 # SMALL COOLDOWN AUTO-RETRY
