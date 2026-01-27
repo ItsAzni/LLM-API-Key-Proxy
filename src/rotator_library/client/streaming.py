@@ -497,3 +497,77 @@ class StreamBuffer:
     def is_complete(self) -> bool:
         """Check if buffer contains complete JSON."""
         return self._complete
+
+
+def strip_thinking_tags_from_response(response: Any) -> Any:
+    """
+    Strip <thinking> and <think> tags from non-streaming response content.
+
+    For non-streaming responses, some models (like Claude via Antigravity)
+    include thinking content wrapped in <thinking>...</thinking> or
+    <think>...</think> tags. This function strips those tags and optionally
+    moves the thinking content to a reasoning field.
+
+    Args:
+        response: The non-streaming response (ModelResponse or dict)
+
+    Returns:
+        The response with thinking tags stripped from content
+    """
+    import re
+
+    # Convert to dict if needed
+    if hasattr(response, "model_dump"):
+        response_dict = response.model_dump()
+        was_object = True
+    elif hasattr(response, "dict"):
+        response_dict = response.dict()
+        was_object = True
+    else:
+        response_dict = response
+        was_object = False
+
+    # Process choices
+    if "choices" in response_dict and response_dict["choices"]:
+        for choice in response_dict["choices"]:
+            message = choice.get("message", {})
+            if message and "content" in message and message["content"]:
+                content = message["content"]
+
+                # Extract thinking content and strip tags
+                # Pattern matches both <thinking>...</thinking> and <think>...</think>
+                thinking_pattern = r"<think(?:ing)?>(.*?)</think(?:ing)?>"
+                thinking_matches = re.findall(thinking_pattern, content, re.DOTALL)
+
+                # Remove thinking tags from content
+                cleaned_content = re.sub(thinking_pattern, "", content, flags=re.DOTALL)
+
+                # Strip leading/trailing whitespace that may result from tag removal
+                cleaned_content = cleaned_content.strip()
+
+                # Update message content
+                message["content"] = cleaned_content
+
+                # If there was thinking content, add it to reasoning field
+                if thinking_matches:
+                    reasoning = "\n".join(thinking_matches).strip()
+                    if reasoning:
+                        message["reasoning"] = reasoning
+
+    # Return in same format as input
+    if was_object:
+        # For LiteLLM ModelResponse objects, update in place and return
+        if hasattr(response, "choices") and response_dict.get("choices"):
+            for i, choice in enumerate(response_dict["choices"]):
+                if hasattr(response.choices[i], "message"):
+                    if "content" in choice.get("message", {}):
+                        response.choices[i].message.content = choice["message"][
+                            "content"
+                        ]
+                    if "reasoning" in choice.get("message", {}):
+                        response.choices[i].message.reasoning = choice["message"][
+                            "reasoning"
+                        ]
+        return response
+    else:
+        return response_dict

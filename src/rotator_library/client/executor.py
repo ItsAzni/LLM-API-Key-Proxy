@@ -62,7 +62,7 @@ from ..failure_logger import log_failure
 from .types import RetryState, AvailabilityStats
 from .filters import CredentialFilter
 from .transforms import ProviderTransforms
-from .streaming import StreamingHandler
+from .streaming import StreamingHandler, strip_thinking_tags_from_response
 
 if TYPE_CHECKING:
     from ..usage import UsageManager
@@ -621,6 +621,9 @@ class RequestExecutor:
                                         lib_logger.debug(
                                             f"Failed to log response: {log_err}"
                                         )
+
+                                # Strip thinking tags from non-streaming response
+                                response = strip_thinking_tags_from_response(response)
 
                                 return response
 
