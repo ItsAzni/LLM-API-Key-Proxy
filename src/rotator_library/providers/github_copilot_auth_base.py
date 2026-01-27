@@ -57,9 +57,45 @@ OAUTH_SCOPE = "read:user"
 # Polling safety margin to avoid clock skew issues (3 seconds)
 OAUTH_POLLING_SAFETY_MARGIN_SECONDS = 3
 
+_opencode_version_cache: Optional[str] = None
+_OPENCODE_FALLBACK_VERSION = "1.1.36"  # Fallback if GitHub fetch fails
+
 # Token never expires for GitHub OAuth (long-lived personal access token)
 # We store 0 to indicate no expiry
 TOKEN_NEVER_EXPIRES = 0
+
+
+def _fetch_opencode_version() -> str:
+    """Fetch the latest OpenCode version from GitHub releases."""
+    global _opencode_version_cache
+    if _opencode_version_cache is not None:
+        return _opencode_version_cache
+
+    try:
+        import urllib.request
+        import json as json_module
+
+        url = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "LLM-API-Key-Proxy",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json_module.loads(response.read().decode())
+            tag = data.get("tag_name", "")
+            version = tag.lstrip("v") if tag else _OPENCODE_FALLBACK_VERSION
+            _opencode_version_cache = version
+            return version
+    except Exception:
+        _opencode_version_cache = _OPENCODE_FALLBACK_VERSION
+        return _OPENCODE_FALLBACK_VERSION
+
+
+def _get_opencode_user_agent() -> str:
+    return f"opencode/{_fetch_opencode_version()}"
 
 
 def _normalize_domain(url: str) -> str:
@@ -80,6 +116,7 @@ class CredentialSetupResult:
     """
     Standardized result structure for credential setup operations.
     """
+
     success: bool
     file_path: Optional[str] = None
     email: Optional[str] = None
@@ -103,7 +140,7 @@ class GitHubCopilotAuthBase:
     # Configuration
     CLIENT_ID: str = CLIENT_ID
     ENV_PREFIX: str = "GITHUB_COPILOT"
-    USER_AGENT: str = "LLM-API-Key-Proxy/1.0"
+    USER_AGENT: str = _get_opencode_user_agent()
 
     def __init__(self):
         self._credentials_cache: Dict[str, Dict[str, Any]] = {}
@@ -138,7 +175,9 @@ class GitHubCopilotAuthBase:
             return parts[1]
         return "0"
 
-    def _load_from_env(self, credential_index: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def _load_from_env(
+        self, credential_index: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Load OAuth credentials from environment variables.
 
@@ -173,7 +212,9 @@ class GitHubCopilotAuthBase:
         }
 
         if enterprise_domain:
-            creds["_proxy_metadata"]["enterprise_domain"] = _normalize_domain(enterprise_domain)
+            creds["_proxy_metadata"]["enterprise_domain"] = _normalize_domain(
+                enterprise_domain
+            )
 
         return creds
 
@@ -204,7 +245,9 @@ class GitHubCopilotAuthBase:
 
             # Try file-based loading
             try:
-                lib_logger.debug(f"Loading {self.ENV_PREFIX} credentials from file: {path}")
+                lib_logger.debug(
+                    f"Loading {self.ENV_PREFIX} credentials from file: {path}"
+                )
                 with open(path, "r") as f:
                     creds = json.load(f)
                 self._credentials_cache[path] = creds
@@ -236,7 +279,9 @@ class GitHubCopilotAuthBase:
         if safe_write_json(
             path, creds, lib_logger, secure_permissions=True, buffer_on_failure=True
         ):
-            lib_logger.debug(f"Saved updated {self.ENV_PREFIX} OAuth credentials to '{path}'.")
+            lib_logger.debug(
+                f"Saved updated {self.ENV_PREFIX} OAuth credentials to '{path}'."
+            )
         else:
             lib_logger.warning(
                 f"Credentials for {self.ENV_PREFIX} cached in memory only (buffered for retry)."
@@ -294,9 +339,7 @@ class GitHubCopilotAuthBase:
         # force_interactive is accepted for API compatibility but not used
         _ = force_interactive  # Silence unused variable warning
 
-        lib_logger.debug(
-            f"{self.ENV_PREFIX} token for '{display_name}' is valid."
-        )
+        lib_logger.debug(f"{self.ENV_PREFIX} token for '{display_name}' is valid.")
 
         return creds
 
@@ -305,9 +348,7 @@ class GitHubCopilotAuthBase:
     # =========================================================================
 
     async def _perform_device_flow_oauth(
-        self,
-        domain: str = "github.com",
-        display_name: str = "GitHub Copilot"
+        self, domain: str = "github.com", display_name: str = "GitHub Copilot"
     ) -> Dict[str, Any]:
         """
         Perform GitHub Device Flow OAuth authentication.
@@ -378,13 +419,16 @@ class GitHubCopilotAuthBase:
         )
 
         escaped_url = rich_escape(verification_uri)
-        console.print(f"\n[bold]URL:[/bold] [link={verification_uri}]{escaped_url}[/link]")
+        console.print(
+            f"\n[bold]URL:[/bold] [link={verification_uri}]{escaped_url}[/link]"
+        )
         console.print(f"[bold]Code:[/bold] [bold green]{user_code}[/bold green]\n")
 
         # Open browser if not headless
         if not is_headless:
             try:
                 import webbrowser
+
                 webbrowser.open(verification_uri)
                 lib_logger.info("Browser opened successfully for OAuth flow")
             except Exception as e:
@@ -486,7 +530,9 @@ class GitHubCopilotAuthBase:
             access_token = creds.get("access_token")
 
             if not access_token:
-                raise ValueError(f"No access_token found in credentials at '{credential_identifier}'")
+                raise ValueError(
+                    f"No access_token found in credentials at '{credential_identifier}'"
+                )
 
             return {"Authorization": f"Bearer {access_token}"}
 
@@ -579,9 +625,7 @@ class GitHubCopilotAuthBase:
         return base_dir / filename
 
     async def setup_credential(
-        self,
-        base_dir: Optional[Path] = None,
-        domain: str = "github.com"
+        self, base_dir: Optional[Path] = None, domain: str = "github.com"
     ) -> CredentialSetupResult:
         """
         Complete credential setup flow: Device Flow OAuth -> save -> discovery.
@@ -601,19 +645,20 @@ class GitHubCopilotAuthBase:
         try:
             display_name = f"new {self.ENV_PREFIX} credential"
             new_creds = await self._perform_device_flow_oauth(
-                domain=domain,
-                display_name=display_name
+                domain=domain, display_name=display_name
             )
 
             access_token = new_creds.get("access_token")
             if not access_token:
                 return CredentialSetupResult(
                     success=False,
-                    error="Could not retrieve access token from OAuth response"
+                    error="Could not retrieve access token from OAuth response",
                 )
 
             # Check for existing credential with same token
-            existing_path = self._find_existing_credential_by_token(access_token, base_dir)
+            existing_path = self._find_existing_credential_by_token(
+                access_token, base_dir
+            )
             is_update = existing_path is not None
 
             if is_update:

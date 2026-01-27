@@ -333,6 +333,27 @@ class RequestExecutor:
         # Apply provider-specific LiteLLM params
         self._apply_litellm_provider_params(provider, kwargs)
 
+        # OpenCode parity headers for GitHub Copilot.
+        # If the client supplied these headers to the proxy, forward them to the
+        # Copilot upstream request (e.g. subagent sessions set x-initiator=agent).
+        if provider == "github_copilot" and context.request is not None:
+            incoming = dict(context.request.headers)
+            forwarded: Dict[str, Any] = {}
+
+            x_initiator = incoming.get("x-initiator")
+            if x_initiator:
+                forwarded["x-initiator"] = x_initiator
+
+            copilot_vision = incoming.get("copilot-vision-request")
+            if copilot_vision:
+                forwarded["Copilot-Vision-Request"] = copilot_vision
+
+            if forwarded:
+                existing = kwargs.get("extra_headers")
+                if not isinstance(existing, dict):
+                    existing = {}
+                kwargs["extra_headers"] = {**existing, **forwarded}
+
         # Add transaction context for provider logging
         if context.transaction_logger:
             kwargs["transaction_context"] = context.transaction_logger.get_context()

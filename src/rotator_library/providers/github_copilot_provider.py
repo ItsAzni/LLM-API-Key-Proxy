@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import random
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
@@ -31,6 +33,7 @@ import httpx
 import litellm
 
 from ..timeout_config import TimeoutConfig
+from ..anthropic_compat.translator import anthropic_to_openai_messages
 
 from .provider_interface import ProviderInterface
 from .github_copilot_auth_base import GitHubCopilotAuthBase
@@ -46,7 +49,19 @@ COPILOT_API_BASE = "https://api.githubcopilot.com"
 
 # OpenCode version cache (fetched once on first use)
 _opencode_version_cache: Optional[str] = None
-_OPENCODE_FALLBACK_VERSION = "1.1.34"  # Fallback if GitHub fetch fails
+_OPENCODE_FALLBACK_VERSION = "1.1.36"  # Fallback if GitHub fetch fails
+
+
+def _env_truthy(name: str, default: str = "true") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _fetch_opencode_version() -> str:
@@ -109,6 +124,11 @@ COPILOT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Openai-Intent": "conversation-edits",
 }
+
+# Anthropic compatibility (used for Copilot Claude models)
+ANTHROPIC_VERSION = "2023-06-01"
+# OpenCode Copilot parity: only set the interleaved thinking beta.
+COPILOT_ANTHROPIC_BETA = "interleaved-thinking-2025-05-14"
 
 # =============================================================================
 # MODEL CONFIGURATION
@@ -324,6 +344,33 @@ def _map_reasoning_effort_to_config(
             return {"thinkingConfig": {"thinkingBudget": budgets.get(effort, -1)}}
 
     return {}
+
+
+def _map_reasoning_effort_to_anthropic_thinking(
+    reasoning_effort: Optional[str],
+    model: str,
+) -> Dict[str, Any]:
+    """Map reasoning_effort to Anthropic Messages API thinking config."""
+    if not _is_claude_model(model):
+        return {}
+
+    effort_raw = "auto" if reasoning_effort is None else str(reasoning_effort).strip()
+    effort = effort_raw.lower() if effort_raw else "auto"
+    if effort in ("disable", "off", "none"):
+        return {"thinking": {"type": "disabled"}}
+
+    base = _map_reasoning_effort_to_config(effort, model)
+    budget = None
+    if isinstance(base, dict):
+        thinking = base.get("thinking")
+        if isinstance(thinking, dict):
+            budget = thinking.get("budget_tokens")
+
+    if isinstance(budget, int) and budget > 0:
+        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+    # Default to enabling thinking when using interleaved-thinking.
+    return {"thinking": {"type": "enabled", "budget_tokens": 16000}}
 
 
 def _convert_tools_to_responses_format(
@@ -657,48 +704,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             return True
         return False
 
-    # Responses API alternate input types that indicate agent-initiated requests
-    # Based on opencode copilot-auth plugin
-    RESPONSES_API_AGENT_TYPES = {
-        "file_search_call",
-        "computer_call",
-        "computer_call_output",
-        "web_search_call",
-        "function_call",
-        "function_call_output",
-        "image_generation_call",
-        "code_interpreter_call",
-        "local_shell_call",
-        "local_shell_call_output",
-        "mcp_list_tools",
-        "mcp_approval_request",
-        "mcp_approval_response",
-        "mcp_call",
-        "reasoning",
-    }
-
     def _detect_agent_initiated(self, messages: List[Dict[str, Any]]) -> bool:
         """
         Detect if a request should be marked as agent-initiated.
 
-        Behavior controlled by environment variables:
+        OpenCode parity differs when forcing is enabled.
 
-        GITHUB_COPILOT_FORCE_AGENT=false (default):
-            Uses OpenCode's standard behavior:
-            - Returns True only if last message role is NOT "user"
-            - First user message → x-initiator: "user"
-            - Agent continuation → x-initiator: "agent"
+        When GITHUB_COPILOT_FORCE_AGENT is true, we mark all requests as
+        agent-initiated for GitHub Copilot (x-initiator=agent).
 
-        GITHUB_COPILOT_FORCE_AGENT=true:
-            Forces agent mode with optional probability for first messages:
-            - Non-first messages: Always x-initiator: "agent"
-            - First messages: Controlled by GITHUB_COPILOT_USER_INITIATOR_RATIO
-
-        GITHUB_COPILOT_USER_INITIATOR_RATIO (only when FORCE_AGENT=true):
-            Controls probability of "user" for first messages:
-            - 0 (default): Always "agent" for first messages
-            - N > 0: 1/N probability of "user" (e.g., 10 = 10% user, 90% agent)
-            This makes traffic patterns look more natural.
+        To restore OpenCode parity, set: GITHUB_COPILOT_FORCE_AGENT=false
 
         Args:
             messages: List of message dictionaries
@@ -706,79 +721,41 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         Returns:
             True if request should use x-initiator: "agent"
         """
-        import os
-        import random
-
-        # GITHUB_COPILOT_FORCE_AGENT: Force all requests to be agent-initiated
-        # Disabled by default to match OpenCode's standard behavior
-        force_agent = os.getenv("GITHUB_COPILOT_FORCE_AGENT", "false").lower() in (
-            "true",
-            "1",
-            "yes",
-        )
-
+        force_agent = _env_truthy("GITHUB_COPILOT_FORCE_AGENT", default="false")
         if force_agent:
-            # Check if this is a "first message" (no assistant/tool content yet)
-            is_first_message = True
-            if messages:
+            if not messages:
+                return True
+            # Optional: allow a small fraction of first-turn requests to look like user.
+            # 1/N probability when N>0.
+            ratio = _env_int("GITHUB_COPILOT_USER_INITIATOR_RATIO", default=0)
+            if ratio > 0:
+                is_first_message = True
                 for msg in messages:
-                    role = msg.get("role", "")
+                    role = (msg.get("role") or "").lower()
                     if role in ("assistant", "tool"):
                         is_first_message = False
                         break
-                    # Also check Responses API types
-                    msg_type = msg.get("type", "")
-                    if msg_type in self.RESPONSES_API_AGENT_TYPES:
-                        is_first_message = False
-                        break
 
-            if is_first_message:
-                # For first messages, optionally use probability to sometimes return "user"
-                try:
-                    ratio = int(os.getenv("GITHUB_COPILOT_USER_INITIATOR_RATIO", "0"))
-                except ValueError:
-                    ratio = 0
+                if is_first_message and random.random() < (1.0 / float(ratio)):
+                    return False
 
-                if ratio > 0:
-                    # 1/ratio probability of using "user"
-                    user_probability = 1.0 / ratio
-                    if random.random() < user_probability:
-                        lib_logger.debug(
-                            f"First message: randomly using x-initiator: user (1/{ratio} probability)"
-                        )
-                        return False  # Use "user"
-
-            # Force agent for all other cases
             return True
 
-        # Standard OpenCode behavior when FORCE_AGENT=false
         if not messages:
             return False
 
-        # Match OpenCode's behavior: only check if the LAST message's role is NOT "user"
-        # This means:
-        # - First user message → x-initiator: "user"
-        # - User message after assistant response → x-initiator: "user" (new user turn)
-        # - Tool result after function call → x-initiator: "agent" (continuing agent flow)
+        # OpenCode behavior: x-initiator=agent iff last.role != "user"
         last_msg = messages[-1]
         last_role = last_msg.get("role", "user")
-
-        # For Chat Completions format: check last message role
-        if last_role != "user":
-            return True
-
-        # Check Responses API format: last input with agent type
-        msg_type = last_msg.get("type", "")
-        if msg_type in self.RESPONSES_API_AGENT_TYPES:
-            return True
-
-        return False
+        return last_role != "user"
 
     async def _build_copilot_headers(
         self,
         credential_path: str,
         is_vision: bool = False,
         is_agent: bool = False,
+        extra_headers: Optional[Dict[str, str]] = None,
+        force_agent: bool = False,
     ) -> Dict[str, str]:
         """
         Build headers for GitHub Copilot API requests.
@@ -793,16 +770,33 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         auth_header = await self.get_auth_header(credential_path)
 
-        headers = {
-            **auth_header,
-            "Content-Type": "application/json",
+        # Match OpenCode's header behavior/order:
+        #   x-initiator -> init.headers -> User-Agent -> Authorization -> Openai-Intent
+        init_headers: Dict[str, str] = {}
+        if isinstance(extra_headers, dict):
+            init_headers = {str(k): str(v) for k, v in extra_headers.items()}
+        if force_agent and init_headers:
+            # Do not allow upstream initiator override when forcing mode is enabled.
+            init_headers = {
+                k: v for k, v in init_headers.items() if k.lower() != "x-initiator"
+            }
+
+        initiator = "agent" if is_agent else "user"
+
+        headers: Dict[str, str] = {
+            "x-initiator": initiator,
+            **init_headers,
             "User-Agent": USER_AGENT,
+            **auth_header,
             "Openai-Intent": "conversation-edits",
-            "x-initiator": "agent" if is_agent else "user",
         }
 
         if is_vision:
             headers["Copilot-Vision-Request"] = "true"
+
+        # Remove conflicting auth headers (OpenCode parity)
+        headers.pop("x-api-key", None)
+        headers.pop("authorization", None)
 
         return headers
 
@@ -838,6 +832,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         credential_path = kwargs.pop(
             "credential_identifier", kwargs.get("credential_path", "")
         )
+        extra_headers = kwargs.pop("extra_headers", None)
+        # Never forward temperature for GitHub Copilot requests.
+        kwargs.pop("temperature", None)
 
         # Normalize model name (strip provider prefix)
         if "/" in model:
@@ -846,13 +843,18 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Detect content types
         is_vision = self._detect_vision_content(messages)
         is_agent = self._detect_agent_initiated(messages)
+        force_agent = _env_truthy("GITHUB_COPILOT_FORCE_AGENT", default="false")
 
         # Get API base URL
         api_base = self._get_api_base(credential_path)
 
         # Build headers
         headers = await self._build_copilot_headers(
-            credential_path, is_vision=is_vision, is_agent=is_agent
+            credential_path,
+            is_vision=is_vision,
+            is_agent=is_agent,
+            extra_headers=extra_headers,
+            force_agent=force_agent,
         )
 
         # Check if this model uses Responses API
@@ -881,6 +883,31 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 **filtered_kwargs,
             )
 
+        # Claude models: Copilot behaves like Anthropic Messages API.
+        # This is required for interleaved thinking / reasoning visibility.
+        if _is_claude_model(model):
+            filtered_kwargs = {
+                k: v
+                for k, v in kwargs.items()
+                if k
+                not in (
+                    "model",
+                    "messages",
+                    "stream",
+                    "credential_identifier",
+                    "credential_path",
+                )
+            }
+            return await self._anthropic_messages_completion(
+                client=client,
+                api_base=api_base,
+                headers=headers,
+                model=model,
+                messages=messages,
+                stream=stream,
+                **filtered_kwargs,
+            )
+
         # Sanitize messages to remove invalid tool calls
         sanitized_messages = self._sanitize_messages(messages)
 
@@ -893,7 +920,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
         # Copy over optional parameters
         optional_params = [
-            "temperature",
             "top_p",
             "max_tokens",
             "presence_penalty",
@@ -933,6 +959,617 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             return await self._non_stream_chat_response(
                 client, endpoint, headers, payload, model
             )
+
+    # =========================================================================
+    # COPILOT CLAUDE (ANTHROPIC MESSAGES API) IMPLEMENTATION
+    # =========================================================================
+
+    def _openai_tools_to_anthropic(
+        self, tools: Optional[List[Dict[str, Any]]]
+    ) -> List[Dict[str, Any]]:
+        if not tools:
+            return []
+        out: List[Dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") != "function":
+                continue
+            func = tool.get("function") or {}
+            if not isinstance(func, dict):
+                continue
+            name = func.get("name")
+            if not name:
+                continue
+            out.append(
+                {
+                    "name": name,
+                    "description": func.get("description") or "",
+                    "input_schema": func.get("parameters")
+                    or {"type": "object", "properties": {}},
+                }
+            )
+        return out
+
+    def _openai_tool_choice_to_anthropic(
+        self, tool_choice: Any
+    ) -> Optional[Dict[str, Any]]:
+        if tool_choice is None:
+            return None
+        if isinstance(tool_choice, str):
+            tc = tool_choice.strip().lower()
+            if tc == "auto":
+                return {"type": "auto"}
+            if tc in ("required", "any"):
+                return {"type": "any"}
+            if tc == "none":
+                return {"type": "none"}
+            return {"type": "auto"}
+        if isinstance(tool_choice, dict):
+            # OpenAI: {"type":"function","function":{"name":"..."}}
+            if tool_choice.get("type") == "function":
+                func = tool_choice.get("function") or {}
+                if isinstance(func, dict) and func.get("name"):
+                    return {"type": "tool", "name": func["name"]}
+        return {"type": "auto"}
+
+    def _openai_messages_to_anthropic(
+        self, messages: List[Dict[str, Any]]
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        system_parts: List[str] = []
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        def _ensure_user_message() -> Dict[str, Any]:
+            if anthropic_messages and anthropic_messages[-1].get("role") == "user":
+                return anthropic_messages[-1]
+            msg = {"role": "user", "content": []}
+            anthropic_messages.append(msg)
+            return msg
+
+        def _append_message(role: str, blocks: List[Dict[str, Any]]) -> None:
+            if not blocks:
+                return
+            if anthropic_messages and anthropic_messages[-1].get("role") == role:
+                anthropic_messages[-1]["content"].extend(blocks)
+                return
+            anthropic_messages.append({"role": role, "content": blocks})
+
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            role = (msg.get("role") or "user").lower()
+
+            if role in ("system", "developer"):
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    system_parts.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text = part.get("text", "")
+                            if text and text.strip():
+                                system_parts.append(text)
+                continue
+
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id") or ""
+                tool_content = msg.get("content")
+                if isinstance(tool_content, str):
+                    content_str = tool_content
+                elif tool_content is None:
+                    content_str = ""
+                else:
+                    content_str = json.dumps(tool_content)
+                user_msg = _ensure_user_message()
+                user_msg["content"].append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": content_str,
+                    }
+                )
+                continue
+
+            content = msg.get("content")
+            blocks: List[Dict[str, Any]] = []
+
+            if isinstance(content, str):
+                if content:
+                    blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    ptype = part.get("type")
+                    if ptype == "text":
+                        blocks.append({"type": "text", "text": part.get("text", "")})
+                    elif ptype == "image_url":
+                        image_url = part.get("image_url")
+                        url = ""
+                        if isinstance(image_url, dict):
+                            url = image_url.get("url", "")
+                        elif isinstance(image_url, str):
+                            url = image_url
+                        if url:
+                            blocks.append(
+                                {
+                                    "type": "image",
+                                    "source": {"type": "url", "url": url},
+                                }
+                            )
+
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                for tc in tool_calls:
+                    if not isinstance(tc, dict) or tc.get("type") != "function":
+                        continue
+                    call_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:12]}"
+                    func = tc.get("function") or {}
+                    if not isinstance(func, dict):
+                        continue
+                    name = func.get("name") or ""
+                    args_raw = func.get("arguments") or "{}"
+                    try:
+                        input_data = (
+                            json.loads(args_raw) if isinstance(args_raw, str) else {}
+                        )
+                    except json.JSONDecodeError:
+                        input_data = {}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": name,
+                            "input": input_data,
+                        }
+                    )
+                _append_message("assistant", blocks)
+            else:
+                _append_message("user", blocks)
+
+        system = (
+            "\n\n".join([p for p in system_parts if p and p.strip()]).strip() or None
+        )
+        return system, anthropic_messages
+
+    def _map_anthropic_stop_reason_to_finish_reason(
+        self, stop_reason: Optional[str]
+    ) -> str:
+        if not stop_reason:
+            return "stop"
+        sr = str(stop_reason)
+        if sr == "end_turn":
+            return "stop"
+        if sr == "max_tokens":
+            return "length"
+        if sr == "tool_use":
+            return "tool_calls"
+        return "stop"
+
+    async def _anthropic_messages_completion(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        headers: Dict[str, str],
+        model: str,
+        messages: List[Dict[str, Any]],
+        stream: bool,
+        **kwargs,
+    ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
+        # Copilot expects Anthropic-style headers for Claude.
+        h = dict(headers)
+        h["anthropic-version"] = ANTHROPIC_VERSION
+        h["anthropic-beta"] = COPILOT_ANTHROPIC_BETA
+        if stream:
+            h.setdefault("Accept", "text/event-stream")
+
+        system, anthropic_messages = self._openai_messages_to_anthropic(messages)
+        max_tokens = kwargs.get("max_tokens")
+        try:
+            max_tokens_int = int(max_tokens) if max_tokens is not None else 4096
+        except (TypeError, ValueError):
+            max_tokens_int = 4096
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens_int,
+            "messages": anthropic_messages,
+            "stream": stream,
+        }
+        if system:
+            payload["system"] = system
+
+        if kwargs.get("top_p") is not None:
+            payload["top_p"] = kwargs["top_p"]
+        if kwargs.get("stop") is not None:
+            stop = kwargs["stop"]
+            if isinstance(stop, str):
+                payload["stop_sequences"] = [stop]
+            elif isinstance(stop, list):
+                payload["stop_sequences"] = [s for s in stop if isinstance(s, str)]
+
+        tools = kwargs.get("tools")
+        if tools is not None:
+            anthropic_tools = self._openai_tools_to_anthropic(tools)
+            if anthropic_tools:
+                payload["tools"] = anthropic_tools
+
+        tool_choice = kwargs.get("tool_choice")
+        tc = self._openai_tool_choice_to_anthropic(tool_choice)
+        if tc:
+            payload["tool_choice"] = tc
+
+        reasoning_effort = kwargs.get("reasoning_effort")
+        payload.update(
+            _map_reasoning_effort_to_anthropic_thinking(reasoning_effort, model)
+        )
+
+        endpoint = f"{api_base}/v1/messages"
+        lib_logger.debug(
+            "[GitHubCopilot] Anthropic Messages request: model=%s thinking=%s",
+            model,
+            json.dumps(payload.get("thinking"), default=str),
+        )
+
+        if stream:
+            return self._stream_anthropic_messages(client, endpoint, h, payload, model)
+        return await self._non_stream_anthropic_messages(
+            client, endpoint, h, payload, model
+        )
+
+    async def _non_stream_anthropic_messages(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> litellm.ModelResponse:
+        response = await client.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.non_streaming(),
+        )
+        if response.status_code >= 400:
+            error_text = response.text
+            lib_logger.error(
+                f"Copilot Anthropic Messages API error {response.status_code}: {error_text[:500]}"
+            )
+            raise httpx.HTTPStatusError(
+                f"Copilot Anthropic Messages API error: {response.status_code}",
+                request=response.request,
+                response=response,
+            )
+
+        data = response.json()
+        created = int(time.time())
+        response_id = data.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}")
+
+        content_blocks = data.get("content") or []
+        openai_msgs = anthropic_to_openai_messages(
+            [{"role": "assistant", "content": content_blocks}], system=None
+        )
+        assistant_msg = None
+        for m in reversed(openai_msgs):
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                assistant_msg = m
+                break
+        if not assistant_msg:
+            assistant_msg = {"role": "assistant", "content": ""}
+
+        finish_reason = self._map_anthropic_stop_reason_to_finish_reason(
+            data.get("stop_reason")
+        )
+
+        response_obj = litellm.ModelResponse(
+            id=response_id,
+            created=created,
+            model=f"github_copilot/{model}",
+            object="chat.completion",
+            choices=[
+                {
+                    "index": 0,
+                    "message": assistant_msg,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        )
+
+        usage = data.get("usage") or {}
+        if isinstance(usage, dict):
+            prompt_tokens = usage.get("input_tokens", 0) or 0
+            completion_tokens = usage.get("output_tokens", 0) or 0
+            response_obj.usage = litellm.Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+
+        return response_obj
+
+    async def _stream_anthropic_messages(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        created = int(time.time())
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        current_event: Optional[str] = None
+        input_tokens = 0
+        output_tokens = 0
+
+        tool_calls: Dict[int, Dict[str, Any]] = {}
+        tool_block_index_to_tc_index: Dict[int, int] = {}
+
+        async with client.stream(
+            "POST",
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=TimeoutConfig.streaming(),
+        ) as response:
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                error_text = error_body.decode("utf-8", errors="ignore")
+                lib_logger.error(
+                    f"Copilot Anthropic Messages API error {response.status_code}: {error_text[:500]}"
+                )
+                raise httpx.HTTPStatusError(
+                    f"Copilot Anthropic Messages API error: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("event: "):
+                    current_event = line[len("event: ") :].strip()
+                    continue
+                if not line.startswith("data: "):
+                    continue
+
+                raw = line[len("data: ") :].strip()
+                if not raw or raw == "[DONE]":
+                    continue
+
+                try:
+                    evt = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                # Fallback: if Copilot returns OpenAI-style streaming even on /v1/messages.
+                if isinstance(evt, dict) and "choices" in evt:
+                    for choice in evt.get("choices", []):
+                        delta = choice.get("delta", {}) or {}
+                        if "content" in delta:
+                            yield litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": choice.get("index", 0),
+                                        "delta": {
+                                            "content": delta.get("content"),
+                                            "role": delta.get("role", "assistant"),
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                        if "reasoning_content" in delta:
+                            yield litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": choice.get("index", 0),
+                                        "delta": {
+                                            "reasoning_content": delta.get(
+                                                "reasoning_content"
+                                            ),
+                                            "role": delta.get("role", "assistant"),
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                        if "tool_calls" in delta:
+                            yield litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": choice.get("index", 0),
+                                        "delta": {
+                                            "tool_calls": delta.get("tool_calls")
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                    continue
+
+                event_type = evt.get("type") or current_event
+
+                if event_type == "message_start":
+                    msg = evt.get("message") or {}
+                    if isinstance(msg, dict) and msg.get("id"):
+                        response_id = msg["id"]
+                    usage = msg.get("usage") or {}
+                    if isinstance(usage, dict):
+                        input_tokens = (
+                            usage.get("input_tokens", input_tokens) or input_tokens
+                        )
+                        output_tokens = (
+                            usage.get("output_tokens", output_tokens) or output_tokens
+                        )
+                    continue
+
+                if event_type == "content_block_start":
+                    idx = evt.get("index")
+                    block = evt.get("content_block") or {}
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use":
+                        tc_index = len(tool_calls)
+                        call_id = block.get("id") or f"toolu_{uuid.uuid4().hex[:12]}"
+                        name = block.get("name") or ""
+                        tool_calls[tc_index] = {
+                            "index": tc_index,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": ""},
+                        }
+                        if isinstance(idx, int):
+                            tool_block_index_to_tc_index[idx] = tc_index
+                        yield litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": 0,
+                                    "delta": {"tool_calls": [tool_calls[tc_index]]},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                    continue
+
+                if event_type == "content_block_delta":
+                    idx = evt.get("index")
+                    delta = evt.get("delta") or {}
+                    if not isinstance(delta, dict):
+                        continue
+                    dtype = delta.get("type")
+
+                    if dtype == "thinking_delta":
+                        thinking = delta.get("thinking")
+                        if thinking:
+                            yield litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "reasoning_content": thinking,
+                                            "role": "assistant",
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                        continue
+
+                    if dtype == "text_delta":
+                        text = delta.get("text")
+                        if text:
+                            yield litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": text, "role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                        continue
+
+                    if dtype == "input_json_delta":
+                        partial = delta.get("partial_json")
+                        if partial and isinstance(idx, int):
+                            tc_index = tool_block_index_to_tc_index.get(idx)
+                            if tc_index is not None and tc_index in tool_calls:
+                                tool_calls[tc_index]["function"]["arguments"] += partial
+                                yield litellm.ModelResponse(
+                                    id=response_id,
+                                    created=created,
+                                    model=f"github_copilot/{model}",
+                                    object="chat.completion.chunk",
+                                    choices=[
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [
+                                                    {
+                                                        "index": tc_index,
+                                                        "id": tool_calls[tc_index][
+                                                            "id"
+                                                        ],
+                                                        "type": "function",
+                                                        "function": {
+                                                            "name": tool_calls[
+                                                                tc_index
+                                                            ]["function"]["name"],
+                                                            "arguments": partial,
+                                                        },
+                                                    }
+                                                ]
+                                            },
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                )
+                        continue
+
+                if event_type == "message_delta":
+                    delta = evt.get("delta") or {}
+                    usage = evt.get("usage") or {}
+                    stop_reason = None
+                    if isinstance(delta, dict):
+                        stop_reason = delta.get("stop_reason")
+                    if isinstance(usage, dict):
+                        input_tokens = (
+                            usage.get("input_tokens", input_tokens) or input_tokens
+                        )
+                        output_tokens = (
+                            usage.get("output_tokens", output_tokens) or output_tokens
+                        )
+
+                    finish_reason = self._map_anthropic_stop_reason_to_finish_reason(
+                        stop_reason
+                    )
+                    yield litellm.ModelResponse(
+                        id=response_id,
+                        created=created,
+                        model=f"github_copilot/{model}",
+                        object="chat.completion.chunk",
+                        choices=[
+                            {"index": 0, "delta": {}, "finish_reason": finish_reason}
+                        ],
+                        usage={
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": output_tokens,
+                            "total_tokens": input_tokens + output_tokens,
+                        },
+                    )
+                    continue
+
+                if event_type == "message_stop":
+                    break
+
+                if event_type == "error":
+                    err = evt.get("error") if isinstance(evt, dict) else None
+                    raise RuntimeError(f"Copilot Anthropic stream error: {err or evt}")
 
     async def _non_stream_chat_response(
         self,
@@ -1274,7 +1911,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         continue
                     function = tool_call.get("function", {})
                     call_id = tool_call.get("id", "")
-                    func_name = function.get("name", "") if isinstance(function, dict) else ""
+                    func_name = (
+                        function.get("name", "") if isinstance(function, dict) else ""
+                    )
                     # Skip invalid tool calls missing required fields
                     if not call_id or not func_name:
                         lib_logger.warning(
@@ -1418,8 +2057,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Copy over optional parameters with Responses API naming
         if "max_tokens" in kwargs and kwargs["max_tokens"] is not None:
             payload["max_output_tokens"] = kwargs["max_tokens"]
-        if "temperature" in kwargs and kwargs["temperature"] is not None:
-            payload["temperature"] = kwargs["temperature"]
         if "top_p" in kwargs and kwargs["top_p"] is not None:
             payload["top_p"] = kwargs["top_p"]
 

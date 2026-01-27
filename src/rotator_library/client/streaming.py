@@ -300,16 +300,20 @@ class StreamingHandler:
 
             delta = choice.get("delta", {})
 
-            # FIX 3: Rename "reasoning_content" to "reasoning" for broader compatibility
+            # FIX 3: Preserve OpenAI's "reasoning_content" and also provide "reasoning" alias
+            # Some clients (e.g. OpenCode/Copilot) expect "reasoning_content" specifically.
             if delta and "reasoning_content" in delta:
-                delta["reasoning"] = delta.pop("reasoning_content")
+                if "reasoning" not in delta:
+                    delta["reasoning"] = delta.get("reasoning_content")
 
             # FIX 5: Parse <thinking> and <think> tags from content (Claude via Antigravity)
             # Claude models send thinking as <thinking>...</thinking> or <think>...</think> in content
             if delta and "content" in delta and delta["content"]:
                 content = delta["content"]
                 new_content = ""
-                reasoning = delta.get("reasoning", "")
+                reasoning = (
+                    delta.get("reasoning_content") or delta.get("reasoning") or ""
+                )
 
                 i = 0
                 while i < len(content):
@@ -342,6 +346,7 @@ class StreamingHandler:
 
                 # Update delta with separated content
                 if reasoning:
+                    delta["reasoning_content"] = reasoning
                     delta["reasoning"] = reasoning
                 if new_content:
                     delta["content"] = new_content
@@ -548,11 +553,12 @@ def strip_thinking_tags_from_response(response: Any) -> Any:
                 # Update message content
                 message["content"] = cleaned_content
 
-                # If there was thinking content, add it to reasoning field
+                # If there was thinking content, add it to reasoning fields
                 if thinking_matches:
                     reasoning = "\n".join(thinking_matches).strip()
                     if reasoning:
                         message["reasoning"] = reasoning
+                        message["reasoning_content"] = reasoning
 
     # Return in same format as input
     if was_object:
