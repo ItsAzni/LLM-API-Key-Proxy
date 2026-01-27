@@ -21,6 +21,8 @@ from litellm.exceptions import (
     ContextWindowExceededError,
 )
 
+from .config.defaults import COOLDOWN_RATE_LIMIT_DEFAULT, COOLDOWN_RATE_LIMIT_MIN
+
 lib_logger = logging.getLogger("rotator_library")
 
 
@@ -860,11 +862,16 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                     quota_value=quota_value,
                     quota_id=quota_id,
                 )
+            # Apply minimum cooldown for GitHub Copilot only - it may return
+            # sub-second retry values that cause retry storms
+            effective_retry = retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+            if provider == "github_copilot":
+                effective_retry = max(effective_retry, COOLDOWN_RATE_LIMIT_MIN)
             return ClassifiedError(
                 error_type="rate_limit",
                 original_exception=e,
                 status_code=status_code,
-                retry_after=retry_after,
+                retry_after=effective_retry,
             )
         if status_code == 400:
             # Check for context window / token limit errors with more specific patterns
@@ -997,11 +1004,15 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 quota_value=quota_value,
                 quota_id=quota_id,
             )
+        # Apply minimum cooldown for GitHub Copilot only
+        effective_retry = retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+        if provider == "github_copilot":
+            effective_retry = max(effective_retry, COOLDOWN_RATE_LIMIT_MIN)
         return ClassifiedError(
             error_type="rate_limit",
             original_exception=e,
             status_code=status_code or 429,
-            retry_after=retry_after,
+            retry_after=effective_retry,
         )
 
     if isinstance(e, (AuthenticationError,)):

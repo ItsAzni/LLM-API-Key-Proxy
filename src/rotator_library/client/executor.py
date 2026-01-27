@@ -55,6 +55,7 @@ from ..core.constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
 )
+from ..config.defaults import MAX_RETRIES_GITHUB_COPILOT
 from ..request_sanitizer import sanitize_request_payload
 from ..transaction_logger import TransactionLogger
 from ..failure_logger import log_failure
@@ -131,6 +132,15 @@ class RequestExecutor:
         self._litellm_logger_fn = litellm_logger_fn
         # StreamingHandler no longer needs usage_manager - we pass cred_context directly
         self._streaming_handler = StreamingHandler()
+
+    def _get_max_retries(self, provider: str) -> int:
+        """Get provider-specific max retries.
+
+        GitHub Copilot uses a higher max retry count due to aggressive rate limiting.
+        """
+        if provider == "github_copilot":
+            return MAX_RETRIES_GITHUB_COPILOT
+        return self._max_retries
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
         """Get or create a plugin instance for a provider."""
@@ -574,11 +584,12 @@ class RequestExecutor:
                         plugin = self._get_plugin_instance(provider)
 
                         # Execute request with retries
-                        for attempt in range(self._max_retries):
+                        max_retries = self._get_max_retries(provider)
+                        for attempt in range(max_retries):
                             try:
                                 lib_logger.info(
                                     f"Attempting call with credential {mask_credential(cred)} "
-                                    f"(Attempt {attempt + 1}/{self._max_retries})"
+                                    f"(Attempt {attempt + 1}/{max_retries})"
                                 )
                                 # Pre-request callback
                                 await self._run_pre_request_callback(context, kwargs)
@@ -794,11 +805,12 @@ class RequestExecutor:
                             )
 
                             # Execute request with retries
-                            for attempt in range(self._max_retries):
+                            max_retries = self._get_max_retries(provider)
+                            for attempt in range(max_retries):
                                 try:
                                     lib_logger.info(
                                         f"Attempting stream with credential {mask_credential(cred)} "
-                                        f"(Attempt {attempt + 1}/{self._max_retries})"
+                                        f"(Attempt {attempt + 1}/{max_retries})"
                                     )
                                     # Pre-request callback
                                     await self._run_pre_request_callback(
@@ -944,7 +956,7 @@ class RequestExecutor:
                                         and 0
                                         < classified.retry_after
                                         < small_cooldown_threshold
-                                        and attempt < self._max_retries - 1
+                                        and attempt < max_retries - 1
                                     ):
                                         remaining = deadline - time.time()
                                         if classified.retry_after <= remaining:
@@ -973,7 +985,7 @@ class RequestExecutor:
                                         request_headers=request_headers,
                                     )
 
-                                    if attempt >= self._max_retries - 1:
+                                    if attempt >= max_retries - 1:
                                         error_accumulator.record_error(
                                             cred, classified, str(e)[:150]
                                         )
@@ -1164,7 +1176,7 @@ class RequestExecutor:
 
         if (
             should_retry_same_key(classified, small_cooldown_threshold)
-            and attempt < self._max_retries - 1
+            and attempt < self._get_max_retries(provider) - 1
         ):
             wait_time = classified.retry_after or (2**attempt) + random.uniform(0, 1)
             retry_reason = (
