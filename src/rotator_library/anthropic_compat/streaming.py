@@ -255,8 +255,11 @@ async def anthropic_streaming_wrapper(
 
             delta = choices[0].get("delta", {})
 
-            # Handle reasoning/thinking content (from OpenAI-style reasoning_content)
-            reasoning_content = delta.get("reasoning_content")
+            # Handle reasoning/thinking content.
+            # Upstream streams may use either:
+            # - OpenAI-style: delta.reasoning_content
+            # - Compatibility mode: delta.reasoning (see client/streaming.py)
+            reasoning_content = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning_content:
                 if not thinking_block_started:
                     # Start a thinking content block

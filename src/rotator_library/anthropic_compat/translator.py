@@ -99,7 +99,10 @@ def _convert_anthropic_source_to_openai(
     if source_type == "base64":
         mime_type = source.get("media_type", default_mime_type)
         data = source.get("data", "")
-        return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{data}"}}
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{data}"},
+        }
     if source_type == "url":
         return {"type": "image_url", "image_url": {"url": source.get("url", "")}}
     return None
@@ -468,8 +471,12 @@ def openai_to_anthropic_response(openai_response: dict, original_model: str) -> 
     # Build content blocks
     content_blocks = []
 
-    # Add thinking content block if reasoning_content is present
+    # Add thinking content block if reasoning content is present.
     reasoning_content = message.get("reasoning_content")
+    if not reasoning_content:
+        reasoning_fallback = message.get("reasoning")
+        if isinstance(reasoning_fallback, str):
+            reasoning_content = reasoning_fallback
     if reasoning_content:
         thinking_signature = message.get("thinking_signature", "")
         signature = (
