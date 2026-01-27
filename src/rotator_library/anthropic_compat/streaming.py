@@ -8,6 +8,7 @@ This module provides a framework-agnostic streaming wrapper that converts
 OpenAI SSE (Server-Sent Events) format to Anthropic's streaming format.
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -66,6 +67,24 @@ async def anthropic_streaming_wrapper(
     accumulated_text = ""  # Track accumulated text for logging
     accumulated_thinking = ""  # Track accumulated thinking for logging
     stop_reason_final = "end_turn"  # Track final stop reason for logging
+    stream_closed = False
+
+    async def close_inner_stream():
+        """Safely close the inner stream, handling the case where it may already be running."""
+        nonlocal stream_closed
+        if stream_closed:
+            return
+        stream_closed = True
+        try:
+            await openai_stream.aclose()
+        except RuntimeError as e:
+            # "aclose(): asynchronous generator is already running" is expected
+            # when the generator is cancelled while running
+            if "already running" not in str(e):
+                raise
+        except Exception:
+            # Ignore any other errors during cleanup
+            pass
 
     try:
         async for chunk_str in openai_stream:
@@ -374,6 +393,11 @@ async def anthropic_streaming_wrapper(
             # Block closing is handled when we receive [DONE] to avoid
             # premature closes with providers that send finish_reason on each chunk.
 
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client disconnected or generator was closed - this is expected
+        logger.debug("Anthropic stream cancelled or closed by client.")
+        await close_inner_stream()
+        return
     except Exception as e:
         logger.error(f"Error in Anthropic streaming wrapper: {e}")
 
@@ -442,3 +466,5 @@ async def anthropic_streaming_wrapper(
             "error": {"type": "api_error", "message": str(e)},
         }
         yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+    finally:
+        await close_inner_stream()

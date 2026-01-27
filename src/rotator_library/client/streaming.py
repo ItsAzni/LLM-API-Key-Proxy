@@ -13,6 +13,7 @@ Handles:
 - Client disconnect handling
 """
 
+import asyncio
 import codecs
 import json
 import logging
@@ -217,6 +218,10 @@ class StreamingHandler:
                     # Not a JSON-related error, re-raise
                     raise
 
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected or generator was closed - this is expected
+            lib_logger.debug("Stream cancelled or closed by client.")
+            return
         except StreamedAPIError:
             # Re-raise for retry loop
             raise

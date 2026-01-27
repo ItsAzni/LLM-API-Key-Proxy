@@ -700,6 +700,7 @@ async def normalize_double_slashes(request: Request, call_next):
     if "//" in request.scope["path"]:
         # Replace multiple slashes with single slash
         import re
+
         request.scope["path"] = re.sub(r"/+", "/", request.scope["path"])
     return await call_next(request)
 
@@ -758,8 +759,28 @@ async def streaming_response_wrapper(
     Wraps a streaming response to log the full response after completion
     and ensures any errors during the stream are sent to the client.
     """
+    import asyncio
+
     response_chunks = []
     full_response = {}
+    stream_closed = False
+
+    async def close_inner_stream():
+        """Safely close the inner stream, handling the case where it may already be running."""
+        nonlocal stream_closed
+        if stream_closed:
+            return
+        stream_closed = True
+        try:
+            await response_stream.aclose()
+        except RuntimeError as e:
+            # "aclose(): asynchronous generator is already running" is expected
+            # when the generator is cancelled while running
+            if "already running" not in str(e):
+                raise
+        except Exception:
+            # Ignore any other errors during cleanup
+            pass
 
     try:
         async for chunk_str in response_stream:
@@ -777,6 +798,11 @@ async def streaming_response_wrapper(
                             logger.log_stream_chunk(chunk_data)
                     except json.JSONDecodeError:
                         pass
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client disconnected or generator was closed - this is expected
+        logging.debug("Stream cancelled or closed by client.")
+        await close_inner_stream()
+        return
     except Exception as e:
         logging.error(f"An error occurred during the response stream: {e}")
         # Yield a final error message to the client to ensure they are not left hanging.
@@ -796,6 +822,7 @@ async def streaming_response_wrapper(
             )
         return  # Stop further processing
     finally:
+        await close_inner_stream()
         if response_chunks:
             # --- Aggregation Logic ---
             final_message = {"role": "assistant"}
@@ -1058,11 +1085,16 @@ async def chat_completions(
             if use_tool_loop:
                 # Streaming with tool loop support
                 response_generator = await execute_with_tool_loop(
-                    client, request_data, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
+                    client,
+                    request_data,
+                    max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                    request=request,
                 )
             else:
                 # Direct streaming without tool loop
-                response_generator = await client.acompletion(request=request, **request_data)
+                response_generator = await client.acompletion(
+                    request=request, **request_data
+                )
             return StreamingResponse(
                 streaming_response_wrapper(
                     request, request_data, response_generator, raw_logger
@@ -1073,7 +1105,10 @@ async def chat_completions(
             if use_tool_loop:
                 # Non-streaming with tool loop
                 response = await execute_with_tool_loop(
-                    client, request_data, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
+                    client,
+                    request_data,
+                    max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                    request=request,
                 )
             else:
                 response = await client.acompletion(request=request, **request_data)
@@ -1990,7 +2025,10 @@ async def ollama_chat(
         if use_server_tool_loop:
             # Streaming response with tool loop
             openai_stream = await execute_with_tool_loop(
-                client, openai_request, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
+                client,
+                openai_request,
+                max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                request=request,
             )
         else:
             openai_stream = await client.acompletion(request=request, **openai_request)
@@ -2027,7 +2065,10 @@ async def ollama_chat(
         openai_request["stream"] = False
         if use_server_tool_loop:
             response = await execute_with_tool_loop(
-                client, openai_request, max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS, request=request
+                client,
+                openai_request,
+                max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                request=request,
             )
         else:
             response = await client.acompletion(request=request, **openai_request)
