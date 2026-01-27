@@ -1305,10 +1305,15 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         tool_calls: Dict[int, Dict[str, Any]] = {}
         tool_block_index_to_tc_index: Dict[int, int] = {}
 
+        # Disable compression for streaming to get smooth token-by-token output.
+        # Without this, gzip compression causes buffering until complete blocks
+        # can be decompressed, resulting in chunky streaming.
+        stream_headers = {**headers, "Accept-Encoding": "identity"}
+
         async with client.stream(
             "POST",
             endpoint,
-            headers=headers,
+            headers=stream_headers,
             json=payload,
             timeout=TimeoutConfig.streaming(),
         ) as response:
@@ -1684,10 +1689,15 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Track tool calls state
         current_tool_calls: Dict[int, Dict[str, Any]] = {}
 
+        # Disable compression for streaming to get smooth token-by-token output.
+        # Without this, gzip compression causes buffering until complete blocks
+        # can be decompressed, resulting in chunky streaming.
+        stream_headers = {**headers, "Accept-Encoding": "identity"}
+
         async with client.stream(
             "POST",
             endpoint,
-            headers=headers,
+            headers=stream_headers,
             json=payload,
             timeout=TimeoutConfig.streaming(),
         ) as response:
@@ -2255,10 +2265,15 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Track tool call indices - Responses API may not include index in events
         tool_call_index_counter = 0
 
+        # Disable compression for streaming to get smooth token-by-token output.
+        # Without this, gzip compression causes buffering until complete blocks
+        # can be decompressed, resulting in chunky streaming.
+        stream_headers = {**headers, "Accept-Encoding": "identity"}
+
         async with client.stream(
             "POST",
             endpoint,
-            headers=headers,
+            headers=stream_headers,
             json=payload,
             timeout=TimeoutConfig.streaming(),
         ) as response:
