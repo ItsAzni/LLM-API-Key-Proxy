@@ -672,9 +672,24 @@ class TrackingEngine:
         """Update state from API response headers."""
         # Common header patterns for rate limiting
         # X-RateLimit-Remaining, X-RateLimit-Reset, etc.
+        # Also check GitHub Copilot-style headers (x-ratelimit-remaining-requests)
         remaining = headers.get("x-ratelimit-remaining")
+        if remaining is None:
+            # GitHub Copilot uses x-ratelimit-remaining-requests
+            remaining = headers.get("x-ratelimit-remaining-requests")
         reset = headers.get("x-ratelimit-reset")
         limit = headers.get("x-ratelimit-limit")
+
+        # Log quota info for visibility
+        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
+        if remaining is not None or remaining_tokens is not None:
+            lib_logger.debug(
+                "[QuotaTracking] Headers received: remaining_requests=%s, remaining_tokens=%s, reset=%s, limit=%s",
+                remaining,
+                remaining_tokens,
+                reset,
+                limit,
+            )
 
         primary_def = self._windows.get_primary_definition()
         if primary_def is None:

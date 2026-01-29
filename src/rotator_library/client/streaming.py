@@ -82,6 +82,9 @@ class StreamingHandler:
         # State for tracking <thinking> blocks in content (Claude via Antigravity)
         in_thinking_block = False
 
+        # Response headers from provider (for quota tracking)
+        response_headers: Optional[Dict[str, Any]] = None
+
         # Use manual iteration to allow continue after partial JSON errors
         stream_iterator = stream.__aiter__()
 
@@ -96,6 +99,12 @@ class StreamingHandler:
                         break
 
                     chunk = await stream_iterator.__anext__()
+
+                    # Extract response headers from first chunk (if attached by provider)
+                    if response_headers is None:
+                        chunk_headers = getattr(chunk, "_response_headers", None)
+                        if chunk_headers:
+                            response_headers = chunk_headers
 
                     # Clear error buffer on successful chunk receipt
                     error_buffer.reset()
@@ -244,6 +253,7 @@ class StreamingHandler:
                         prompt_tokens_cache_read=prompt_tokens_cached,
                         prompt_tokens_cache_write=prompt_tokens_cache_write,
                         approx_cost=approx_cost,
+                        response_headers=response_headers,
                     )
 
                 # Yield [DONE] for completed streams

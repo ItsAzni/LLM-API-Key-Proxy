@@ -1560,7 +1560,7 @@ async def refresh_quota_stats(
 
     Actions:
         - reload: Re-read data from disk (no external API calls)
-        - force_refresh: For Antigravity, fetch live quota from API.
+        - force_refresh: For Antigravity and GitHub Copilot, fetch live quota from API.
                         For other providers, same as reload.
 
     Returns:

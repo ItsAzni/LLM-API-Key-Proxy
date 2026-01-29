@@ -21,13 +21,14 @@ API Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import random
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union, TYPE_CHECKING
 
 import httpx
 import litellm
@@ -38,6 +39,9 @@ from ..anthropic_compat.translator import anthropic_to_openai_messages
 from .provider_interface import ProviderInterface
 from .github_copilot_auth_base import GitHubCopilotAuthBase
 
+if TYPE_CHECKING:
+    from ..usage.manager import UsageManager
+
 lib_logger = logging.getLogger("rotator_library")
 
 # =============================================================================
@@ -46,6 +50,12 @@ lib_logger = logging.getLogger("rotator_library")
 
 # GitHub Copilot API base URLs
 COPILOT_API_BASE = "https://api.githubcopilot.com"
+
+# GitHub API base URL for quota fetching
+GITHUB_API_BASE = "https://api.github.com"
+
+# Concurrency limit for quota fetches
+QUOTA_FETCH_CONCURRENCY = 5
 
 # OpenCode version cache (fetched once on first use)
 _opencode_version_cache: Optional[str] = None
@@ -62,6 +72,11 @@ def _env_int(name: str, default: int = 0) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+# Quota refresh interval in seconds (default: 5 minutes)
+# Defined after _env_int so we can use it
+COPILOT_QUOTA_REFRESH_INTERVAL = _env_int("GITHUB_COPILOT_QUOTA_REFRESH_INTERVAL", 300)
 
 
 def _fetch_opencode_version() -> str:
@@ -1286,6 +1301,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 total_tokens=prompt_tokens + completion_tokens,
             )
 
+        # Attach response headers for quota tracking
+        response_obj._response_headers = {
+            k.lower(): v for k, v in response.headers.items()
+        }
+
         return response_obj
 
     async def _stream_anthropic_messages(
@@ -1329,6 +1349,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     response=response,
                 )
 
+            # Capture response headers for quota tracking
+            captured_headers = {k.lower(): v for k, v in response.headers.items()}
+            is_first_chunk = True
+
             async for line in response.aiter_lines():
                 if not line:
                     continue
@@ -1352,7 +1376,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     for choice in evt.get("choices", []):
                         delta = choice.get("delta", {}) or {}
                         if "content" in delta:
-                            yield litellm.ModelResponse(
+                            chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
                                 model=f"github_copilot/{model}",
@@ -1368,8 +1392,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
                         if "reasoning_content" in delta:
-                            yield litellm.ModelResponse(
+                            chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
                                 model=f"github_copilot/{model}",
@@ -1387,8 +1415,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
                         if "tool_calls" in delta:
-                            yield litellm.ModelResponse(
+                            chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
                                 model=f"github_copilot/{model}",
@@ -1403,6 +1435,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
                     continue
 
                 event_type = evt.get("type") or current_event
@@ -1438,7 +1474,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         }
                         if isinstance(idx, int):
                             tool_block_index_to_tc_index[idx] = tc_index
-                        yield litellm.ModelResponse(
+                        chunk = litellm.ModelResponse(
                             id=response_id,
                             created=created,
                             model=f"github_copilot/{model}",
@@ -1451,6 +1487,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
+                        yield chunk
                     continue
 
                 if event_type == "content_block_delta":
@@ -1463,7 +1503,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     if dtype == "thinking_delta":
                         thinking = delta.get("thinking")
                         if thinking:
-                            yield litellm.ModelResponse(
+                            chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
                                 model=f"github_copilot/{model}",
@@ -1479,12 +1519,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
                         continue
 
                     if dtype == "text_delta":
                         text = delta.get("text")
                         if text:
-                            yield litellm.ModelResponse(
+                            chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
                                 model=f"github_copilot/{model}",
@@ -1497,6 +1541,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
                         continue
 
                     if dtype == "input_json_delta":
@@ -1505,7 +1553,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             tc_index = tool_block_index_to_tc_index.get(idx)
                             if tc_index is not None and tc_index in tool_calls:
                                 tool_calls[tc_index]["function"]["arguments"] += partial
-                                yield litellm.ModelResponse(
+                                chunk = litellm.ModelResponse(
                                     id=response_id,
                                     created=created,
                                     model=f"github_copilot/{model}",
@@ -1534,6 +1582,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                         }
                                     ],
                                 )
+                                if is_first_chunk:
+                                    chunk._response_headers = captured_headers
+                                    is_first_chunk = False
+                                yield chunk
                         continue
 
                 if event_type == "message_delta":
@@ -1553,7 +1605,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     finish_reason = self._map_anthropic_stop_reason_to_finish_reason(
                         stop_reason
                     )
-                    yield litellm.ModelResponse(
+                    chunk = litellm.ModelResponse(
                         id=response_id,
                         created=created,
                         model=f"github_copilot/{model}",
@@ -1567,6 +1619,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             "total_tokens": input_tokens + output_tokens,
                         },
                     )
+                    if is_first_chunk:
+                        chunk._response_headers = captured_headers
+                        is_first_chunk = False
+                    yield chunk
                     continue
 
                 if event_type == "message_stop":
@@ -1658,6 +1714,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 total_tokens=usage.get("total_tokens", 0),
             )
 
+        # Attach response headers for quota tracking
+        response_obj._response_headers = {
+            k.lower(): v for k, v in response.headers.items()
+        }
+
         return response_obj
 
     async def _stream_chat_response(
@@ -1713,6 +1774,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     response=response,
                 )
 
+            # Capture response headers for quota tracking
+            captured_headers = {k.lower(): v for k, v in response.headers.items()}
+            is_first_chunk = True
+
             async for line in response.aiter_lines():
                 if not line:
                     continue
@@ -1757,6 +1822,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        # Attach headers to first chunk for quota tracking
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
                         yield chunk
 
                     # Handle reasoning_content delta (for models that support reasoning via Chat Completions)
@@ -1777,6 +1846,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        # Attach headers to first chunk for quota tracking
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
                         yield chunk
 
                     # Handle tool calls delta
@@ -1827,6 +1900,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            # Attach headers to first chunk for quota tracking
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
                             yield chunk
 
                         # Final chunk
@@ -1843,6 +1920,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        # Attach headers to first chunk for quota tracking
+                        if is_first_chunk:
+                            final_chunk._response_headers = captured_headers
+                            is_first_chunk = False
                         yield final_chunk
 
     # =========================================================================
@@ -2234,6 +2315,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 total_tokens=usage.get("total_tokens", 0),
             )
 
+        # Attach response headers for quota tracking
+        response_obj._response_headers = {
+            k.lower(): v for k, v in response.headers.items()
+        }
+
         return response_obj
 
     async def _stream_responses_api(
@@ -2288,6 +2374,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     request=response.request,
                     response=response,
                 )
+
+            # Capture response headers for quota tracking
+            captured_headers = {k.lower(): v for k, v in response.headers.items()}
+            is_first_chunk = True
 
             async for line in response.aiter_lines():
                 if not line:
@@ -2350,6 +2440,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
                         yield chunk
 
                 # Handle reasoning summary delta events (GPT-5.2 and o-series)
@@ -2372,6 +2465,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 }
                             ],
                         )
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
                         yield chunk
 
                 # Handle response completion events
@@ -2389,6 +2485,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             }
                         ],
                     )
+                    if is_first_chunk:
+                        final_chunk._response_headers = captured_headers
+                        is_first_chunk = False
                     yield final_chunk
                     break  # Exit stream loop - response is complete
 
@@ -2428,6 +2527,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
                             yield chunk
                     elif item_type == "reasoning":
                         # Skip - reasoning was already streamed via response.reasoning_summary_text.delta
@@ -2468,6 +2570,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
                             yield chunk
                     elif content_part.get("type") == "reasoning":
                         reasoning_text = content_part.get("text", "")
@@ -2488,4 +2593,203 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     }
                                 ],
                             )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
                             yield chunk
+
+    # =========================================================================
+    # QUOTA TRACKING (PROACTIVE FETCH)
+    # =========================================================================
+
+    def get_background_job_config(self) -> Optional[Dict[str, Any]]:
+        """
+        Configure periodic quota refresh for GitHub Copilot.
+
+        Returns:
+            Background job configuration for quota refresh
+        """
+        return {
+            "interval": COPILOT_QUOTA_REFRESH_INTERVAL,
+            "name": "github_copilot_quota_refresh",
+            "run_on_start": True,
+        }
+
+    async def run_background_job(
+        self,
+        usage_manager: "UsageManager",
+        credentials: List[str],
+    ) -> None:
+        """
+        Refresh quota usage for all credentials in parallel.
+
+        Fetches quota from GitHub's internal Copilot API:
+        https://api.github.com/copilot_internal/user
+
+        Args:
+            usage_manager: UsageManager instance
+            credentials: List of credential paths
+        """
+        semaphore = asyncio.Semaphore(QUOTA_FETCH_CONCURRENCY)
+
+        async def refresh_single_credential(
+            credential_path: str, client: httpx.AsyncClient
+        ) -> None:
+            async with semaphore:
+                try:
+                    quota_data = await self.fetch_copilot_quota(credential_path, client)
+
+                    if quota_data.get("status") == "success":
+                        # Extract premium_interactions quota (the main quota for premium requests)
+                        premium = quota_data.get("premium_interactions", {})
+                        entitlement = premium.get("entitlement", 0)
+                        remaining = premium.get("remaining", 0)
+                        reset_date = quota_data.get("reset_date")
+
+                        # Parse reset date to Unix timestamp
+                        reset_ts = None
+                        if reset_date:
+                            try:
+                                from datetime import datetime
+                                # Parse ISO format date (YYYY-MM-DD)
+                                dt = datetime.strptime(reset_date, "%Y-%m-%d")
+                                reset_ts = dt.timestamp()
+                            except (ValueError, TypeError):
+                                lib_logger.debug(f"Could not parse reset date: {reset_date}")
+
+                        # Calculate used count
+                        quota_used = entitlement - remaining if entitlement > 0 else 0
+
+                        # Store baseline in usage manager using the "requests" group
+                        # This is a virtual model for credential-level tracking
+                        await usage_manager.update_quota_baseline(
+                            credential_path,
+                            "github_copilot/_quota",  # Virtual model for credential-level tracking
+                            quota_max_requests=entitlement,
+                            quota_reset_ts=reset_ts,
+                            quota_used=quota_used,
+                            quota_group="requests",  # Use "requests" as the quota group
+                        )
+
+                        lib_logger.debug(
+                            f"Updated GitHub Copilot quota baseline: "
+                            f"{remaining}/{entitlement} remaining, "
+                            f"resets {reset_date}"
+                        )
+
+                except Exception as e:
+                    lib_logger.warning(f"Failed to refresh GitHub Copilot quota: {e}")
+
+        # Fetch all credentials in parallel with shared HTTP client
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            tasks = [
+                refresh_single_credential(cred_path, client)
+                for cred_path in credentials
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def fetch_copilot_quota(
+        self,
+        credential_path: str,
+        client: httpx.AsyncClient,
+    ) -> Dict[str, Any]:
+        """
+        Fetch quota information from GitHub's internal Copilot API.
+
+        Calls: GET https://api.github.com/copilot_internal/user
+
+        Response format:
+        {
+            "copilot_plan": "pro",
+            "quota_reset_date": "2026-02-01",
+            "quota_snapshots": {
+                "premium_interactions": {
+                    "entitlement": 300,
+                    "percent_remaining": 85.0,
+                    "remaining": 255,
+                    "unlimited": false
+                },
+                ...
+            }
+        }
+
+        Args:
+            credential_path: Path to credential file or env:// path
+            client: HTTP client instance
+
+        Returns:
+            Dict with quota info or error status
+        """
+        try:
+            # Get OAuth token for GitHub API
+            auth_header = await self.get_auth_header(credential_path)
+
+            # Build headers for GitHub API
+            headers = {
+                **auth_header,
+                "Accept": "application/json",
+                "User-Agent": "GitHubCopilotChat/0.35.0",
+                "Copilot-Integration-Id": "vscode-chat",
+            }
+
+            # Fetch quota from GitHub internal API
+            response = await client.get(
+                f"{GITHUB_API_BASE}/copilot_internal/user",
+                headers=headers,
+            )
+
+            if response.status_code == 401:
+                lib_logger.warning(
+                    f"GitHub Copilot quota fetch unauthorized - token may be invalid"
+                )
+                return {"status": "error", "error": "unauthorized"}
+
+            if response.status_code != 200:
+                lib_logger.warning(
+                    f"GitHub Copilot quota fetch failed: HTTP {response.status_code}"
+                )
+                return {"status": "error", "error": f"HTTP {response.status_code}"}
+
+            data = response.json()
+
+            # Extract quota information
+            quota_snapshots = data.get("quota_snapshots", {})
+            premium = quota_snapshots.get("premium_interactions", {})
+
+            result = {
+                "status": "success",
+                "copilot_plan": data.get("copilot_plan"),
+                "reset_date": data.get("quota_reset_date"),
+                "premium_interactions": {
+                    "entitlement": premium.get("entitlement", 0),
+                    "remaining": premium.get("remaining", 0),
+                    "percent_remaining": premium.get("percent_remaining", 0),
+                    "unlimited": premium.get("unlimited", False),
+                },
+            }
+
+            # Also extract chat and completions if available
+            if "chat" in quota_snapshots:
+                chat = quota_snapshots["chat"]
+                result["chat"] = {
+                    "entitlement": chat.get("entitlement", 0),
+                    "remaining": chat.get("remaining", 0),
+                    "unlimited": chat.get("unlimited", False),
+                }
+
+            if "completions" in quota_snapshots:
+                completions = quota_snapshots["completions"]
+                result["completions"] = {
+                    "entitlement": completions.get("entitlement", 0),
+                    "remaining": completions.get("remaining", 0),
+                    "unlimited": completions.get("unlimited", False),
+                }
+
+            return result
+
+        except httpx.TimeoutException:
+            lib_logger.warning("GitHub Copilot quota fetch timed out")
+            return {"status": "error", "error": "timeout"}
+        except Exception as e:
+            lib_logger.warning(f"GitHub Copilot quota fetch error: {e}")
+            return {"status": "error", "error": str(e)}

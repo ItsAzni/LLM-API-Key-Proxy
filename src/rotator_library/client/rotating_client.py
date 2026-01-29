@@ -843,6 +843,39 @@ class RotatingClient:
                     result["errors"].append(f"{prov}: {str(e)}")
                     result["failed_count"] += len(creds_to_refresh)
 
+            # Also check for providers with background job support (like GitHub Copilot)
+            elif hasattr(provider_instance, "run_background_job"):
+                # Get credentials to refresh
+                if credential:
+                    creds_to_refresh = []
+                    for cred_path in self.all_credentials.get(prov, []):
+                        if cred_path.endswith(credential) or cred_path == credential:
+                            creds_to_refresh.append(cred_path)
+                            break
+                else:
+                    creds_to_refresh = self.all_credentials.get(prov, [])
+
+                if not creds_to_refresh:
+                    continue
+
+                try:
+                    # Run background job to fetch quota
+                    usage_manager = self._usage_managers.get(prov)
+                    if usage_manager:
+                        await provider_instance.run_background_job(
+                            usage_manager, creds_to_refresh
+                        )
+                        result["credentials_refreshed"] += len(creds_to_refresh)
+                        result["success_count"] += len(creds_to_refresh)
+                        lib_logger.info(
+                            f"Refreshed quota for {len(creds_to_refresh)} {prov} credential(s)"
+                        )
+
+                except Exception as e:
+                    lib_logger.error(f"Failed to refresh quota for {prov}: {e}")
+                    result["errors"].append(f"{prov}: {str(e)}")
+                    result["failed_count"] += len(creds_to_refresh)
+
         result["duration_ms"] = int((time.time() - start_time) * 1000)
         return result
 
