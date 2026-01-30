@@ -898,8 +898,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 **filtered_kwargs,
             )
 
-        # Claude models: Copilot behaves like Anthropic Messages API.
-        # This is required for interleaved thinking / reasoning visibility.
+        # Claude models: try Anthropic Messages API for thinking support.
+        # For streaming, we wrap the generator with error handling.
+        # If 404, fall back to Chat Completions (without thinking).
         if _is_claude_model(model):
             filtered_kwargs = {
                 k: v
@@ -913,15 +914,39 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     "credential_path",
                 )
             }
-            return await self._anthropic_messages_completion(
-                client=client,
-                api_base=api_base,
-                headers=headers,
-                model=model,
-                messages=messages,
-                stream=stream,
-                **filtered_kwargs,
-            )
+            if not stream:
+                # Non-streaming: simple try/except
+                try:
+                    return await self._anthropic_messages_completion(
+                        client=client,
+                        api_base=api_base,
+                        headers=headers,
+                        model=model,
+                        messages=messages,
+                        stream=False,
+                        **filtered_kwargs,
+                    )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        lib_logger.warning(
+                            "[GitHubCopilot] Messages API returned 404 for %s, falling back to Chat Completions (thinking disabled)",
+                            model,
+                        )
+                        # Fall through to Chat Completions below
+                    else:
+                        raise
+            else:
+                # Streaming: return the generator directly
+                # The generator will handle errors internally
+                return await self._anthropic_messages_completion(
+                    client=client,
+                    api_base=api_base,
+                    headers=headers,
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    **filtered_kwargs,
+                )
 
         # Sanitize messages to remove invalid tool calls
         sanitized_messages = self._sanitize_messages(messages)
@@ -1219,10 +1244,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             _map_reasoning_effort_to_anthropic_thinking(reasoning_effort, model)
         )
 
-        endpoint = f"{api_base}/v1/messages"
+        # Try /messages first (some Copilot versions), then /v1/messages
+        endpoint = f"{api_base}/messages"
         lib_logger.debug(
-            "[GitHubCopilot] Anthropic Messages request: model=%s thinking=%s",
+            "[GitHubCopilot] Anthropic Messages request: model=%s endpoint=%s thinking=%s",
             model,
+            endpoint,
             json.dumps(payload.get("thinking"), default=str),
         )
 
