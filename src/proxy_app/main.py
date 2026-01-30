@@ -380,6 +380,8 @@ if ENABLE_RAW_LOGGING:
     logging.info("Raw I/O logging is enabled (proxy boundary, unmodified HTTP data).")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 WEB_SEARCH_MAX_ITERATIONS = int(os.getenv("WEB_SEARCH_MAX_ITERATIONS", "15"))
+# Enable Ollama-compatible API routes (disabled by default - no auth required on these routes)
+ENABLE_OLLAMA_ROUTES = os.getenv("ENABLE_OLLAMA_ROUTES", "false").lower() == "true"
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 
 # Keys that should NOT be treated as provider API keys
@@ -1821,427 +1823,420 @@ def _resolve_ollama_model(display_name: str, registry: Dict[str, str]) -> Option
     return None
 
 
-@app.get("/api/version")
-async def ollama_version():
-    """
-    Ollama-compatible endpoint to return version info.
-    Required for remote Ollama host detection by Raycast.
+# Conditionally register Ollama routes only when enabled via env var
+# These routes have NO authentication (matching Ollama behavior) so are disabled by default
+if ENABLE_OLLAMA_ROUTES:
 
-    No authentication required (matches Ollama behavior).
-    """
-    return {"version": "0.5.4"}
+    @app.get("/api/version")
+    async def ollama_version():
+        """
+        Ollama-compatible endpoint to return version info.
+        Required for remote Ollama host detection by Raycast.
 
+        No authentication required (matches Ollama behavior).
+        """
+        return {"version": "0.5.4"}
 
-@app.get("/")
-async def ollama_root():
-    """
-    Root endpoint for Ollama compatibility.
-    Some clients check this to verify Ollama is running.
-    """
-    return "Ollama is running"
+    @app.get("/")
+    async def ollama_root():
+        """
+        Root endpoint for Ollama compatibility.
+        Some clients check this to verify Ollama is running.
+        """
+        return "Ollama is running"
 
+    @app.get("/api/tags")
+    async def ollama_list_models(
+        request: Request,
+        client: RotatingClient = Depends(get_rotating_client),
+    ):
+        """
+        Ollama-compatible endpoint to list available models.
+        Used by Raycast AI to discover models.
 
-@app.get("/api/tags")
-async def ollama_list_models(
-    request: Request,
-    client: RotatingClient = Depends(get_rotating_client),
-):
-    """
-    Ollama-compatible endpoint to list available models.
-    Used by Raycast AI to discover models.
+        No authentication required (matches Ollama behavior).
+        """
+        model_ids = await client.get_all_available_models(grouped=False)
 
-    No authentication required (matches Ollama behavior).
-    """
-    model_ids = await client.get_all_available_models(grouped=False)
+        # Get model info service for capabilities/context length
+        model_info_service = (
+            request.app.state.model_info_service
+            if hasattr(request.app.state, "model_info_service")
+            else None
+        )
 
-    # Get model info service for capabilities/context length
-    model_info_service = (
-        request.app.state.model_info_service
-        if hasattr(request.app.state, "model_info_service")
-        else None
-    )
+        models = []
+        for model_id in model_ids:
+            display_name = generate_model_display_name(model_id, include_provider=True)
 
-    models = []
-    for model_id in model_ids:
-        display_name = generate_model_display_name(model_id, include_provider=True)
+            # Try to get context length from model info service
+            context_length = 128000  # Default
+            if model_info_service and model_info_service.is_ready:
+                info = model_info_service.get_model_info(model_id)
+                if info and info.limits and info.limits.context_window:
+                    context_length = info.limits.context_window
 
-        # Try to get context length from model info service
-        context_length = 128000  # Default
+            models.append(
+                OllamaModelInfo(
+                    name=display_name,
+                    model=model_id,
+                    details=OllamaModelDetails(),
+                ).model_dump()
+            )
+
+        return {"models": models}
+
+    @app.post("/api/show")
+    async def ollama_show_model(
+        request: Request,
+        body: OllamaShowRequest,
+        client: RotatingClient = Depends(get_rotating_client),
+    ):
+        """
+        Ollama-compatible endpoint to get model details.
+        Used by Raycast AI to check model capabilities.
+
+        No authentication required (matches Ollama behavior).
+        """
+        registry = await _get_ollama_model_registry(client, request)
+        model_id = _resolve_ollama_model(body.model, registry)
+
+        if not model_id:
+            raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+
+        # Get model info for context length and capabilities
+        context_length = 128000
+        # Default to all capabilities since most proxy models support these
+        capabilities = ["completion", "vision", "tools"]
+
+        model_info_service = (
+            request.app.state.model_info_service
+            if hasattr(request.app.state, "model_info_service")
+            else None
+        )
+
         if model_info_service and model_info_service.is_ready:
             info = model_info_service.get_model_info(model_id)
-            if info and info.limits and info.limits.context_window:
-                context_length = info.limits.context_window
+            if info:
+                if info.limits and info.limits.context_window:
+                    context_length = info.limits.context_window
+                # Only override if we have explicit capability info
+                if info.capabilities:
+                    capabilities = ["completion"]
+                    if info.capabilities.vision:
+                        capabilities.append("vision")
+                    if info.capabilities.tools or info.capabilities.functions:
+                        capabilities.append("tools")
 
-        models.append(
-            OllamaModelInfo(
-                name=display_name,
-                model=model_id,
-                details=OllamaModelDetails(),
-            ).model_dump()
-        )
+        # Add websearch capability (Exa is always available, Tavily/Brave as fallback)
+        if get_search_service().is_configured:
+            capabilities.append("websearch")
 
-    return {"models": models}
+        return OllamaShowResponse(
+            modelfile=f"FROM {generate_model_display_name(model_id)}",
+            parameters='stop "<|eot_id|>"',
+            template="{{ .Prompt }}",
+            details=OllamaModelDetails(),
+            model_info={
+                "general.architecture": "llama",
+                "general.file_type": 2,
+                "general.parameter_count": 7000000000,
+                "llama.context_length": context_length,
+                "llama.embedding_length": 4096,
+                "tokenizer.ggml.model": "gpt2",
+            },
+            capabilities=capabilities,
+        ).model_dump()
 
+    @app.post("/api/chat")
+    async def ollama_chat(
+        request: Request,
+        body: OllamaChatRequest,
+        client: RotatingClient = Depends(get_rotating_client),
+    ):
+        """
+        Ollama-compatible chat completion endpoint.
+        Used by Raycast AI for chat interactions.
 
-@app.post("/api/show")
-async def ollama_show_model(
-    request: Request,
-    body: OllamaShowRequest,
-    client: RotatingClient = Depends(get_rotating_client),
-):
-    """
-    Ollama-compatible endpoint to get model details.
-    Used by Raycast AI to check model capabilities.
+        Translates Ollama format to OpenAI format, uses the RotatingClient,
+        then translates back to Ollama streaming format (NDJSON).
 
-    No authentication required (matches Ollama behavior).
-    """
-    registry = await _get_ollama_model_registry(client, request)
-    model_id = _resolve_ollama_model(body.model, registry)
+        No authentication required (matches Ollama behavior).
+        """
+        # Resolve model name to internal ID
+        registry = await _get_ollama_model_registry(client, request)
+        model_id = _resolve_ollama_model(body.model, registry)
 
-    if not model_id:
-        raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+        if not model_id:
+            raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
 
-    # Get model info for context length and capabilities
-    context_length = 128000
-    # Default to all capabilities since most proxy models support these
-    capabilities = ["completion", "vision", "tools"]
+        tool_follow_up = False
+        if body.messages:
+            last_msg = body.messages[-1]
+            if last_msg.role == "tool":
+                tool_follow_up = True
+            elif last_msg.role == "assistant" and last_msg.tool_calls:
+                tool_follow_up = True
 
-    model_info_service = (
-        request.app.state.model_info_service
-        if hasattr(request.app.state, "model_info_service")
-        else None
-    )
+        # Translate to OpenAI format
+        openai_request = ollama_to_openai_request(body, model_id)
 
-    if model_info_service and model_info_service.is_ready:
-        info = model_info_service.get_model_info(model_id)
-        if info:
-            if info.limits and info.limits.context_window:
-                context_length = info.limits.context_window
-            # Only override if we have explicit capability info
-            if info.capabilities:
-                capabilities = ["completion"]
-                if info.capabilities.vision:
-                    capabilities.append("vision")
-                if info.capabilities.tools or info.capabilities.functions:
-                    capabilities.append("tools")
-
-    # Add websearch capability (Exa is always available, Tavily/Brave as fallback)
-    if get_search_service().is_configured:
-        capabilities.append("websearch")
-
-    return OllamaShowResponse(
-        modelfile=f"FROM {generate_model_display_name(model_id)}",
-        parameters='stop "<|eot_id|>"',
-        template="{{ .Prompt }}",
-        details=OllamaModelDetails(),
-        model_info={
-            "general.architecture": "llama",
-            "general.file_type": 2,
-            "general.parameter_count": 7000000000,
-            "llama.context_length": context_length,
-            "llama.embedding_length": 4096,
-            "tokenizer.ggml.model": "gpt2",
-        },
-        capabilities=capabilities,
-    ).model_dump()
-
-
-@app.post("/api/chat")
-async def ollama_chat(
-    request: Request,
-    body: OllamaChatRequest,
-    client: RotatingClient = Depends(get_rotating_client),
-):
-    """
-    Ollama-compatible chat completion endpoint.
-    Used by Raycast AI for chat interactions.
-
-    Translates Ollama format to OpenAI format, uses the RotatingClient,
-    then translates back to Ollama streaming format (NDJSON).
-
-    No authentication required (matches Ollama behavior).
-    """
-    # Resolve model name to internal ID
-    registry = await _get_ollama_model_registry(client, request)
-    model_id = _resolve_ollama_model(body.model, registry)
-
-    if not model_id:
-        raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
-
-    tool_follow_up = False
-    if body.messages:
-        last_msg = body.messages[-1]
-        if last_msg.role == "tool":
-            tool_follow_up = True
-        elif last_msg.role == "assistant" and last_msg.tool_calls:
-            tool_follow_up = True
-
-    # Translate to OpenAI format
-    openai_request = ollama_to_openai_request(body, model_id)
-
-    # Inject web_search tool so model knows it can search
-    if not tool_follow_up:
-        openai_request = inject_web_search_tool(openai_request)
-    else:
-        openai_request.pop("tools", None)
-        openai_request.pop("tool_choice", None)
-
-    web_search_mode = os.getenv("OLLAMA_WEB_SEARCH_MODE", "server").lower()
-    use_server_tool_loop = web_search_mode != "client" and not tool_follow_up
-
-    # Get display name for response
-    display_name = generate_model_display_name(model_id)
-
-    # Log the request
-    log_request_to_console(
-        url=str(request.url),
-        headers=dict(request.headers),
-        client_info=(
-            request.client.host if request.client else "unknown",
-            request.client.port if request.client else 0,
-        ),
-        request_data={
-            "model": model_id,
-            "ollama_model": body.model,
-            "stream": body.stream,
-        },
-    )
-
-    # NOTE: emit_tool_call_events=True causes clients like Raycast to interpret
-    # the tool_calls in the stream as needing client-side handling, which sends
-    # a follow-up request and creates a loop. Keep this disabled by default.
-    emit_tool_call_events = False
-    if use_server_tool_loop:
-        emit_tool_call_events_env = os.getenv("OLLAMA_EMIT_TOOL_CALL_EVENTS")
-        if emit_tool_call_events_env is not None:
-            emit_tool_call_events = emit_tool_call_events_env.lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
-
-    if body.stream:
-        if use_server_tool_loop:
-            # Streaming response with tool loop
-            openai_stream = await execute_with_tool_loop(
-                client,
-                openai_request,
-                max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
-                request=request,
-            )
+        # Inject web_search tool so model knows it can search
+        if not tool_follow_up:
+            openai_request = inject_web_search_tool(openai_request)
         else:
-            openai_stream = await client.acompletion(request=request, **openai_request)
+            openai_request.pop("tools", None)
+            openai_request.pop("tool_choice", None)
 
-        async def is_disconnected():
-            return await request.is_disconnected()
+        web_search_mode = os.getenv("OLLAMA_WEB_SEARCH_MODE", "server").lower()
+        use_server_tool_loop = web_search_mode != "client" and not tool_follow_up
 
-        if not use_server_tool_loop:
-            ollama_stream = ollama_streaming_wrapper(
-                openai_stream,
-                display_name,
-                is_disconnected,
-            )
-        else:
-            ollama_stream = ollama_streaming_wrapper(
-                openai_stream,
-                display_name,
-                is_disconnected,
-                suppress_tool_calls=True,
-                emit_tool_call_events=emit_tool_call_events,
-            )
+        # Get display name for response
+        display_name = generate_model_display_name(model_id)
 
-        return StreamingResponse(
-            ollama_stream,
-            media_type="application/json",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Transfer-Encoding": "chunked",
+        # Log the request
+        log_request_to_console(
+            url=str(request.url),
+            headers=dict(request.headers),
+            client_info=(
+                request.client.host if request.client else "unknown",
+                request.client.port if request.client else 0,
+            ),
+            request_data={
+                "model": model_id,
+                "ollama_model": body.model,
+                "stream": body.stream,
             },
         )
-    else:
-        # Non-streaming response
-        openai_request["stream"] = False
+
+        # NOTE: emit_tool_call_events=True causes clients like Raycast to interpret
+        # the tool_calls in the stream as needing client-side handling, which sends
+        # a follow-up request and creates a loop. Keep this disabled by default.
+        emit_tool_call_events = False
         if use_server_tool_loop:
-            response = await execute_with_tool_loop(
-                client,
-                openai_request,
-                max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
-                request=request,
+            emit_tool_call_events_env = os.getenv("OLLAMA_EMIT_TOOL_CALL_EVENTS")
+            if emit_tool_call_events_env is not None:
+                emit_tool_call_events = emit_tool_call_events_env.lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+
+        if body.stream:
+            if use_server_tool_loop:
+                # Streaming response with tool loop
+                openai_stream = await execute_with_tool_loop(
+                    client,
+                    openai_request,
+                    max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                    request=request,
+                )
+            else:
+                openai_stream = await client.acompletion(request=request, **openai_request)
+
+            async def is_disconnected():
+                return await request.is_disconnected()
+
+            if not use_server_tool_loop:
+                ollama_stream = ollama_streaming_wrapper(
+                    openai_stream,
+                    display_name,
+                    is_disconnected,
+                )
+            else:
+                ollama_stream = ollama_streaming_wrapper(
+                    openai_stream,
+                    display_name,
+                    is_disconnected,
+                    suppress_tool_calls=True,
+                    emit_tool_call_events=emit_tool_call_events,
+                )
+
+            return StreamingResponse(
+                ollama_stream,
+                media_type="application/json",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Transfer-Encoding": "chunked",
+                },
             )
         else:
-            response = await client.acompletion(request=request, **openai_request)
+            # Non-streaming response
+            openai_request["stream"] = False
+            if use_server_tool_loop:
+                response = await execute_with_tool_loop(
+                    client,
+                    openai_request,
+                    max_tool_iterations=WEB_SEARCH_MAX_ITERATIONS,
+                    request=request,
+                )
+            else:
+                response = await client.acompletion(request=request, **openai_request)
 
-        # Convert to Ollama format
-        from rotator_library.ollama_compat.translator import openai_to_ollama_response
+            # Convert to Ollama format
+            from rotator_library.ollama_compat.translator import openai_to_ollama_response
 
-        ollama_response = openai_to_ollama_response(
-            response.model_dump() if hasattr(response, "model_dump") else response,
-            display_name,
-        )
-
-        return JSONResponse(content=ollama_response.model_dump())
-
-
-# --- Ollama Web Search API Endpoints (Tavily-powered) ---
-class OllamaWebSearchRequest(BaseModel):
-    """Request model for Ollama-compatible web search."""
-
-    query: str
-    max_results: Optional[int] = 5
-
-
-class OllamaWebSearchResult(BaseModel):
-    """Individual search result."""
-
-    title: str
-    url: str
-    content: str
-
-
-class OllamaWebSearchResponse(BaseModel):
-    """Response model for Ollama-compatible web search."""
-
-    results: List[OllamaWebSearchResult]
-
-
-class OllamaWebFetchRequest(BaseModel):
-    """Request model for Ollama-compatible web fetch."""
-
-    url: str
-
-
-class OllamaWebFetchResponse(BaseModel):
-    """Response model for Ollama-compatible web fetch."""
-
-    title: str
-    content: str
-    links: List[str]
-
-
-@app.post("/api/web_search")
-async def ollama_web_search(body: OllamaWebSearchRequest):
-    """
-    Ollama-compatible web search endpoint.
-
-    Uses the unified search service with fallback:
-    1. Exa MCP (free, no API key)
-    2. Tavily (if configured)
-    3. Brave (if configured)
-
-    This endpoint mimics Ollama's web search API format, allowing
-    Raycast and other Ollama clients to use web search functionality.
-    """
-    search_service = get_search_service()
-
-    result = await search_service.search(query=body.query, max_results=body.max_results)
-
-    if "error" in result and not result.get("results") and not result.get("answer"):
-        raise HTTPException(status_code=500, detail=result["error"])
-
-    # Transform results to Ollama format
-    ollama_results = []
-
-    # If we have structured results, use those
-    for item in result.get("results", []):
-        ollama_results.append(
-            OllamaWebSearchResult(
-                title=item.get("title", "Untitled"),
-                url=item.get("url", ""),
-                content=item.get("content", ""),
+            ollama_response = openai_to_ollama_response(
+                response.model_dump() if hasattr(response, "model_dump") else response,
+                display_name,
             )
-        )
 
-    # If we have an answer (from Exa), create a result from it
-    if not ollama_results and result.get("answer"):
-        ollama_results.append(
-            OllamaWebSearchResult(
-                title=f"Search Results for: {body.query}",
-                url="",
-                content=result["answer"],
+            return JSONResponse(content=ollama_response.model_dump())
+
+    # --- Ollama Web Search API Endpoints (Tavily-powered) ---
+    class OllamaWebSearchRequest(BaseModel):
+        """Request model for Ollama-compatible web search."""
+
+        query: str
+        max_results: Optional[int] = 5
+
+    class OllamaWebSearchResult(BaseModel):
+        """Individual search result."""
+
+        title: str
+        url: str
+        content: str
+
+    class OllamaWebSearchResponse(BaseModel):
+        """Response model for Ollama-compatible web search."""
+
+        results: List[OllamaWebSearchResult]
+
+    class OllamaWebFetchRequest(BaseModel):
+        """Request model for Ollama-compatible web fetch."""
+
+        url: str
+
+    class OllamaWebFetchResponse(BaseModel):
+        """Response model for Ollama-compatible web fetch."""
+
+        title: str
+        content: str
+        links: List[str]
+
+    @app.post("/api/web_search")
+    async def ollama_web_search(body: OllamaWebSearchRequest):
+        """
+        Ollama-compatible web search endpoint.
+
+        Uses the unified search service with fallback:
+        1. Exa MCP (free, no API key)
+        2. Tavily (if configured)
+        3. Brave (if configured)
+
+        This endpoint mimics Ollama's web search API format, allowing
+        Raycast and other Ollama clients to use web search functionality.
+        """
+        search_service = get_search_service()
+
+        result = await search_service.search(query=body.query, max_results=body.max_results)
+
+        if "error" in result and not result.get("results") and not result.get("answer"):
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        # Transform results to Ollama format
+        ollama_results = []
+
+        # If we have structured results, use those
+        for item in result.get("results", []):
+            ollama_results.append(
+                OllamaWebSearchResult(
+                    title=item.get("title", "Untitled"),
+                    url=item.get("url", ""),
+                    content=item.get("content", ""),
+                )
             )
-        )
 
-    return OllamaWebSearchResponse(results=ollama_results)
+        # If we have an answer (from Exa), create a result from it
+        if not ollama_results and result.get("answer"):
+            ollama_results.append(
+                OllamaWebSearchResult(
+                    title=f"Search Results for: {body.query}",
+                    url="",
+                    content=result["answer"],
+                )
+            )
 
+        return OllamaWebSearchResponse(results=ollama_results)
 
-@app.post("/api/web_fetch")
-async def ollama_web_fetch(body: OllamaWebFetchRequest):
-    """
-    Ollama-compatible web fetch endpoint.
+    @app.post("/api/web_fetch")
+    async def ollama_web_fetch(body: OllamaWebFetchRequest):
+        """
+        Ollama-compatible web fetch endpoint.
 
-    Fetches a single web page by URL and returns its content.
-    Uses httpx to fetch the page directly.
-    """
-    import httpx
-    from html.parser import HTMLParser
+        Fetches a single web page by URL and returns its content.
+        Uses httpx to fetch the page directly.
+        """
+        import httpx
+        from html.parser import HTMLParser
 
-    class SimpleHTMLParser(HTMLParser):
-        """Simple HTML parser to extract title and links."""
+        class SimpleHTMLParser(HTMLParser):
+            """Simple HTML parser to extract title and links."""
 
-        def __init__(self):
-            super().__init__()
-            self.title = ""
-            self.in_title = False
-            self.links = []
-            self.text_parts = []
-            self.in_body = False
-            self.skip_tags = {"script", "style", "nav", "header", "footer"}
-            self.current_skip = 0
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "title":
-                self.in_title = True
-            elif tag == "body":
-                self.in_body = True
-            elif tag == "a":
-                for attr, value in attrs:
-                    if attr == "href" and value and value.startswith("http"):
-                        self.links.append(value)
-            elif tag in self.skip_tags:
-                self.current_skip += 1
-
-        def handle_endtag(self, tag):
-            if tag == "title":
+            def __init__(self):
+                super().__init__()
+                self.title = ""
                 self.in_title = False
-            elif tag == "body":
+                self.links = []
+                self.text_parts = []
                 self.in_body = False
-            elif tag in self.skip_tags:
-                self.current_skip = max(0, self.current_skip - 1)
+                self.skip_tags = {"script", "style", "nav", "header", "footer"}
+                self.current_skip = 0
 
-        def handle_data(self, data):
-            if self.in_title:
-                self.title += data
-            elif self.in_body and self.current_skip == 0:
-                text = data.strip()
-                if text:
-                    self.text_parts.append(text)
+            def handle_starttag(self, tag, attrs):
+                if tag == "title":
+                    self.in_title = True
+                elif tag == "body":
+                    self.in_body = True
+                elif tag == "a":
+                    for attr, value in attrs:
+                        if attr == "href" and value and value.startswith("http"):
+                            self.links.append(value)
+                elif tag in self.skip_tags:
+                    self.current_skip += 1
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(body.url)
-            response.raise_for_status()
-            html = response.text
+            def handle_endtag(self, tag):
+                if tag == "title":
+                    self.in_title = False
+                elif tag == "body":
+                    self.in_body = False
+                elif tag in self.skip_tags:
+                    self.current_skip = max(0, self.current_skip - 1)
 
-        parser = SimpleHTMLParser()
-        parser.feed(html)
+            def handle_data(self, data):
+                if self.in_title:
+                    self.title += data
+                elif self.in_body and self.current_skip == 0:
+                    text = data.strip()
+                    if text:
+                        self.text_parts.append(text)
 
-        # Combine text parts and truncate if too long
-        content = " ".join(parser.text_parts)
-        if len(content) > 10000:
-            content = content[:10000] + "..."
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(body.url)
+                response.raise_for_status()
+                html = response.text
 
-        return OllamaWebFetchResponse(
-            title=parser.title.strip() or "Untitled",
-            content=content,
-            links=parser.links[:50],  # Limit to 50 links
-        )
+            parser = SimpleHTMLParser()
+            parser.feed(html)
 
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing page: {str(e)}")
+            # Combine text parts and truncate if too long
+            content = " ".join(parser.text_parts)
+            if len(content) > 10000:
+                content = content[:10000] + "..."
+
+            return OllamaWebFetchResponse(
+                title=parser.title.strip() or "Untitled",
+                content=content,
+                links=parser.links[:50],  # Limit to 50 links
+            )
+
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error processing page: {str(e)}")
 
 
 if __name__ == "__main__":
