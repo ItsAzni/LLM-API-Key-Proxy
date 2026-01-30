@@ -936,16 +936,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     else:
                         raise
             else:
-                # Streaming: return the generator directly
-                # The generator will handle errors internally
-                return await self._anthropic_messages_completion(
+                # Streaming: wrap in fallback generator.
+                # Try Messages API first; if 404, fall back to Chat Completions.
+                return self._stream_claude_with_fallback(
                     client=client,
                     api_base=api_base,
                     headers=headers,
                     model=model,
                     messages=messages,
-                    stream=True,
-                    **filtered_kwargs,
+                    filtered_kwargs=filtered_kwargs,
+                    fallback_kwargs=kwargs,
                 )
 
         # Sanitize messages to remove invalid tool calls
@@ -999,6 +999,154 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             return await self._non_stream_chat_response(
                 client, endpoint, headers, payload, model
             )
+
+    async def _stream_claude_with_fallback(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        headers: Dict[str, str],
+        model: str,
+        messages: List[Dict[str, Any]],
+        filtered_kwargs: Dict[str, Any],
+        fallback_kwargs: Dict[str, Any],
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Stream Claude via Messages API, falling back to Chat Completions on 404.
+
+        This wraps the Messages API stream and catches 404 errors. If the
+        Messages API returns 404, it falls back to Chat Completions (without
+        thinking support).
+        """
+        try:
+            messages_gen = self._stream_anthropic_messages_with_error_check(
+                client=client,
+                api_base=api_base,
+                headers=headers,
+                model=model,
+                messages=messages,
+                **filtered_kwargs,
+            )
+            async for chunk in messages_gen:
+                yield chunk
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                lib_logger.warning(
+                    "[GitHubCopilot] Messages API returned 404 for %s, falling back to Chat Completions (thinking disabled)",
+                    model,
+                )
+                # Filter out params that are passed explicitly to avoid conflicts
+                safe_kwargs = {
+                    k: v
+                    for k, v in fallback_kwargs.items()
+                    if k
+                    not in (
+                        "model",
+                        "messages",
+                        "stream",
+                        "credential_identifier",
+                        "credential_path",
+                    )
+                }
+                # Fall back to Chat Completions
+                chat_gen = await self._execute_chat_completions_stream(
+                    client=client,
+                    api_base=api_base,
+                    headers=headers,
+                    model=model,
+                    messages=messages,
+                    **safe_kwargs,
+                )
+                async for chunk in chat_gen:
+                    yield chunk
+            else:
+                raise
+
+    async def _stream_anthropic_messages_with_error_check(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        headers: Dict[str, str],
+        model: str,
+        messages: List[Dict[str, Any]],
+        **kwargs,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Wrapper that eagerly checks for HTTP errors before streaming.
+
+        The inner generator (_stream_anthropic_messages) raises HTTPStatusError
+        inside the generator, which makes it hard to catch at the caller level.
+        This wrapper makes the initial request, checks for errors, and then
+        yields from the inner generator.
+        """
+        gen = await self._anthropic_messages_completion(
+            client=client,
+            api_base=api_base,
+            headers=headers,
+            model=model,
+            messages=messages,
+            stream=True,
+            **kwargs,
+        )
+        # Yield from the generator - errors will propagate
+        async for chunk in gen:
+            yield chunk
+
+    async def _execute_chat_completions_stream(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        headers: Dict[str, str],
+        model: str,
+        messages: List[Dict[str, Any]],
+        **kwargs,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """Execute Chat Completions API for streaming fallback."""
+        # Sanitize messages to remove invalid tool calls
+        sanitized_messages = self._sanitize_messages(messages)
+
+        # Build request payload for Chat Completions API
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": sanitized_messages,
+            "stream": True,
+        }
+
+        # Copy over optional parameters
+        optional_params = [
+            "top_p",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            # Tool/function calling
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            # Structured output
+            "response_format",
+        ]
+        for param in optional_params:
+            if param in kwargs and kwargs[param] is not None:
+                payload[param] = kwargs[param]
+
+        # Map reasoning_effort to model-specific thinking config
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None:
+            thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+            payload.update(thinking_config)
+            lib_logger.debug(
+                "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
+                reasoning_effort,
+                json.dumps(thinking_config, default=str)[:500],
+            )
+
+        endpoint = f"{api_base}/chat/completions"
+
+        lib_logger.debug(
+            f"Copilot fallback request to {model}: {json.dumps(payload, default=str)[:500]}..."
+        )
+
+        return self._stream_chat_response(client, endpoint, headers, payload, model)
 
     # =========================================================================
     # COPILOT CLAUDE (ANTHROPIC MESSAGES API) IMPLEMENTATION
