@@ -538,6 +538,9 @@ def _display_provider_credentials(provider_name: str):
     if provider_name in ["gemini_cli", "antigravity"]:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
+    # Add type column for iFlow (OAuth vs Cookie)
+    elif provider_name == "iflow":
+        table.add_column("Type", style="magenta")
 
     for i, cred in enumerate(credentials, 1):
         file_name = Path(cred["file_path"]).name
@@ -549,6 +552,9 @@ def _display_provider_credentials(provider_name: str):
             if project and len(project) > 20:
                 project = project[:17] + "..."
             table.add_row(str(i), file_name, email, tier or "-", project or "-")
+        elif provider_name == "iflow":
+            cred_type = cred.get("type", "oauth").capitalize()
+            table.add_row(str(i), file_name, email, cred_type)
         else:
             table.add_row(str(i), file_name, email)
 
@@ -779,6 +785,9 @@ async def _view_oauth_credentials_detail(provider_name: str):
     if provider_name in ["gemini_cli", "antigravity"]:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
+    # Add type column for iFlow (OAuth vs Cookie)
+    elif provider_name == "iflow":
+        table.add_column("Type", style="magenta")
 
     for i, cred in enumerate(credentials, 1):
         file_name = Path(cred["file_path"]).name
@@ -792,6 +801,9 @@ async def _view_oauth_credentials_detail(provider_name: str):
             if project and len(project) > 25:
                 project = project[:22] + "..."
             table.add_row(str(i), file_name, email, tier, project or "-")
+        elif provider_name == "iflow":
+            cred_type = cred.get("type", "oauth").capitalize()
+            table.add_row(str(i), file_name, email, cred_type)
         else:
             table.add_row(str(i), file_name, email)
 
@@ -1720,7 +1732,7 @@ async def setup_new_credential(provider_name: str):
         oauth_friendly_names = {
             "gemini_cli": "Gemini CLI (OAuth)",
             "qwen_code": "Qwen Code (OAuth - also supports API keys)",
-            "iflow": "iFlow (OAuth - also supports API keys)",
+            "iflow": "iFlow",
             "antigravity": "Antigravity (OAuth)",
             "github_copilot": "GitHub Copilot (OAuth)",
         }
@@ -1728,13 +1740,44 @@ async def setup_new_credential(provider_name: str):
             provider_name, provider_name.replace("_", " ").title()
         )
 
-        # Call the auth class's setup_credential() method which handles the entire flow:
-        # - OAuth authentication
-        # - Email extraction for deduplication
-        # - File path determination (new or existing)
-        # - Credential file saving
-        # - Post-auth discovery (tier/project for Google OAuth providers)
-        result = await auth_instance.setup_credential(_get_oauth_base_dir())
+        # Special handling for iFlow - offer OAuth or Cookie authentication
+        if provider_name == "iflow":
+            console.print(
+                Panel(
+                    Text.from_markup(
+                        "[bold]Choose authentication method:[/bold]\n\n"
+                        "  [cyan]1.[/cyan] OAuth (Email login)\n"
+                        "     Opens browser for iFlow login\n"
+                        "     Token expires and needs periodic refresh\n\n"
+                        "  [cyan]2.[/cyan] Cookie [green](Recommended)[/green]\n"
+                        "     Paste session cookie from browser\n"
+                        "     More permanent, only API key expires"
+                    ),
+                    title="[bold blue]iFlow Authentication Method[/bold blue]",
+                    border_style="blue",
+                )
+            )
+
+            auth_choice = Prompt.ask(
+                "[bold]Select method[/bold] (or 'b' to go back)",
+                choices=["1", "2", "b"],
+                default="2",
+            )
+
+            if auth_choice.lower() == "b":
+                return
+
+            if auth_choice == "2":
+                # Cookie authentication
+                result = await auth_instance.setup_cookie_credential(
+                    _get_oauth_base_dir()
+                )
+            else:
+                # OAuth authentication
+                result = await auth_instance.setup_credential(_get_oauth_base_dir())
+        else:
+            # Other providers - use OAuth
+            result = await auth_instance.setup_credential(_get_oauth_base_dir())
 
         if not result.success:
             console.print(
