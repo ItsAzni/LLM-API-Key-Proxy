@@ -1499,7 +1499,7 @@ class AntigravityProvider(
             f"parallel_tool_gemini3={self._enable_parallel_tool_instruction_gemini3}"
         )
 
-    def _sanitize_tool_name(self, name: str) -> str:
+    def _sanitize_tool_name(self, name: str, max_length: int = 52) -> str:
         """
         Sanitize tool name to comply with Gemini API rules.
 
@@ -1507,9 +1507,15 @@ class AntigravityProvider(
         Returns sanitized name and stores mapping for later restoration.
         """
         sanitized, self._tool_name_mapping = sanitize_gemini_tool_name(
-            name, self._tool_name_mapping
+            name, self._tool_name_mapping, max_length=max_length
         )
         return sanitized
+
+    @staticmethod
+    def _is_valid_gemini_tool_name(name: str) -> bool:
+        if not name:
+            return False
+        return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,63}$", name))
 
     def _restore_tool_name(self, sanitized_name: str) -> str:
         """Restore original tool name from sanitized version."""
@@ -2566,6 +2572,17 @@ class AntigravityProvider(
 
         return {"thinkingBudget": budgets[effort], "include_thoughts": True}
 
+    @staticmethod
+    def _tool_choice_forces_use(tool_choice: Any) -> bool:
+        if tool_choice is None:
+            return False
+        if isinstance(tool_choice, str):
+            return tool_choice.strip().lower() in ("required", "any", "force", "tool")
+        if isinstance(tool_choice, dict):
+            tc_type = tool_choice.get("type")
+            return tc_type in ("function", "tool")
+        return False
+
     # =========================================================================
     # MESSAGE TRANSFORMATION (OpenAI → Gemini)
     # =========================================================================
@@ -3165,9 +3182,18 @@ class AntigravityProvider(
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 name = func_decl.get("name", "")
+                if not isinstance(name, str):
+                    continue
                 if name:
+                    original_name = self._tool_name_mapping.get(name, name)
                     # Rename problematic tools first
                     name = GEMINI3_TOOL_RENAMES.get(name, name)
+                    max_len = max(1, 64 - len(self._gemini3_tool_prefix))
+                    if len(name) > max_len:
+                        trimmed = name[:max_len]
+                        if trimmed != name:
+                            self._tool_name_mapping.setdefault(trimmed, original_name)
+                        name = trimmed
                     # Then add prefix
                     func_decl["name"] = f"{self._gemini3_tool_prefix}{name}"
 
@@ -3704,8 +3730,24 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             func = tool.get("function", {})
             params = func.get("parameters")
 
+            raw_name = func.get("name", "")
+            if not raw_name:
+                lib_logger.warning("[Antigravity] Skipping tool with empty name")
+                continue
+            max_len = 64
+            if self._is_gemini_3(model) and self._enable_gemini3_tool_fix:
+                max_len = max(1, 64 - len(self._gemini3_tool_prefix))
+
+            sanitized_name = self._sanitize_tool_name(raw_name, max_length=max_len)
+            if not self._is_valid_gemini_tool_name(sanitized_name):
+                lib_logger.warning(
+                    "[Antigravity] Skipping invalid tool name after sanitize: %r",
+                    sanitized_name,
+                )
+                continue
+
             func_decl = {
-                "name": self._sanitize_tool_name(func.get("name", "")),
+                "name": sanitized_name,
                 "description": func.get("description", ""),
             }
 
@@ -4389,6 +4431,19 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         thinking_enabled = float(reasoning_effort) > 0
                     else:
                         thinking_enabled = True
+
+        if (
+            tools
+            and thinking_enabled
+            and self._is_claude(model)
+            and self._tool_choice_forces_use(tool_choice)
+        ):
+            lib_logger.warning(
+                "[Antigravity] Disabling thinking because tool_choice forces tool use for model %s",
+                model,
+            )
+            thinking_enabled = False
+            reasoning_effort = "disable"
 
         # Preprocess PDFs for Claude models using Gemini
         # Claude via Antigravity doesn't support PDF input natively, so we use

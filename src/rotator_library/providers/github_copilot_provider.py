@@ -299,7 +299,13 @@ def _map_reasoning_effort_to_config(
         if effort in ("disable", "off", "none"):
             return {}  # No reasoning
         if effort == "minimal":
-            return {"reasoning": {"effort": "minimal", "summary": "auto"}}
+            # Copilot Responses API rejects "minimal" for some GPT-5 models.
+            # Map to the lowest supported tier to avoid 400s.
+            lib_logger.debug(
+                "[GitHubCopilot] reasoning_effort 'minimal' mapped to 'low' for model %s",
+                clean_model,
+            )
+            effort = "low"
         if effort == "low":
             return {"reasoning": {"effort": "low", "summary": "auto"}}
         if effort in ("low_medium", "medium"):
@@ -1391,6 +1397,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         payload.update(
             _map_reasoning_effort_to_anthropic_thinking(reasoning_effort, model)
         )
+        thinking = payload.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            payload["temperature"] = 1
 
         # Try /messages first (some Copilot versions), then /v1/messages
         endpoint = f"{api_base}/messages"
@@ -2123,9 +2132,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             List of Responses API format input items
         """
         input_items = []
+        call_id_by_name: Dict[str, List[str]] = {}
 
-        for msg in messages:
-            role = msg.get("role", "user")
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            role_raw = msg.get("role", "user")
+            role = str(role_raw).strip().lower() if role_raw is not None else "user"
             content = msg.get("content")
 
             # Map system role to developer (Responses API convention)
@@ -2187,6 +2200,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             f"id={call_id!r}, name={func_name!r}"
                         )
                         continue
+                    call_id_by_name.setdefault(func_name, []).append(call_id)
                     input_items.append(
                         {
                             "type": "function_call",
@@ -2197,23 +2211,47 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     )
                 continue
 
-            # Handle tool messages (function outputs)
-            if role == "tool":
-                tool_call_id = msg.get("tool_call_id", "")
+            # Handle tool/function messages (function outputs)
+            if role in ("tool", "function"):
+                tool_call_id = (
+                    msg.get("tool_call_id") or msg.get("call_id") or msg.get("id") or ""
+                )
+                tool_name = msg.get("name") or msg.get("tool_name") or ""
+                if not tool_call_id and tool_name:
+                    queued = call_id_by_name.get(tool_name) or []
+                    if queued:
+                        tool_call_id = queued.pop(0)
+                        if not queued:
+                            call_id_by_name.pop(tool_name, None)
                 if isinstance(content, str):
                     output = content
                 elif content is None:
                     output = ""
                 else:
                     output = json.dumps(content)
-                input_items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": tool_call_id,
-                        "output": output,
-                    }
-                )
+                if tool_call_id:
+                    input_items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": tool_call_id,
+                            "output": output,
+                        }
+                    )
+                else:
+                    lib_logger.warning(
+                        "[GitHubCopilot] Tool output missing call_id; falling back to user message. name=%r",
+                        tool_name,
+                    )
+                    input_items.append(
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": output}],
+                        }
+                    )
                 continue
+
+            if role not in ("user", "developer"):
+                role = "user"
 
             # Handle user/developer messages
             if isinstance(content, str):
@@ -2526,6 +2564,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Track tool call indices - Responses API may not include index in events
         tool_call_index_counter = 0
 
+        # Track if any tool calls were yielded (for correct finish_reason)
+        tool_calls_yielded = False
+
         # Disable compression for streaming to get smooth token-by-token output.
         # Without this, gzip compression causes buffering until complete blocks
         # can be decompressed, resulting in chunky streaming.
@@ -2570,14 +2611,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 except json.JSONDecodeError:
                     continue
 
-                # Extract response ID from first event
-                if evt.get("response", {}).get("id"):
-                    response_id = evt["response"]["id"]
-                elif evt.get("id"):
-                    response_id = evt["id"]
-
                 # Handle different event types
                 event_type = evt.get("type", "")
+
+                # Extract response ID from response.created event only
+                # Other events like response.output_item.done have item IDs, not response IDs
+                if event_type == "response.created":
+                    if evt.get("response", {}).get("id"):
+                        response_id = evt["response"]["id"]
+                    elif evt.get("id"):
+                        response_id = evt["id"]
 
                 if event_type == "response.output_item.done":
                     item = evt.get("item", {})
@@ -2647,6 +2690,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
                 # Handle response completion events
                 elif event_type in ("response.done", "response.completed"):
+                    # Determine finish_reason based on what was emitted
+                    # If tool calls were yielded, clients expect "tool_calls" not "stop"
+                    final_finish_reason = "tool_calls" if tool_calls_yielded else "stop"
                     final_chunk = litellm.ModelResponse(
                         id=response_id,
                         created=created,
@@ -2656,7 +2702,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             {
                                 "index": 0,
                                 "delta": {},
-                                "finish_reason": "stop",
+                                "finish_reason": final_finish_reason,
                             }
                         ],
                     )
@@ -2705,6 +2751,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             if is_first_chunk:
                                 chunk._response_headers = captured_headers
                                 is_first_chunk = False
+                            tool_calls_yielded = True  # Mark that tool calls were emitted
                             yield chunk
                     elif item_type == "reasoning":
                         # Skip - reasoning was already streamed via response.reasoning_summary_text.delta
@@ -2826,11 +2873,14 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         if reset_date:
                             try:
                                 from datetime import datetime
+
                                 # Parse ISO format date (YYYY-MM-DD)
                                 dt = datetime.strptime(reset_date, "%Y-%m-%d")
                                 reset_ts = dt.timestamp()
                             except (ValueError, TypeError):
-                                lib_logger.debug(f"Could not parse reset date: {reset_date}")
+                                lib_logger.debug(
+                                    f"Could not parse reset date: {reset_date}"
+                                )
 
                         # Calculate used count
                         quota_used = entitlement - remaining if entitlement > 0 else 0

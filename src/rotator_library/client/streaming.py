@@ -394,24 +394,52 @@ class StreamingHandler:
             )
             is_final_chunk = has_meaningful_usage or has_usage_with_finish
 
+            # Only treat as final if we have accumulated tool_calls
+            # Don't trust source_finish_reason alone - providers may send it
+            # prematurely (e.g., end-of-reasoning markers with finish_reason: "stop"
+            # before tool_calls arrive)
+            is_empty_delta = not delta
+            if (
+                not is_final_chunk
+                and is_empty_delta
+                and (has_tool_calls or accumulated_finish_reason == "tool_calls")
+            ):
+                is_final_chunk = True
+
+            # Some providers emit usage on every chunk (often all zeros) and default
+            # finish_reason to "stop". Treat those as intermediate unless delta is empty.
+            if (
+                is_final_chunk
+                and has_usage_with_finish
+                and not has_meaningful_usage
+                and delta
+            ):
+                is_final_chunk = False
+
             if is_final_chunk:
                 # FINAL CHUNK: Determine correct finish_reason
-                # Priority: tool_calls > source_finish_reason > accumulated > "stop"
+                # Priority: tool_calls > non-stop finish_reasons > accumulated > "stop"
                 if has_tool_calls or chunk_has_tool_calls:
                     choice["finish_reason"] = "tool_calls"
-                elif source_finish_reason:
+                elif source_finish_reason and source_finish_reason != "stop":
+                    # Only propagate non-stop finish reasons (e.g., length, content_filter)
+                    # "stop" is the default fallback, not a priority signal
                     choice["finish_reason"] = source_finish_reason
-                elif accumulated_finish_reason:
+                elif accumulated_finish_reason and accumulated_finish_reason != "stop":
                     choice["finish_reason"] = accumulated_finish_reason
+                elif source_finish_reason == "stop" or accumulated_finish_reason == "stop":
+                    choice["finish_reason"] = "stop"
                 else:
                     choice["finish_reason"] = "stop"
                 finish_reason = choice["finish_reason"]
             else:
-                # FIX 4: INTERMEDIATE CHUNK: Set finish_reason to null
+                # INTERMEDIATE CHUNK: Always set finish_reason to null
+                # Even if source has finish_reason (providers may send it prematurely)
                 choice["finish_reason"] = None
 
+        sse_str = f"data: {json.dumps(chunk_dict)}\n\n"
         return ProcessedChunk(
-            sse_string=f"data: {json.dumps(chunk_dict)}\n\n",
+            sse_string=sse_str,
             usage=usage,
             finish_reason=finish_reason,
             has_tool_calls=chunk_has_tool_calls,

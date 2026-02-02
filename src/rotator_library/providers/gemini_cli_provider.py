@@ -1594,7 +1594,8 @@ class GeminiCliProvider(
                                         ) in self._convert_chunk_to_openai(
                                             chunk, model, accumulator
                                         ):
-                                            yield litellm.ModelResponse(**openai_chunk)
+                                            model_resp = litellm.ModelResponse(**openai_chunk)
+                                            yield model_resp
                                     except json.JSONDecodeError:
                                         lib_logger.warning(
                                             f"Could not decode JSON from Gemini CLI: {line}"
@@ -1602,13 +1603,19 @@ class GeminiCliProvider(
 
                             # Always emit a final chunk with usage for proper OpenAI format
                             # This ensures finish_reason and usage are only on the final chunk
+                            # Determine finish_reason based on whether tool_calls were emitted
+                            final_finish_reason = (
+                                "tool_calls"
+                                if accumulator.get("has_tool_calls")
+                                else "stop"
+                            )
                             final_chunk = {
                                 "id": f"chatcmpl-geminicli-{time.time()}",
                                 "object": "chat.completion.chunk",
                                 "created": int(time.time()),
                                 "model": model,
                                 "choices": [
-                                    {"index": 0, "delta": {}, "finish_reason": None}
+                                    {"index": 0, "delta": {}, "finish_reason": final_finish_reason}
                                 ],
                             }
                             # Include accumulated usage or minimal fallback
@@ -1621,7 +1628,8 @@ class GeminiCliProvider(
                                     "completion_tokens": 1,
                                     "total_tokens": 1,
                                 }
-                            yield litellm.ModelResponse(**final_chunk)
+                            model_response = litellm.ModelResponse(**final_chunk)
+                            yield model_response
 
                             # Success - exit the endpoint fallback loop
                             return

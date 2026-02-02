@@ -782,22 +782,54 @@ async def streaming_response_wrapper(
             # Ignore any other errors during cleanup
             pass
 
+    has_tool_calls = False  # Track if any chunk had tool_calls
     try:
         async for chunk_str in response_stream:
             if await request.is_disconnected():
                 logging.warning("Client disconnected, stopping stream.")
                 break
-            yield chunk_str
+
+            # Parse chunk to check for tool_calls and fix finish_reason before yielding
+            chunk_to_yield = chunk_str
             if chunk_str.strip() and chunk_str.startswith("data:"):
                 content = chunk_str[len("data:") :].strip()
                 if content != "[DONE]":
                     try:
                         chunk_data = json.loads(content)
+
+                        # Track tool_calls in delta
+                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                        if delta.get("tool_calls"):
+                            has_tool_calls = True
+
+                        # Check if this is the final chunk
+                        # Final chunk detection: has usage with real tokens OR empty delta with usage present
+                        usage = chunk_data.get("usage", {})
+                        completion_tokens = usage.get("completion_tokens", 0) if usage else 0
+                        is_empty_delta = not delta
+
+                        # Final chunk conditions:
+                        # 1. Has meaningful usage (completion_tokens > 0)
+                        # 2. OR has usage dict (even with zeros) + empty delta (common for Copilot/Responses API)
+                        is_final_chunk = completion_tokens > 0 or (usage is not None and is_empty_delta and has_tool_calls)
+
+                        # FIX: If final chunk and we had tool_calls, ensure finish_reason is correct
+                        if is_final_chunk and has_tool_calls:
+                            current_fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                            if current_fr != "tool_calls":
+                                logging.debug(f"Correcting finish_reason from {current_fr} to tool_calls")
+                                if chunk_data.get("choices"):
+                                    chunk_data["choices"][0]["finish_reason"] = "tool_calls"
+                                    # Re-serialize the chunk with corrected finish_reason
+                                    chunk_to_yield = f"data: {json.dumps(chunk_data)}\n\n"
+
                         response_chunks.append(chunk_data)
                         if logger:
                             logger.log_stream_chunk(chunk_data)
                     except json.JSONDecodeError:
                         pass
+
+            yield chunk_to_yield
     except (asyncio.CancelledError, GeneratorExit):
         # Client disconnected or generator was closed - this is expected
         logging.debug("Stream cancelled or closed by client.")
