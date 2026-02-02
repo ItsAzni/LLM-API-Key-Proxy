@@ -23,6 +23,15 @@ from .tool_handler import (
 
 logger = logging.getLogger("rotator_library.web_search")
 
+# Tool names that should be handled as web search (includes proxy's tool and native provider tools)
+WEB_SEARCH_TOOL_NAMES = {
+    "web_search",           # Proxy's injected tool
+    "web_search_preview",   # OpenAI's native web search
+    "gemini3_web_search",   # Gemini 3's native web search
+    "google_search",        # Gemini's google search
+    "googleSearch",         # Alternative naming
+}
+
 
 async def execute_with_tool_loop(
     client: Any,
@@ -177,6 +186,7 @@ async def _streaming_tool_loop(
         stream = await client.acompletion(request=request, **current_request, **kwargs)
 
         done_chunk = None
+        last_chunk_with_finish_reason = None  # Track last chunk that had finish_reason
 
         # Stream chunks in real-time while accumulating for tool detection
         async for chunk in stream:
@@ -184,14 +194,41 @@ async def _streaming_tool_loop(
                 done_chunk = chunk
                 continue
 
-            sanitized_chunk = _strip_tool_call_finish_reason(chunk)
+            # Check if this chunk has finish_reason before we strip it
+            if chunk.startswith("data: "):
+                try:
+                    data_str = chunk[6:].strip()
+                    if data_str != "[DONE]":
+                        data = json.loads(data_str)
+                        choices = data.get("choices", [])
+                        if choices and choices[0].get("finish_reason"):
+                            last_chunk_with_finish_reason = chunk
+                except json.JSONDecodeError:
+                    pass
+
+            sanitized_chunk = _sanitize_stream_chunk(chunk)
             yield sanitized_chunk  # Stream immediately to client!
             _accumulate_chunk(accumulated_response, chunk)
 
         # After stream ends, check for tool calls
-        tool_calls = _extract_tool_calls_from_accumulated(accumulated_response)
+        web_search_calls, has_other_tools = _extract_tool_calls_from_accumulated(accumulated_response)
 
-        if not tool_calls:
+        # Debug: log what tools were accumulated
+        if accumulated_response["tool_calls"]:
+            tool_names = [tc.get("function", {}).get("name", "?") for tc in accumulated_response["tool_calls"]]
+            logger.debug(f"Accumulated tool calls: {tool_names}, web_search_calls={len(web_search_calls)}, has_other_tools={has_other_tools}")
+
+        # If there are non-web_search tool calls, the client needs to handle them
+        # Re-emit the final chunk with finish_reason so client knows to execute tools
+        if has_other_tools and not web_search_calls:
+            # Only other tools, no web_search - client handles everything
+            if last_chunk_with_finish_reason:
+                yield last_chunk_with_finish_reason
+            if done_chunk:
+                yield done_chunk
+            return
+
+        if not web_search_calls:
             # No tool calls - we're done (chunks already streamed)
             if done_chunk:
                 yield done_chunk
@@ -204,11 +241,11 @@ async def _streaming_tool_loop(
             return
 
         logger.info(
-            f"Streaming tool loop iteration {iteration + 1}: {len(tool_calls)} web_search call(s)"
+            f"Streaming tool loop iteration {iteration + 1}: {len(web_search_calls)} web_search call(s)"
         )
 
         filtered_tool_calls = []
-        for query, tool_call_id, freshness in tool_calls:
+        for query, tool_call_id, freshness in web_search_calls:
             key = (query, freshness or "")
             if key in seen_queries:
                 continue
@@ -331,8 +368,8 @@ def _accumulate_chunk(accumulated: Dict[str, Any], chunk: str) -> None:
         accumulated["finish_reason"] = finish_reason
 
 
-def _strip_tool_call_finish_reason(chunk: str) -> str:
-    """Remove tool_calls finish_reason so the client keeps streaming."""
+def _sanitize_stream_chunk(chunk):
+    """Remove web_search tool calls and tool_calls finish_reason from streamed chunks."""
     if not chunk.startswith("data: "):
         return chunk
 
@@ -349,40 +386,87 @@ def _strip_tool_call_finish_reason(chunk: str) -> str:
     if not choices:
         return chunk
 
-    if choices[0].get("finish_reason") == "tool_calls":
-        choices[0]["finish_reason"] = None
-        return f"data: {json.dumps(data)}\n\n"
+    changed = False
+    choice = choices[0]
+    delta = choice.get("delta", {})
+    tool_calls = delta.get("tool_calls")
+    if tool_calls:
+        filtered = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                filtered.append(tc)
+                continue
+            func = tc.get("function") or {}
+            name = func.get("name") if isinstance(func, dict) else None
+            if name not in WEB_SEARCH_TOOL_NAMES:
+                filtered.append(tc)
 
-    return chunk
+        if len(filtered) != len(tool_calls):
+            changed = True
+            if filtered:
+                delta["tool_calls"] = filtered
+            else:
+                delta.pop("tool_calls", None)
+
+    if choice.get("finish_reason") == "tool_calls":
+        choice["finish_reason"] = None
+        changed = True
+
+    if not changed:
+        return chunk
+
+    return f"data: {json.dumps(data)}\n\n"
 
 
 def _extract_tool_calls_from_accumulated(
     accumulated: Dict[str, Any],
-) -> List[tuple[str, str, Optional[str]]]:
+) -> tuple[List[tuple[str, str, Optional[str]]], bool]:
     """
     Extract web_search tool calls from accumulated response.
 
-    Returns list of (query, tool_call_id, freshness) tuples.
+    Recognizes both the proxy's injected 'web_search' tool and native
+    Gemini search tools (gemini3_web_search, google_search, etc.)
+
+    Returns:
+        Tuple of (web_search_calls, has_other_tools) where:
+        - web_search_calls: list of (query, tool_call_id, freshness) tuples
+        - has_other_tools: True if there are non-web_search tool calls
     """
-    result = []
+    web_search_calls = []
+    has_other_tools = False
 
     for tool_call in accumulated["tool_calls"]:
         if tool_call.get("type") == "function":
             func = tool_call.get("function", {})
-            if func.get("name") == "web_search":
+            func_name = func.get("name", "")
+            if func_name in WEB_SEARCH_TOOL_NAMES:
                 try:
                     args = json.loads(func.get("arguments", "{}"))
+                    # Handle different argument formats:
+                    # - web_search uses "query"
+                    # - gemini3_web_search might use "query" or be in a different format
                     query = args.get("query", "")
+                    if not query:
+                        # Try alternative field names
+                        query = args.get("search_query", "") or args.get("q", "")
                     tool_call_id = tool_call.get("id", "")
                     freshness = args.get("freshness")  # May be None
                     if query and tool_call_id:
-                        result.append((query, tool_call_id, freshness))
+                        web_search_calls.append((query, tool_call_id, freshness))
+                    elif tool_call_id:
+                        # Even without a query, track it as a search tool call
+                        # so we don't treat it as "other tools"
+                        logger.warning(
+                            f"Search tool '{func_name}' called without query, skipping"
+                        )
                 except json.JSONDecodeError:
                     logger.warning(
                         f"Failed to parse tool call arguments: {func.get('arguments')}"
                     )
+            elif func_name:  # Has a name but not a search tool
+                has_other_tools = True
 
-    return result
+    return web_search_calls, has_other_tools
 
 
 def _build_assistant_message_from_accumulated(

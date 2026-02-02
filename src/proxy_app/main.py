@@ -785,6 +785,7 @@ async def streaming_response_wrapper(
             pass
 
     has_tool_calls = False  # Track if any chunk had tool_calls
+    tool_calls_pending = False  # True if last meaningful event was a tool call
     try:
         async for chunk_str in response_stream:
             if await request.is_disconnected():
@@ -803,6 +804,20 @@ async def streaming_response_wrapper(
                         delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                         if delta.get("tool_calls"):
                             has_tool_calls = True
+                            tool_calls_pending = True
+                        else:
+                            # If we see content/reasoning after a tool call, we've moved on
+                            if tool_calls_pending:
+                                content = delta.get("content")
+                                reasoning = (
+                                    delta.get("reasoning")
+                                    or delta.get("reasoning_content")
+                                )
+                                if (
+                                    (isinstance(content, str) and content)
+                                    or (isinstance(reasoning, str) and reasoning)
+                                ):
+                                    tool_calls_pending = False
 
                         # Check if this is the final chunk
                         # Final chunk detection: has usage with real tokens OR empty delta with usage present
@@ -816,7 +831,7 @@ async def streaming_response_wrapper(
                         is_final_chunk = completion_tokens > 0 or (usage is not None and is_empty_delta and has_tool_calls)
 
                         # FIX: If final chunk and we had tool_calls, ensure finish_reason is correct
-                        if is_final_chunk and has_tool_calls:
+                        if is_final_chunk and tool_calls_pending:
                             current_fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
                             if current_fr != "tool_calls":
                                 logging.debug(f"Correcting finish_reason from {current_fr} to tool_calls")
