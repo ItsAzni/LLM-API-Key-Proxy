@@ -81,6 +81,7 @@ class StreamingHandler:
 
         # State for tracking <thinking> blocks in content (Claude via Antigravity)
         in_thinking_block = False
+        pending_thinking_tag = ""
 
         # Response headers from provider (for quota tracking)
         response_headers: Optional[Dict[str, Any]] = None
@@ -110,11 +111,14 @@ class StreamingHandler:
                     error_buffer.reset()
 
                     # Process chunk
-                    processed, in_thinking_block = self._process_chunk(
-                        chunk,
-                        accumulated_finish_reason,
-                        has_tool_calls,
-                        in_thinking_block,
+                    processed, in_thinking_block, pending_thinking_tag = (
+                        self._process_chunk(
+                            chunk,
+                            accumulated_finish_reason,
+                            has_tool_calls,
+                            in_thinking_block,
+                            pending_thinking_tag,
+                        )
                     )
 
                     # Update tracking state
@@ -259,13 +263,84 @@ class StreamingHandler:
                 # Yield [DONE] for completed streams
                 yield "data: [DONE]\n\n"
 
+    def _split_thinking_from_content(
+        self,
+        content: str,
+        in_thinking_block: bool,
+        pending_thinking_tag: str,
+        reasoning: str,
+    ) -> tuple[str, str, bool, str]:
+        """
+        Split <thinking>/<think> blocks from content across chunk boundaries.
+
+        Returns:
+            Tuple of (new_content, reasoning, in_thinking_block, pending_thinking_tag)
+        """
+        if pending_thinking_tag:
+            content = pending_thinking_tag + content
+            pending_thinking_tag = ""
+
+        open_tags = ("<thinking>", "<think>")
+        close_tags = ("</thinking>", "</think>")
+
+        new_content = ""
+        i = 0
+        while i < len(content):
+            if not in_thinking_block:
+                if content[i] == "<":
+                    matched = False
+                    for tag in open_tags:
+                        if content.startswith(tag, i):
+                            in_thinking_block = True
+                            i += len(tag)
+                            matched = True
+                            break
+                    if matched:
+                        continue
+
+                    remainder = content[i:]
+                    if any(tag.startswith(remainder) for tag in open_tags):
+                        pending_thinking_tag = remainder
+                        break
+
+                    new_content += content[i]
+                    i += 1
+                else:
+                    new_content += content[i]
+                    i += 1
+            else:
+                if content[i] == "<":
+                    matched = False
+                    for tag in close_tags:
+                        if content.startswith(tag, i):
+                            in_thinking_block = False
+                            i += len(tag)
+                            matched = True
+                            break
+                    if matched:
+                        continue
+
+                    remainder = content[i:]
+                    if any(tag.startswith(remainder) for tag in close_tags):
+                        pending_thinking_tag = remainder
+                        break
+
+                    reasoning += content[i]
+                    i += 1
+                else:
+                    reasoning += content[i]
+                    i += 1
+
+        return new_content, reasoning, in_thinking_block, pending_thinking_tag
+
     def _process_chunk(
         self,
         chunk: Any,
         accumulated_finish_reason: Optional[str],
         has_tool_calls: bool,
         in_thinking_block: bool = False,
-    ) -> tuple[ProcessedChunk, bool]:
+        pending_thinking_tag: str = "",
+    ) -> tuple[ProcessedChunk, bool, str]:
         """
         Process a single streaming chunk.
 
@@ -281,9 +356,10 @@ class StreamingHandler:
             accumulated_finish_reason: Current accumulated finish reason
             has_tool_calls: Whether any chunk has had tool_calls
             in_thinking_block: Whether we're currently inside a <thinking> block
+            pending_thinking_tag: Trailing partial tag carried between chunks
 
         Returns:
-            Tuple of (ProcessedChunk with SSE string and metadata, updated in_thinking_block state)
+            Tuple of (ProcessedChunk with SSE string and metadata, updated in_thinking_block state, pending_thinking_tag)
         """
         # Convert chunk to dict
         if hasattr(chunk, "model_dump"):
@@ -319,40 +395,17 @@ class StreamingHandler:
             # FIX 5: Parse <thinking> and <think> tags from content (Claude via Antigravity)
             # Claude models send thinking as <thinking>...</thinking> or <think>...</think> in content
             if delta and "content" in delta and delta["content"]:
-                content = delta["content"]
-                new_content = ""
                 reasoning = (
                     delta.get("reasoning_content") or delta.get("reasoning") or ""
                 )
-
-                i = 0
-                while i < len(content):
-                    if not in_thinking_block:
-                        # Look for <thinking> or <think> tag
-                        if content[i:].startswith("<thinking>"):
-                            in_thinking_block = True
-                            i += len("<thinking>")
-                            continue
-                        elif content[i:].startswith("<think>"):
-                            in_thinking_block = True
-                            i += len("<think>")
-                            continue
-                        else:
-                            new_content += content[i]
-                            i += 1
-                    else:
-                        # Inside thinking block - look for </thinking> or </think>
-                        if content[i:].startswith("</thinking>"):
-                            in_thinking_block = False
-                            i += len("</thinking>")
-                            continue
-                        elif content[i:].startswith("</think>"):
-                            in_thinking_block = False
-                            i += len("</think>")
-                            continue
-                        else:
-                            reasoning += content[i]
-                            i += 1
+                new_content, reasoning, in_thinking_block, pending_thinking_tag = (
+                    self._split_thinking_from_content(
+                        delta["content"],
+                        in_thinking_block,
+                        pending_thinking_tag,
+                        reasoning,
+                    )
+                )
 
                 # Update delta with separated content
                 if reasoning:
@@ -427,7 +480,10 @@ class StreamingHandler:
                     choice["finish_reason"] = source_finish_reason
                 elif accumulated_finish_reason and accumulated_finish_reason != "stop":
                     choice["finish_reason"] = accumulated_finish_reason
-                elif source_finish_reason == "stop" or accumulated_finish_reason == "stop":
+                elif (
+                    source_finish_reason == "stop"
+                    or accumulated_finish_reason == "stop"
+                ):
                     choice["finish_reason"] = "stop"
                 else:
                     choice["finish_reason"] = "stop"
@@ -438,12 +494,16 @@ class StreamingHandler:
                 choice["finish_reason"] = None
 
         sse_str = f"data: {json.dumps(chunk_dict)}\n\n"
-        return ProcessedChunk(
-            sse_string=sse_str,
-            usage=usage,
-            finish_reason=finish_reason,
-            has_tool_calls=chunk_has_tool_calls,
-        ), in_thinking_block
+        return (
+            ProcessedChunk(
+                sse_string=sse_str,
+                usage=usage,
+                finish_reason=finish_reason,
+                has_tool_calls=chunk_has_tool_calls,
+            ),
+            in_thinking_block,
+            pending_thinking_tag,
+        )
 
     def _try_extract_error(
         self,
