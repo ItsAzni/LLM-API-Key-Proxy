@@ -4588,6 +4588,13 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         )
         file_logger.log_request(payload)
 
+        # Log thinking config to console for visibility in docker compose logs
+        thinking_config = payload.get("request", {}).get("generationConfig", {}).get("thinkingConfig", {})
+        if thinking_config:
+            lib_logger.info(
+                f"[Antigravity] Final request thinking config for {payload.get('model', model)}: {thinking_config}"
+            )
+
         # Pre-build tool schema map for malformed call handling
         # This maps original tool names (without prefix) to their schemas
         tool_schemas = self._build_tool_schema_map(gemini_payload.get("tools"), model)
