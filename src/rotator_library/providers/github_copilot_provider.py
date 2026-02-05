@@ -717,8 +717,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         Transform messages to include reasoning fields for multi-turn reasoning.
 
-        OpenCode parity: Pass through reasoning_text and reasoning_opaque fields
-        in assistant messages for multi-turn conversations.
+        OpenCode parity: Only include reasoning_text when reasoning_opaque exists.
+        This ensures the model continues from its previous reasoning state rather
+        than restarting reasoning from scratch each turn.
 
         Args:
             messages: List of message dictionaries
@@ -732,19 +733,109 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             role = msg_copy.get("role", "")
 
             if role == "assistant":
-                # Pass through reasoning_text if present (OpenCode parity)
-                # Also handle reasoning_content -> reasoning_text conversion
-                if "reasoning_text" in msg_copy or "reasoning_content" in msg_copy:
+                # OpenCode parity: Only include reasoning_text when reasoning_opaque exists
+                # This preserves multi-turn reasoning continuity
+                reasoning_opaque = msg_copy.get("reasoning_opaque")
+                if reasoning_opaque:
+                    # Get reasoning_text (or reasoning_content for compatibility)
                     reasoning = msg_copy.get("reasoning_text") or msg_copy.get(
                         "reasoning_content"
                     )
                     if reasoning:
                         msg_copy["reasoning_text"] = reasoning
-
-                # Pass through reasoning_opaque for multi-turn continuity
-                # This field is already preserved if client sends it
+                    # reasoning_opaque is already in msg_copy, preserve it
+                else:
+                    # No opaque token - remove reasoning_text to force fresh reasoning
+                    msg_copy.pop("reasoning_text", None)
+                    msg_copy.pop("reasoning_content", None)
 
             transformed.append(msg_copy)
+        return transformed
+
+    def _transform_user_messages_to_tool_results(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Transform user messages into synthetic tool call + result pairs.
+
+        This eliminates 'role: user' from the context, making the entire
+        conversation appear agent-driven (as if using AskUserQuestion tool
+        to gather user input).
+
+        When enabled:
+        - User messages become: assistant tool_call + tool result pairs
+        - x-initiator naturally becomes "agent" since last.role != "user"
+        - The conversation appears to be an agent using tools to gather input
+
+        Enabled via: GITHUB_COPILOT_SYNTHETIC_USER_MESSAGES=true
+        Probability: GITHUB_COPILOT_SYNTHETIC_RATIO (0-1, default 1.0)
+
+        Args:
+            messages: List of message dictionaries
+
+        Returns:
+            Transformed messages with user messages converted to tool results
+        """
+        if not _env_truthy("GITHUB_COPILOT_SYNTHETIC_USER_MESSAGES", "false"):
+            return messages
+
+        ratio = 1.0
+        try:
+            ratio = float(os.getenv("GITHUB_COPILOT_SYNTHETIC_RATIO", "1.0"))
+        except (TypeError, ValueError):
+            ratio = 1.0
+
+        transformed: List[Dict[str, Any]] = []
+        user_msgs_transformed = 0
+        user_msgs_kept = 0
+
+        for msg in messages:
+            role = msg.get("role", "")
+
+            if role == "user":
+                # Apply transformation probability to ALL messages (including first)
+                if random.random() > ratio:
+                    transformed.append(msg)
+                    user_msgs_kept += 1
+                    continue
+
+                # Generate unique call ID
+                call_id = f"q_{uuid.uuid4().hex[:12]}"
+                content = msg.get("content", "")
+
+                # Create synthetic assistant message with tool call
+                transformed.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "AskUserQuestion",
+                            "arguments": json.dumps({"question": "User input"})
+                        }
+                    }]
+                })
+
+                # Create tool result with user's actual content
+                tool_content = content if isinstance(content, str) else json.dumps(content)
+                transformed.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": tool_content
+                })
+                user_msgs_transformed += 1
+            else:
+                transformed.append(msg)
+
+        if user_msgs_transformed > 0 or user_msgs_kept > 0:
+            lib_logger.info(
+                "[GitHubCopilot] Synthetic user messages: %d transformed, %d kept (ratio=%.2f)",
+                user_msgs_transformed,
+                user_msgs_kept,
+                ratio,
+            )
+
         return transformed
 
     def _detect_vision_content(self, messages: List[Dict[str, Any]]) -> bool:
@@ -777,12 +868,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """
         Detect if a request should be marked as agent-initiated.
 
-        OpenCode parity differs when forcing is enabled.
+        OpenCode parity: x-initiator=agent iff last.role != "user"
 
-        When GITHUB_COPILOT_FORCE_AGENT is true, we mark all requests as
-        agent-initiated for GitHub Copilot (x-initiator=agent).
-
-        To restore OpenCode parity, set: GITHUB_COPILOT_FORCE_AGENT=false
+        When synthetic user messages are enabled, all user messages become
+        tool results, so last.role will never be "user" and all requests
+        become agent-initiated naturally.
 
         Args:
             messages: List of message dictionaries
@@ -790,26 +880,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         Returns:
             True if request should use x-initiator: "agent"
         """
-        force_agent = _env_truthy("GITHUB_COPILOT_FORCE_AGENT", default="false")
-        if force_agent:
-            if not messages:
-                return True
-            # Optional: allow a small fraction of first-turn requests to look like user.
-            # 1/N probability when N>0.
-            ratio = _env_int("GITHUB_COPILOT_USER_INITIATOR_RATIO", default=0)
-            if ratio > 0:
-                is_first_message = True
-                for msg in messages:
-                    role = (msg.get("role") or "").lower()
-                    if role in ("assistant", "tool"):
-                        is_first_message = False
-                        break
-
-                if is_first_message and random.random() < (1.0 / float(ratio)):
-                    return False
-
-            return True
-
         if not messages:
             return False
 
@@ -824,7 +894,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         is_vision: bool = False,
         is_agent: bool = False,
         extra_headers: Optional[Dict[str, str]] = None,
-        force_agent: bool = False,
     ) -> Dict[str, str]:
         """
         Build headers for GitHub Copilot API requests.
@@ -833,6 +902,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             credential_path: Path to the credential file
             is_vision: True if request contains vision content
             is_agent: True if request is agent-initiated
+            extra_headers: Additional headers to include
 
         Returns:
             Dictionary of headers for the API request
@@ -844,11 +914,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         init_headers: Dict[str, str] = {}
         if isinstance(extra_headers, dict):
             init_headers = {str(k): str(v) for k, v in extra_headers.items()}
-        if force_agent and init_headers:
-            # Do not allow upstream initiator override when forcing mode is enabled.
-            init_headers = {
-                k: v for k, v in init_headers.items() if k.lower() != "x-initiator"
-            }
 
         initiator = "agent" if is_agent else "user"
 
@@ -909,10 +974,27 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         if "/" in model:
             model = model.split("/", 1)[1]
 
-        # Detect content types
-        is_vision = self._detect_vision_content(messages)
-        is_agent = self._detect_agent_initiated(messages)
-        force_agent = _env_truthy("GITHUB_COPILOT_FORCE_AGENT", default="false")
+        # =====================================================================
+        # EARLY MESSAGE TRANSFORMATION
+        # Transform messages BEFORE header detection so x-initiator is correct
+        # =====================================================================
+        # Sanitize messages to remove invalid tool calls
+        transformed_messages = self._sanitize_messages(messages)
+        # Transform user messages to synthetic tool results (agent spoofing)
+        transformed_messages = self._transform_user_messages_to_tool_results(transformed_messages)
+        # Apply reasoning field transformation for OpenCode parity
+        transformed_messages = self._transform_messages_for_reasoning(transformed_messages)
+
+        # Detect content types using TRANSFORMED messages
+        is_vision = self._detect_vision_content(transformed_messages)
+        is_agent = self._detect_agent_initiated(transformed_messages)
+
+        lib_logger.debug(
+            "[GitHubCopilot] x-initiator will be '%s' (is_agent=%s, last_role=%s)",
+            "agent" if is_agent else "user",
+            is_agent,
+            transformed_messages[-1].get("role", "unknown") if transformed_messages else "empty",
+        )
 
         # Get API base URL
         api_base = self._get_api_base(credential_path)
@@ -923,7 +1005,6 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             is_vision=is_vision,
             is_agent=is_agent,
             extra_headers=extra_headers,
-            force_agent=force_agent,
         )
 
         # Check if this model uses Responses API
@@ -947,7 +1028,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 api_base=api_base,
                 headers=headers,
                 model=model,
-                messages=messages,
+                messages=transformed_messages,  # Use transformed messages
                 stream=stream,
                 **filtered_kwargs,
             )
@@ -976,7 +1057,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         api_base=api_base,
                         headers=headers,
                         model=model,
-                        messages=messages,
+                        messages=transformed_messages,  # Use transformed messages
                         stream=False,
                         **filtered_kwargs,
                     )
@@ -997,20 +1078,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     api_base=api_base,
                     headers=headers,
                     model=model,
-                    messages=messages,
+                    messages=transformed_messages,  # Use transformed messages
                     filtered_kwargs=filtered_kwargs,
                     fallback_kwargs=kwargs,
                 )
 
-        # Sanitize messages to remove invalid tool calls
-        sanitized_messages = self._sanitize_messages(messages)
-        # Apply reasoning field transformation for OpenCode parity
-        sanitized_messages = self._transform_messages_for_reasoning(sanitized_messages)
-
         # Build request payload for Chat Completions API
+        # Messages are already transformed at the top of the function
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": sanitized_messages,
+            "messages": transformed_messages,
             "stream": stream,
         }
 
@@ -1216,16 +1293,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         messages: List[Dict[str, Any]],
         **kwargs,
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
-        """Execute Chat Completions API for streaming fallback."""
-        # Sanitize messages to remove invalid tool calls
-        sanitized_messages = self._sanitize_messages(messages)
-        # Apply reasoning field transformation for OpenCode parity
-        sanitized_messages = self._transform_messages_for_reasoning(sanitized_messages)
+        """Execute Chat Completions API for streaming fallback.
 
+        Note: Messages are expected to be already transformed (sanitized,
+        synthetic user messages applied, reasoning fields processed) before
+        being passed to this function.
+        """
         # Build request payload for Chat Completions API
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": sanitized_messages,
+            "messages": messages,  # Already transformed
             "stream": True,
         }
 
@@ -3220,12 +3297,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             # Get OAuth token for GitHub API
             auth_header = await self.get_auth_header(credential_path)
 
-            # Build headers for GitHub API
+            # Build headers for GitHub API (use consistent User-Agent)
             headers = {
                 **auth_header,
                 "Accept": "application/json",
-                "User-Agent": "GitHubCopilotChat/0.35.0",
-                "Copilot-Integration-Id": "vscode-chat",
+                "User-Agent": USER_AGENT,
             }
 
             # Fetch quota from GitHub internal API
