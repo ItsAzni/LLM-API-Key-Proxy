@@ -67,6 +67,18 @@ def _env_truthy(name: str, default: str = "true") -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def _should_try_messages_api() -> bool:
+    """
+    Check if Messages API is enabled via env flag for Claude models.
+
+    OpenCode uses Chat Completions for all models, including Claude.
+    Set GITHUB_COPILOT_TRY_MESSAGES_API=true to try Messages API first.
+
+    Default: false (use Chat Completions like OpenCode)
+    """
+    return _env_truthy("GITHUB_COPILOT_TRY_MESSAGES_API", default="false")
+
+
 def _env_int(name: str, default: int = 0) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -699,6 +711,42 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             sanitized.append(msg_copy)
         return sanitized
 
+    def _transform_messages_for_reasoning(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Transform messages to include reasoning fields for multi-turn reasoning.
+
+        OpenCode parity: Pass through reasoning_text and reasoning_opaque fields
+        in assistant messages for multi-turn conversations.
+
+        Args:
+            messages: List of message dictionaries
+
+        Returns:
+            Transformed list of messages with reasoning fields preserved
+        """
+        transformed = []
+        for msg in messages:
+            msg_copy = dict(msg)
+            role = msg_copy.get("role", "")
+
+            if role == "assistant":
+                # Pass through reasoning_text if present (OpenCode parity)
+                # Also handle reasoning_content -> reasoning_text conversion
+                if "reasoning_text" in msg_copy or "reasoning_content" in msg_copy:
+                    reasoning = msg_copy.get("reasoning_text") or msg_copy.get(
+                        "reasoning_content"
+                    )
+                    if reasoning:
+                        msg_copy["reasoning_text"] = reasoning
+
+                # Pass through reasoning_opaque for multi-turn continuity
+                # This field is already preserved if client sends it
+
+            transformed.append(msg_copy)
+        return transformed
+
     def _detect_vision_content(self, messages: List[Dict[str, Any]]) -> bool:
         """
         Detect if messages contain vision/image content.
@@ -904,10 +952,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 **filtered_kwargs,
             )
 
-        # Claude models: try Anthropic Messages API for thinking support.
-        # For streaming, we wrap the generator with error handling.
-        # If 404, fall back to Chat Completions (without thinking).
-        if _is_claude_model(model):
+        # Claude models: optionally try Anthropic Messages API for thinking support.
+        # By default (OpenCode parity), use Chat Completions directly.
+        # Set GITHUB_COPILOT_TRY_MESSAGES_API=true to try Messages API first.
+        if _is_claude_model(model) and _should_try_messages_api():
             filtered_kwargs = {
                 k: v
                 for k, v in kwargs.items()
@@ -956,6 +1004,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
         # Sanitize messages to remove invalid tool calls
         sanitized_messages = self._sanitize_messages(messages)
+        # Apply reasoning field transformation for OpenCode parity
+        sanitized_messages = self._transform_messages_for_reasoning(sanitized_messages)
 
         # Build request payload for Chat Completions API
         payload: Dict[str, Any] = {
@@ -977,14 +1027,74 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "parallel_tool_calls",
             # Structured output
             "response_format",
+            # OpenCode parity parameters
+            "verbosity",  # Controls text verbosity
         ]
         for param in optional_params:
             if param in kwargs and kwargs[param] is not None:
                 payload[param] = kwargs[param]
 
-        # Map reasoning_effort to model-specific thinking config
+        # Handle reasoning parameters based on model type
+        # For Claude models: thinking_budget (direct passthrough or mapped from reasoning_effort)
+        # For GPT/o-series: reasoning.effort + reasoning.summary
         reasoning_effort = kwargs.get("reasoning_effort")
-        if reasoning_effort is not None:
+        thinking_budget = kwargs.get("thinking_budget")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+
+        if _is_claude_model(model):
+            # Claude: use thinking_budget parameter
+            final_thinking_budget = None
+            if thinking_budget is not None:
+                # Direct passthrough takes priority
+                final_thinking_budget = thinking_budget
+            elif reasoning_effort is not None:
+                # Map reasoning_effort to thinking_budget for Claude
+                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                if budget_tokens:
+                    final_thinking_budget = budget_tokens
+
+            if final_thinking_budget is not None:
+                # GitHub Copilot expects nested structure: {"thinking": {"budget_tokens": N}}
+                # OpenCode uses: thinking: { thinking_budget: N }
+                # The error message says "thinking.budget_tokens", so use that key
+                payload["thinking"] = {"budget_tokens": final_thinking_budget}
+                # CRITICAL: max_tokens must be > thinking.budget_tokens for Claude
+                # See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
+                current_max = payload.get("max_tokens")
+                # Default buffer: 16384 tokens for actual response content
+                min_max_tokens = final_thinking_budget + 16384
+                if current_max is None or current_max <= final_thinking_budget:
+                    payload["max_tokens"] = min_max_tokens
+                    lib_logger.info(
+                        "[GitHubCopilot] Adjusted max_tokens to %s (thinking.budget_tokens=%s requires max_tokens > budget)",
+                        min_max_tokens,
+                        final_thinking_budget,
+                    )
+                lib_logger.info(
+                    "[GitHubCopilot] Final request thinking.budget_tokens for %s: %s%s",
+                    model,
+                    final_thinking_budget,
+                    f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                )
+        elif _is_gpt5_or_o_series(model):
+            # GPT-5/o-series: use reasoning.effort + reasoning.summary
+            if reasoning_effort is not None:
+                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                payload.update(thinking_config)
+                lib_logger.debug(
+                    "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
+                    reasoning_effort,
+                    json.dumps(thinking_config, default=str)[:500],
+                )
+            # Add reasoningSummary for GPT models (OpenCode parity)
+            if reasoning_summary is not None:
+                if "reasoning" in payload:
+                    payload["reasoning"]["summary"] = reasoning_summary
+                else:
+                    payload["reasoning"] = {"summary": reasoning_summary}
+        elif reasoning_effort is not None:
+            # Other models: use generic mapping
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
             payload.update(thinking_config)
             lib_logger.debug(
@@ -1109,6 +1219,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         """Execute Chat Completions API for streaming fallback."""
         # Sanitize messages to remove invalid tool calls
         sanitized_messages = self._sanitize_messages(messages)
+        # Apply reasoning field transformation for OpenCode parity
+        sanitized_messages = self._transform_messages_for_reasoning(sanitized_messages)
 
         # Build request payload for Chat Completions API
         payload: Dict[str, Any] = {
@@ -1130,14 +1242,74 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "parallel_tool_calls",
             # Structured output
             "response_format",
+            # OpenCode parity parameters
+            "verbosity",  # Controls text verbosity
         ]
         for param in optional_params:
             if param in kwargs and kwargs[param] is not None:
                 payload[param] = kwargs[param]
 
-        # Map reasoning_effort to model-specific thinking config
+        # Handle reasoning parameters based on model type
+        # For Claude models: thinking_budget (direct passthrough or mapped from reasoning_effort)
+        # For GPT/o-series: reasoning.effort + reasoning.summary
         reasoning_effort = kwargs.get("reasoning_effort")
-        if reasoning_effort is not None:
+        thinking_budget = kwargs.get("thinking_budget")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+
+        if _is_claude_model(model):
+            # Claude: use thinking_budget parameter
+            final_thinking_budget = None
+            if thinking_budget is not None:
+                # Direct passthrough takes priority
+                final_thinking_budget = thinking_budget
+            elif reasoning_effort is not None:
+                # Map reasoning_effort to thinking_budget for Claude
+                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                if budget_tokens:
+                    final_thinking_budget = budget_tokens
+
+            if final_thinking_budget is not None:
+                # GitHub Copilot expects nested structure: {"thinking": {"budget_tokens": N}}
+                # OpenCode uses: thinking: { thinking_budget: N }
+                # The error message says "thinking.budget_tokens", so use that key
+                payload["thinking"] = {"budget_tokens": final_thinking_budget}
+                # CRITICAL: max_tokens must be > thinking.budget_tokens for Claude
+                # See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
+                current_max = payload.get("max_tokens")
+                # Default buffer: 16384 tokens for actual response content
+                min_max_tokens = final_thinking_budget + 16384
+                if current_max is None or current_max <= final_thinking_budget:
+                    payload["max_tokens"] = min_max_tokens
+                    lib_logger.info(
+                        "[GitHubCopilot] Adjusted max_tokens to %s (thinking.budget_tokens=%s requires max_tokens > budget)",
+                        min_max_tokens,
+                        final_thinking_budget,
+                    )
+                lib_logger.info(
+                    "[GitHubCopilot] Final request thinking.budget_tokens for %s: %s%s",
+                    model,
+                    final_thinking_budget,
+                    f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                )
+        elif _is_gpt5_or_o_series(model):
+            # GPT-5/o-series: use reasoning.effort + reasoning.summary
+            if reasoning_effort is not None:
+                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                payload.update(thinking_config)
+                lib_logger.debug(
+                    "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
+                    reasoning_effort,
+                    json.dumps(thinking_config, default=str)[:500],
+                )
+            # Add reasoningSummary for GPT models (OpenCode parity)
+            if reasoning_summary is not None:
+                if "reasoning" in payload:
+                    payload["reasoning"]["summary"] = reasoning_summary
+                else:
+                    payload["reasoning"] = {"summary": reasoning_summary}
+        elif reasoning_effort is not None:
+            # Other models: use generic mapping
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
             payload.update(thinking_config)
             lib_logger.debug(
@@ -1880,6 +2052,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             message = choice.get("message", {})
             if "tool_calls" in message:
                 choices[i]["message"]["tool_calls"] = message["tool_calls"]
+            # Handle reasoning fields (OpenCode parity)
+            if "reasoning_content" in message:
+                choices[i]["message"]["reasoning_content"] = message["reasoning_content"]
+            if "reasoning_text" in message:
+                choices[i]["message"]["reasoning_text"] = message["reasoning_text"]
+            if "reasoning_opaque" in message:
+                choices[i]["message"]["reasoning_opaque"] = message["reasoning_opaque"]
 
         response_obj = litellm.ModelResponse(
             id=response_id,
@@ -2036,6 +2215,74 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             is_first_chunk = False
                         yield chunk
 
+                    # Handle reasoning_text delta (OpenCode parity)
+                    if "reasoning_text" in delta:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": index,
+                                    "delta": {
+                                        "reasoning_text": delta["reasoning_text"],
+                                        "role": delta.get("role", "assistant"),
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
+                        yield chunk
+
+                    # Handle reasoning_opaque delta (OpenCode parity - multi-turn continuity)
+                    if "reasoning_opaque" in delta:
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=f"github_copilot/{model}",
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": index,
+                                    "delta": {"reasoning_opaque": delta["reasoning_opaque"]},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        )
+                        if is_first_chunk:
+                            chunk._response_headers = captured_headers
+                            is_first_chunk = False
+                        yield chunk
+
+                    # Handle thinking delta (Anthropic's native format - may come from Copilot for Claude)
+                    if "thinking" in delta:
+                        thinking_content = delta["thinking"]
+                        if thinking_content:
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"github_copilot/{model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": index,
+                                        "delta": {
+                                            "reasoning_content": thinking_content,
+                                            "role": delta.get("role", "assistant"),
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
+
                     # Handle tool calls delta
                     if "tool_calls" in delta:
                         for tc in delta["tool_calls"]:
@@ -2147,15 +2394,23 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
             # Handle assistant messages (previous responses)
             if role == "assistant":
+                # Get reasoning fields for multi-turn support (OpenCode parity)
+                reasoning_text = msg.get("reasoning_text") or msg.get("reasoning_content")
+                reasoning_opaque = msg.get("reasoning_opaque")
+
                 # Convert to Responses API message format
                 if isinstance(content, str):
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": content}],
-                        }
-                    )
+                    message_item: Dict[str, Any] = {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": content}],
+                    }
+                    # Add reasoning fields if present (OpenCode parity)
+                    if reasoning_text:
+                        message_item["reasoning_text"] = reasoning_text
+                    if reasoning_opaque:
+                        message_item["reasoning_opaque"] = reasoning_opaque
+                    input_items.append(message_item)
                 elif isinstance(content, list):
                     # Convert content parts
                     output_content = []
@@ -2177,13 +2432,17 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                     "text": str(part),
                                 }
                             )
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": output_content,
-                        }
-                    )
+                    message_item = {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": output_content,
+                    }
+                    # Add reasoning fields if present (OpenCode parity)
+                    if reasoning_text:
+                        message_item["reasoning_text"] = reasoning_text
+                    if reasoning_opaque:
+                        message_item["reasoning_opaque"] = reasoning_opaque
+                    input_items.append(message_item)
                 tool_calls = msg.get("tool_calls") or []
                 for tool_call in tool_calls:
                     if tool_call.get("type") != "function":
@@ -2363,6 +2622,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             payload["max_output_tokens"] = kwargs["max_tokens"]
         if "top_p" in kwargs and kwargs["top_p"] is not None:
             payload["top_p"] = kwargs["top_p"]
+        # OpenCode parity parameters
+        if "verbosity" in kwargs and kwargs["verbosity"] is not None:
+            payload["verbosity"] = kwargs["verbosity"]
 
         # Tool/function calling support - convert to Responses API format
         if "tools" in kwargs and kwargs["tools"] is not None:
@@ -2377,8 +2639,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         ):
             payload["parallel_tool_calls"] = kwargs["parallel_tool_calls"]
 
-        # Map reasoning_effort to model-specific thinking config
+        # Handle reasoning parameters for GPT-5/o-series (Responses API uses reasoning.effort)
         reasoning_effort = kwargs.get("reasoning_effort")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+
         if reasoning_effort is not None:
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
             lib_logger.debug(
@@ -2386,6 +2650,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 json.dumps(thinking_config, default=str),
             )
             payload.update(thinking_config)
+
+        # Add reasoningSummary for GPT models (OpenCode parity)
+        if reasoning_summary is not None:
+            if "reasoning" in payload:
+                payload["reasoning"]["summary"] = reasoning_summary
+            else:
+                payload["reasoning"] = {"summary": reasoning_summary}
 
         # Structured output
         if "response_format" in kwargs and kwargs["response_format"] is not None:
