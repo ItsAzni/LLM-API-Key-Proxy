@@ -487,6 +487,9 @@ TIER_ID_TO_FULL_NAME: Dict[str, str] = {
     "gemini-code-assist-pro": "Code Assist PRO",
     "gemini-code-assist-ultra": "Code Assist ULTRA",
     "gemini-code-assist-free": TIER_FREE,
+    # Google Workspace AI Business tiers
+    "ws-ai-ultra-business-tier": "Workspace AI ULTRA Business",
+    "ws-ai-pro-business-tier": "Workspace AI PRO Business",
     # Legacy/standard tier names (no special prefix)
     "standard-tier": TIER_PRO,
     "pro-tier": TIER_PRO,
@@ -518,6 +521,9 @@ TIER_NAME_TO_CANONICAL: Dict[str, str] = {
     "gemini-code-assist-pro": TIER_PRO,
     "gemini-code-assist-ultra": TIER_ULTRA,
     "gemini-code-assist-free": TIER_FREE,
+    # Google Workspace AI Business tiers
+    "ws-ai-ultra-business-tier": TIER_ULTRA,
+    "ws-ai-pro-business-tier": TIER_PRO,
     # Already canonical (uppercase)
     TIER_FREE: TIER_FREE,
     TIER_PRO: TIER_PRO,
@@ -543,7 +549,9 @@ TIER_PRIORITIES: Dict[str, int] = {
     TIER_FREE: 3,  # Free tier
     # API/legacy names mapped to same priorities for backwards compatibility
     "g1-ultra-tier": 1,
+    "ws-ai-ultra-business-tier": 1,  # Workspace AI Ultra Business
     "g1-pro-tier": 2,
+    "ws-ai-pro-business-tier": 2,  # Workspace AI Pro Business
     "standard-tier": 2,
     "free-tier": 3,
     "legacy-tier": 10,  # Legacy/unknown treated as lowest
