@@ -1132,24 +1132,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     final_thinking_budget = budget_tokens
 
             if final_thinking_budget is not None:
-                # GitHub Copilot expects nested structure: {"thinking": {"budget_tokens": N}}
-                # OpenCode uses: thinking: { thinking_budget: N }
-                # The error message says "thinking.budget_tokens", so use that key
-                payload["thinking"] = {"budget_tokens": final_thinking_budget}
-                # CRITICAL: max_tokens must be > thinking.budget_tokens for Claude
-                # See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
-                current_max = payload.get("max_tokens")
-                # Default buffer: 16384 tokens for actual response content
-                min_max_tokens = final_thinking_budget + 16384
-                if current_max is None or current_max <= final_thinking_budget:
-                    payload["max_tokens"] = min_max_tokens
-                    lib_logger.info(
-                        "[GitHubCopilot] Adjusted max_tokens to %s (thinking.budget_tokens=%s requires max_tokens > budget)",
-                        min_max_tokens,
-                        final_thinking_budget,
-                    )
+                # OpenCode parity: use flat thinking_budget at top level
+                # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
+                payload["thinking_budget"] = final_thinking_budget
                 lib_logger.info(
-                    "[GitHubCopilot] Final request thinking.budget_tokens for %s: %s%s",
+                    "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
                     model,
                     final_thinking_budget,
                     f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
@@ -1347,24 +1334,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     final_thinking_budget = budget_tokens
 
             if final_thinking_budget is not None:
-                # GitHub Copilot expects nested structure: {"thinking": {"budget_tokens": N}}
-                # OpenCode uses: thinking: { thinking_budget: N }
-                # The error message says "thinking.budget_tokens", so use that key
-                payload["thinking"] = {"budget_tokens": final_thinking_budget}
-                # CRITICAL: max_tokens must be > thinking.budget_tokens for Claude
-                # See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
-                current_max = payload.get("max_tokens")
-                # Default buffer: 16384 tokens for actual response content
-                min_max_tokens = final_thinking_budget + 16384
-                if current_max is None or current_max <= final_thinking_budget:
-                    payload["max_tokens"] = min_max_tokens
-                    lib_logger.info(
-                        "[GitHubCopilot] Adjusted max_tokens to %s (thinking.budget_tokens=%s requires max_tokens > budget)",
-                        min_max_tokens,
-                        final_thinking_budget,
-                    )
+                # OpenCode parity: use flat thinking_budget at top level
+                # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
+                payload["thinking_budget"] = final_thinking_budget
                 lib_logger.info(
-                    "[GitHubCopilot] Final request thinking.budget_tokens for %s: %s%s",
+                    "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
                     model,
                     final_thinking_budget,
                     f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
