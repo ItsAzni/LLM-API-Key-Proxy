@@ -137,6 +137,18 @@ def _env_int(name: str, default: int = 0) -> int:
         return default
 
 
+def _tool_choice_forces_use(tool_choice: Any) -> bool:
+    """Check if tool_choice forces the model to use a specific tool."""
+    if tool_choice is None:
+        return False
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() in ("required", "any", "force", "tool")
+    if isinstance(tool_choice, dict):
+        tc_type = tool_choice.get("type")
+        return tc_type in ("function", "tool")
+    return False
+
+
 # Quota refresh interval in seconds (default: 5 minutes)
 # Defined after _env_int so we can use it
 COPILOT_QUOTA_REFRESH_INTERVAL = _env_int("GITHUB_COPILOT_QUOTA_REFRESH_INTERVAL", 300)
@@ -1177,28 +1189,38 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
 
         if _is_claude_model(model):
-            # Claude: use thinking_budget parameter
-            final_thinking_budget = None
-            if thinking_budget is not None:
-                # Direct passthrough takes priority
-                final_thinking_budget = thinking_budget
-            elif reasoning_effort is not None:
-                # Map reasoning_effort to thinking_budget for Claude
-                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
-                budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
-                if budget_tokens:
-                    final_thinking_budget = budget_tokens
-
-            if final_thinking_budget is not None:
-                # OpenCode parity: use flat thinking_budget at top level
-                # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
-                payload["thinking_budget"] = final_thinking_budget
-                lib_logger.info(
-                    "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+            # Check if tool_choice forces use - if so, skip thinking
+            # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
+            tools = kwargs.get("tools") or payload.get("tools")
+            tool_choice = kwargs.get("tool_choice") or payload.get("tool_choice")
+            if tools and _tool_choice_forces_use(tool_choice):
+                lib_logger.warning(
+                    "[GitHubCopilot] Disabling thinking because tool_choice forces tool use for model %s",
                     model,
-                    final_thinking_budget,
-                    f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
                 )
+            else:
+                # Claude: use thinking_budget parameter
+                final_thinking_budget = None
+                if thinking_budget is not None:
+                    # Direct passthrough takes priority
+                    final_thinking_budget = thinking_budget
+                elif reasoning_effort is not None:
+                    # Map reasoning_effort to thinking_budget for Claude
+                    thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                    budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                    if budget_tokens:
+                        final_thinking_budget = budget_tokens
+
+                if final_thinking_budget is not None:
+                    # OpenCode parity: use flat thinking_budget at top level
+                    # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
+                    payload["thinking_budget"] = final_thinking_budget
+                    lib_logger.info(
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        model,
+                        final_thinking_budget,
+                        f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                    )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
@@ -1381,28 +1403,38 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
 
         if _is_claude_model(model):
-            # Claude: use thinking_budget parameter
-            final_thinking_budget = None
-            if thinking_budget is not None:
-                # Direct passthrough takes priority
-                final_thinking_budget = thinking_budget
-            elif reasoning_effort is not None:
-                # Map reasoning_effort to thinking_budget for Claude
-                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
-                budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
-                if budget_tokens:
-                    final_thinking_budget = budget_tokens
-
-            if final_thinking_budget is not None:
-                # OpenCode parity: use flat thinking_budget at top level
-                # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
-                payload["thinking_budget"] = final_thinking_budget
-                lib_logger.info(
-                    "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+            # Check if tool_choice forces use - if so, skip thinking
+            # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
+            tools = kwargs.get("tools") or payload.get("tools")
+            tool_choice = kwargs.get("tool_choice") or payload.get("tool_choice")
+            if tools and _tool_choice_forces_use(tool_choice):
+                lib_logger.warning(
+                    "[GitHubCopilot] Disabling thinking because tool_choice forces tool use for model %s",
                     model,
-                    final_thinking_budget,
-                    f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
                 )
+            else:
+                # Claude: use thinking_budget parameter
+                final_thinking_budget = None
+                if thinking_budget is not None:
+                    # Direct passthrough takes priority
+                    final_thinking_budget = thinking_budget
+                elif reasoning_effort is not None:
+                    # Map reasoning_effort to thinking_budget for Claude
+                    thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                    budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                    if budget_tokens:
+                        final_thinking_budget = budget_tokens
+
+                if final_thinking_budget is not None:
+                    # OpenCode parity: use flat thinking_budget at top level
+                    # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
+                    payload["thinking_budget"] = final_thinking_budget
+                    lib_logger.info(
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        model,
+                        final_thinking_budget,
+                        f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                    )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
