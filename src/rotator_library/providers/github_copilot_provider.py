@@ -61,6 +61,57 @@ QUOTA_FETCH_CONCURRENCY = 5
 _opencode_version_cache: Optional[str] = None
 _OPENCODE_FALLBACK_VERSION = "1.1.36"  # Fallback if GitHub fetch fails
 
+# =============================================================================
+# MESSAGES API 24-HOUR RETRY PREVENTION
+# =============================================================================
+# When Messages API fails for a model, we record the failure timestamp and
+# don't retry for 24 hours. This matches OpenCode's approach of not using
+# Messages API due to rate limiting concerns.
+
+# Cache for Messages API failures: {model: failure_timestamp}
+_messages_api_failure_cache: Dict[str, float] = {}
+
+# 24-hour cooldown in seconds (configurable via env var)
+MESSAGES_API_COOLDOWN_SECONDS = int(
+    os.getenv("GITHUB_COPILOT_MESSAGES_API_COOLDOWN", str(24 * 60 * 60))
+)
+
+
+def _is_messages_api_on_cooldown(model: str) -> bool:
+    """Check if Messages API is on 24-hour cooldown for this model."""
+    failure_time = _messages_api_failure_cache.get(model)
+    if failure_time is None:
+        return False
+
+    time_since_failure = time.time() - failure_time
+    if time_since_failure < MESSAGES_API_COOLDOWN_SECONDS:
+        hours_remaining = (MESSAGES_API_COOLDOWN_SECONDS - time_since_failure) / 3600
+        lib_logger.debug(
+            "[GitHubCopilot] Messages API on cooldown for %s (%.1f hours remaining)",
+            model,
+            hours_remaining,
+        )
+        return True
+
+    # Cooldown expired, clear the cache entry
+    del _messages_api_failure_cache[model]
+    lib_logger.info(
+        "[GitHubCopilot] Messages API cooldown expired for %s, will try again",
+        model,
+    )
+    return False
+
+
+def _record_messages_api_failure(model: str) -> None:
+    """Record that Messages API failed for this model, starting 24-hour cooldown."""
+    _messages_api_failure_cache[model] = time.time()
+    cooldown_hours = MESSAGES_API_COOLDOWN_SECONDS / 3600
+    lib_logger.warning(
+        "[GitHubCopilot] Messages API failed for %s - will not retry for %.0f hours",
+        model,
+        cooldown_hours,
+    )
+
 
 def _env_truthy(name: str, default: str = "true") -> bool:
     value = os.getenv(name, default)
@@ -1036,7 +1087,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Claude models: optionally try Anthropic Messages API for thinking support.
         # By default (OpenCode parity), use Chat Completions directly.
         # Set GITHUB_COPILOT_TRY_MESSAGES_API=true to try Messages API first.
-        if _is_claude_model(model) and _should_try_messages_api():
+        # Messages API has 24-hour cooldown after failure to avoid repeated failures.
+        if (
+            _is_claude_model(model)
+            and _should_try_messages_api()
+            and not _is_messages_api_on_cooldown(model)
+        ):
             filtered_kwargs = {
                 k: v
                 for k, v in kwargs.items()
@@ -1063,6 +1119,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     )
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 404:
+                        # Record failure to prevent retries for 24 hours
+                        _record_messages_api_failure(model)
                         lib_logger.warning(
                             "[GitHubCopilot] Messages API returned 404 for %s, falling back to Chat Completions (thinking disabled)",
                             model,
@@ -1210,6 +1268,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 yield chunk
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
+                # Record failure to prevent retries for 24 hours
+                _record_messages_api_failure(model)
                 lib_logger.warning(
                     "[GitHubCopilot] Messages API returned 404 for %s, falling back to Chat Completions (thinking disabled)",
                     model,
