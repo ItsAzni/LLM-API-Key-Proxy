@@ -3278,7 +3278,11 @@ class AntigravityProvider(
         """
         Parse MALFORMED_FUNCTION_CALL finishMessage to extract tool info.
 
-        Input format: "Malformed function call: call:namespace:tool_name{raw_args}"
+        Handles multiple formats:
+        1. "Malformed function call: call:namespace:tool_name{raw_args}"
+        2. "Malformed function call: call:namespace:tool_name {raw_args}" (with space)
+        3. "Malformed function call: call:tool_name{raw_args}" (no namespace)
+        4. "Malformed function call: call:namespace.tool_name({raw_args})" (dot + parens)
 
         Returns:
             {"tool_name": "read", "prefixed_name": "gemini3_read",
@@ -3287,18 +3291,36 @@ class AntigravityProvider(
         """
         import re
 
-        # Pattern: "Malformed function call: call:namespace:tool_name{args}"
-        pattern = r"Malformed function call:\s*call:[^:]+:([^{]+)(\{.+\})$"
-        match = re.match(pattern, finish_message, re.DOTALL)
+        # Pattern 1: With namespace (colon separator) - "call:namespace:tool_name{args}"
+        # Use \S+ for tool name to stop at whitespace, then \s* to allow optional space before {
+        pattern_with_ns = r"Malformed function call:\s*call:[^:]+:(\S+)\s*(\{.+\})$"
+        match = re.match(pattern_with_ns, finish_message, re.DOTALL)
+
+        if not match:
+            # Pattern 2: Without namespace - "call:tool_name{args}" or "call:tool_name {args}"
+            # Some malformed calls don't have the namespace:tool format
+            pattern_no_ns = r"Malformed function call:\s*call:(\S+)\s*(\{.+\})$"
+            match = re.match(pattern_no_ns, finish_message, re.DOTALL)
+
+        if not match:
+            # Pattern 3: Dot notation with parentheses - "call:namespace.tool_name({args})"
+            # Model sometimes outputs Python-style function calls
+            pattern_dot_parens = r"Malformed function call:\s*call:([^(]+)\((\{.+\})\)$"
+            match = re.match(pattern_dot_parens, finish_message, re.DOTALL)
 
         if not match:
             lib_logger.warning(
-                f"[Antigravity] Could not parse MALFORMED_FUNCTION_CALL: {finish_message[:100]}"
+                f"[Antigravity] Could not parse MALFORMED_FUNCTION_CALL: {finish_message[:200]}"
             )
             return None
 
-        prefixed_name = match.group(1).strip()  # "gemini3_read"
+        prefixed_name = match.group(1).strip()  # "gemini3_read" or "namespace.tool"
         raw_args = match.group(2)  # "{filePath: \"...\"}"
+
+        # Handle dot notation - extract just the tool name after the last dot
+        if "." in prefixed_name and ":" not in prefixed_name:
+            # Format like "is_anthropic_tools_lib.ls" -> extract "ls"
+            prefixed_name = prefixed_name.rsplit(".", 1)[-1]
 
         # Strip our prefix to get original tool name
         tool_name = self._strip_gemini3_prefix(prefixed_name)
