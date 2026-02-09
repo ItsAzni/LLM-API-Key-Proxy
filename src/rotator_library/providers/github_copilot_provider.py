@@ -867,26 +867,30 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 content = msg.get("content", "")
 
                 # Create synthetic assistant message with tool call
-                transformed.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": "AskUserQuestion",
-                            "arguments": json.dumps({"question": "User input"})
-                        }
-                    }]
-                })
+                transformed.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "AskUserQuestion",
+                                    "arguments": json.dumps({"question": "User input"}),
+                                },
+                            }
+                        ],
+                    }
+                )
 
                 # Create tool result with user's actual content
-                tool_content = content if isinstance(content, str) else json.dumps(content)
-                transformed.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": tool_content
-                })
+                tool_content = (
+                    content if isinstance(content, str) else json.dumps(content)
+                )
+                transformed.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": tool_content}
+                )
                 user_msgs_transformed += 1
             else:
                 transformed.append(msg)
@@ -977,6 +981,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         init_headers: Dict[str, str] = {}
         if isinstance(extra_headers, dict):
             init_headers = {str(k): str(v) for k, v in extra_headers.items()}
+            # Match fetch/Headers behavior from OpenCode where auth-like keys are
+            # effectively case-insensitive and stripped before request dispatch.
+            init_headers = {
+                k: v
+                for k, v in init_headers.items()
+                if k.lower() not in ("x-api-key", "authorization")
+            }
 
         initiator = "agent" if is_agent else "user"
 
@@ -1044,9 +1055,13 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Sanitize messages to remove invalid tool calls
         transformed_messages = self._sanitize_messages(messages)
         # Transform user messages to synthetic tool results (agent spoofing)
-        transformed_messages = self._transform_user_messages_to_tool_results(transformed_messages)
+        transformed_messages = self._transform_user_messages_to_tool_results(
+            transformed_messages
+        )
         # Apply reasoning field transformation for OpenCode parity
-        transformed_messages = self._transform_messages_for_reasoning(transformed_messages)
+        transformed_messages = self._transform_messages_for_reasoning(
+            transformed_messages
+        )
 
         # Detect content types using TRANSFORMED messages
         is_vision = self._detect_vision_content(transformed_messages)
@@ -1056,7 +1071,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "[GitHubCopilot] x-initiator will be '%s' (is_agent=%s, last_role=%s)",
             "agent" if is_agent else "user",
             is_agent,
-            transformed_messages[-1].get("role", "unknown") if transformed_messages else "empty",
+            transformed_messages[-1].get("role", "unknown")
+            if transformed_messages
+            else "empty",
         )
 
         # Get API base URL
@@ -1158,8 +1175,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         payload: Dict[str, Any] = {
             "model": model,
             "messages": transformed_messages,
-            "stream": stream,
         }
+        if stream:
+            payload["stream"] = True
 
         # Copy over optional parameters
         optional_params = [
@@ -1186,7 +1204,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # For GPT/o-series: reasoning.effort + reasoning.summary
         reasoning_effort = kwargs.get("reasoning_effort")
         thinking_budget = kwargs.get("thinking_budget")
-        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get(
+            "reasoningSummary"
+        )
 
         if _is_claude_model(model):
             # Check if tool_choice forces use - if so, skip thinking
@@ -1206,8 +1226,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     final_thinking_budget = thinking_budget
                 elif reasoning_effort is not None:
                     # Map reasoning_effort to thinking_budget for Claude
-                    thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
-                    budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                    thinking_config = _map_reasoning_effort_to_config(
+                        reasoning_effort, model
+                    )
+                    budget_tokens = thinking_config.get("thinking", {}).get(
+                        "budget_tokens"
+                    )
                     if budget_tokens:
                         final_thinking_budget = budget_tokens
 
@@ -1219,12 +1243,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
                         model,
                         final_thinking_budget,
-                        f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                        f" (from reasoning_effort={reasoning_effort})"
+                        if reasoning_effort and not thinking_budget
+                        else "",
                     )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
-                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                thinking_config = _map_reasoning_effort_to_config(
+                    reasoning_effort, model
+                )
                 payload.update(thinking_config)
                 lib_logger.debug(
                     "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
@@ -1400,7 +1428,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # For GPT/o-series: reasoning.effort + reasoning.summary
         reasoning_effort = kwargs.get("reasoning_effort")
         thinking_budget = kwargs.get("thinking_budget")
-        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get(
+            "reasoningSummary"
+        )
 
         if _is_claude_model(model):
             # Check if tool_choice forces use - if so, skip thinking
@@ -1420,8 +1450,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     final_thinking_budget = thinking_budget
                 elif reasoning_effort is not None:
                     # Map reasoning_effort to thinking_budget for Claude
-                    thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
-                    budget_tokens = thinking_config.get("thinking", {}).get("budget_tokens")
+                    thinking_config = _map_reasoning_effort_to_config(
+                        reasoning_effort, model
+                    )
+                    budget_tokens = thinking_config.get("thinking", {}).get(
+                        "budget_tokens"
+                    )
                     if budget_tokens:
                         final_thinking_budget = budget_tokens
 
@@ -1433,12 +1467,16 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                         "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
                         model,
                         final_thinking_budget,
-                        f" (from reasoning_effort={reasoning_effort})" if reasoning_effort and not thinking_budget else "",
+                        f" (from reasoning_effort={reasoning_effort})"
+                        if reasoning_effort and not thinking_budget
+                        else "",
                     )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
-                thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
+                thinking_config = _map_reasoning_effort_to_config(
+                    reasoning_effort, model
+                )
                 payload.update(thinking_config)
                 lib_logger.debug(
                     "[GitHubCopilot] reasoning_effort=%s mapped_config=%s",
@@ -1683,8 +1721,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "model": model,
             "max_tokens": max_tokens_int,
             "messages": anthropic_messages,
-            "stream": stream,
         }
+        if stream:
+            payload["stream"] = True
         if system:
             payload["system"] = system
 
@@ -2197,7 +2236,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 choices[i]["message"]["tool_calls"] = message["tool_calls"]
             # Handle reasoning fields (OpenCode parity)
             if "reasoning_content" in message:
-                choices[i]["message"]["reasoning_content"] = message["reasoning_content"]
+                choices[i]["message"]["reasoning_content"] = message[
+                    "reasoning_content"
+                ]
             if "reasoning_text" in message:
                 choices[i]["message"]["reasoning_text"] = message["reasoning_text"]
             if "reasoning_opaque" in message:
@@ -2391,7 +2432,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             choices=[
                                 {
                                     "index": index,
-                                    "delta": {"reasoning_opaque": delta["reasoning_opaque"]},
+                                    "delta": {
+                                        "reasoning_opaque": delta["reasoning_opaque"]
+                                    },
                                     "finish_reason": None,
                                 }
                             ],
@@ -2538,7 +2581,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             # Handle assistant messages (previous responses)
             if role == "assistant":
                 # Get reasoning fields for multi-turn support (OpenCode parity)
-                reasoning_text = msg.get("reasoning_text") or msg.get("reasoning_content")
+                reasoning_text = msg.get("reasoning_text") or msg.get(
+                    "reasoning_content"
+                )
                 reasoning_opaque = msg.get("reasoning_opaque")
 
                 # Convert to Responses API message format
@@ -2757,8 +2802,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         payload: Dict[str, Any] = {
             "model": model,
             "input": input_items,
-            "stream": stream,
         }
+        if stream:
+            payload["stream"] = True
 
         # Copy over optional parameters with Responses API naming
         if "max_tokens" in kwargs and kwargs["max_tokens"] is not None:
@@ -2784,7 +2830,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
         # Handle reasoning parameters for GPT-5/o-series (Responses API uses reasoning.effort)
         reasoning_effort = kwargs.get("reasoning_effort")
-        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get("reasoningSummary")
+        reasoning_summary = kwargs.get("reasoning_summary") or kwargs.get(
+            "reasoningSummary"
+        )
 
         if reasoning_effort is not None:
             thinking_config = _map_reasoning_effort_to_config(reasoning_effort, model)
@@ -3165,7 +3213,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                             if is_first_chunk:
                                 chunk._response_headers = captured_headers
                                 is_first_chunk = False
-                            tool_calls_yielded = True  # Mark that tool calls were emitted
+                            tool_calls_yielded = (
+                                True  # Mark that tool calls were emitted
+                            )
                             yield chunk
                     elif item_type == "reasoning":
                         # Skip - reasoning was already streamed via response.reasoning_summary_text.delta
