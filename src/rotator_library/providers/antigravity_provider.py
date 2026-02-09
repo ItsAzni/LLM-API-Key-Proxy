@@ -3073,11 +3073,13 @@ class AntigravityProvider(
     ) -> List[Dict[str, Any]]:
         """Transform tool response message.
 
-        For Gemini models: Converts multimodal content (images, PDFs) from image_url
-        format to Gemini's native inlineData format for proper processing.
+        For Gemini models: converts multimodal content (images, PDFs) from image_url
+        to Gemini inlineData parts.
 
-        For Claude models: Passes content as-is since Claude via Antigravity
-        doesn't support PDF/image as inlineData in tool responses.
+        For Claude models: strips raw media payloads from multimodal tool results and
+        keeps text content with a compact media note. Claude via Antigravity doesn't
+        support inline media in tool responses, and preserving base64 data URLs can
+        massively inflate prompt size.
         """
         tool_id = msg.get("tool_call_id", "")
         func_name = tool_id_to_name.get(tool_id, "unknown_function")
@@ -3101,18 +3103,13 @@ class AntigravityProvider(
             except (json.JSONDecodeError, TypeError):
                 parsed_content = content
 
-        # For Gemini models only: convert multimodal content to inlineData format
-        # Claude via Antigravity doesn't support PDF/images in tool responses as inlineData
-        if (
-            not self._is_claude(model)
-            and isinstance(parsed_content, list)
-            and parsed_content
-        ):
+        if isinstance(parsed_content, list) and parsed_content:
             first_item = parsed_content[0]
             if isinstance(first_item, dict) and "type" in first_item:
-                # This is multimodal content - extract text and media separately
+                # This is multimodal content - extract text and media separately.
                 text_parts = []
                 media_parts = []
+                media_count = 0
 
                 for block in parsed_content:
                     if not isinstance(block, dict):
@@ -3124,13 +3121,47 @@ class AntigravityProvider(
                         if text_content:
                             text_parts.append(text_content)
                     elif block_type == "image_url":
-                        # Convert image_url to inlineData using existing method
-                        image_part = self._parse_image_url(block.get("image_url", {}))
-                        if image_part:
-                            media_parts.append(image_part)
+                        media_count += 1
+                        # Convert image_url to inlineData for Gemini models.
+                        if not self._is_claude(model):
+                            image_part = self._parse_image_url(
+                                block.get("image_url", {})
+                            )
+                            if image_part:
+                                media_parts.append(image_part)
+                    else:
+                        # Any non-text part is considered media-like payload.
+                        media_count += 1
 
-                # Build the response with text content
-                text_result = " ".join(text_parts) if text_parts else ""
+                text_result = " ".join(text_parts).strip()
+
+                if self._is_claude(model):
+                    if media_count > 0:
+                        media_note = (
+                            f"[Tool returned {media_count} media attachment(s); "
+                            "raw media omitted for Claude compatibility.]"
+                        )
+                        text_result = (
+                            f"{text_result}\n\n{media_note}"
+                            if text_result
+                            else media_note
+                        )
+
+                    return [
+                        {
+                            "functionResponse": {
+                                "name": func_name,
+                                "response": {
+                                    "result": text_result
+                                    if text_result
+                                    else "Tool response was empty."
+                                },
+                                "id": tool_id,
+                            }
+                        }
+                    ]
+
+                # Gemini path: keep text result and append converted media parts.
                 parts = [
                     {
                         "functionResponse": {
@@ -3144,10 +3175,7 @@ class AntigravityProvider(
                         }
                     }
                 ]
-
-                # Add media parts (inlineData for images/PDFs)
                 parts.extend(media_parts)
-
                 return parts
 
         # Default: pass content as-is (for Claude or non-multimodal content)
@@ -4616,7 +4644,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         file_logger.log_request(payload)
 
         # Log thinking config to console for visibility in docker compose logs
-        thinking_config = payload.get("request", {}).get("generationConfig", {}).get("thinkingConfig", {})
+        thinking_config = (
+            payload.get("request", {})
+            .get("generationConfig", {})
+            .get("thinkingConfig", {})
+        )
         if thinking_config:
             lib_logger.info(
                 f"[Antigravity] Final request thinking config for {payload.get('model', model)}: {thinking_config}"
