@@ -388,6 +388,9 @@ class StreamingHandler:
 
             # FIX 3: Preserve OpenAI's "reasoning_content" and also provide "reasoning" alias
             # Some clients (e.g. OpenCode/Copilot) expect "reasoning_content" specifically.
+            # Also handle reasoning_text (Copilot-specific field for Claude thinking)
+            if delta and "reasoning_text" in delta and "reasoning_content" not in delta:
+                delta["reasoning_content"] = delta["reasoning_text"]
             if delta and "reasoning_content" in delta:
                 if "reasoning" not in delta:
                     delta["reasoning"] = delta.get("reasoning_content")

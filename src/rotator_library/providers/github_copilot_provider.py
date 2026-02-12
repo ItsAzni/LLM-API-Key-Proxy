@@ -1175,6 +1175,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         payload: Dict[str, Any] = {
             "model": model,
             "messages": transformed_messages,
+            "store": False,
         }
         if stream:
             payload["stream"] = True
@@ -1274,6 +1275,23 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 reasoning_effort,
                 json.dumps(thinking_config, default=str)[:500],
             )
+
+        # OpenCode parity: apply copilot_cache_control hints to system and recent messages
+        # See: opencode transform.ts:191-193
+        msgs = payload.get("messages", [])
+        if msgs:
+            # First 2 system messages get cache control
+            system_count = 0
+            for msg in msgs:
+                if msg.get("role") == "system" and system_count < 2:
+                    msg["copilot_cache_control"] = {"type": "ephemeral"}
+                    system_count += 1
+            # Last 2 non-system messages get cache control
+            non_system_indices = [
+                i for i, msg in enumerate(msgs) if msg.get("role") != "system"
+            ]
+            for idx in non_system_indices[-2:]:
+                msgs[idx]["copilot_cache_control"] = {"type": "ephemeral"}
 
         endpoint = f"{api_base}/chat/completions"
 
@@ -2241,6 +2259,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 ]
             if "reasoning_text" in message:
                 choices[i]["message"]["reasoning_text"] = message["reasoning_text"]
+                if "reasoning_content" not in message:
+                    choices[i]["message"]["reasoning_content"] = message["reasoning_text"]
             if "reasoning_opaque" in message:
                 choices[i]["message"]["reasoning_opaque"] = message["reasoning_opaque"]
 
@@ -2410,6 +2430,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 {
                                     "index": index,
                                     "delta": {
+                                        "reasoning_content": delta["reasoning_text"],
                                         "reasoning_text": delta["reasoning_text"],
                                         "role": delta.get("role", "assistant"),
                                     },
