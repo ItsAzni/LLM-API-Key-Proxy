@@ -109,6 +109,11 @@ class _MalformedFunctionCallDetected(Exception):
 
 lib_logger = logging.getLogger("rotator_library")
 
+# Spoof host platform as macOS for User-Agent and Client-Metadata parity with real AM
+_ua_platform = "darwin"
+_ua_arch = "arm64"
+_metadata_platform = "MACOS"
+
 # Antigravity base URLs with fallback order
 # Priority: sandbox daily → daily (non-sandbox) → production
 BASE_URLS = [
@@ -120,7 +125,7 @@ BASE_URLS = [
 # Required headers for Antigravity API calls
 # These headers are CRITICAL for gemini-3-pro-high/low to work
 # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
-ANTIGRAVITY_USER_AGENT = "antigravity/1.15.8 windows/amd64"
+ANTIGRAVITY_USER_AGENT = f"antigravity/1.104.0 {_ua_platform}/{_ua_arch}"
 ANTIGRAVITY_USER_AGENT_LEGACY = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Antigravity/1.104.0 Chrome/138.0.7204.235 "
@@ -129,7 +134,7 @@ ANTIGRAVITY_USER_AGENT_LEGACY = (
 ANTIGRAVITY_HEADERS = {
     "User-Agent": ANTIGRAVITY_USER_AGENT,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
+    "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_metadata_platform}","pluginType":"GEMINI"}}',
 }
 
 # Headers to strip from incoming requests for privacy/security
@@ -145,7 +150,20 @@ STRIPPED_CLIENT_HEADERS = {
     "x-trace-id",
     "x-amzn-trace-id",
     "x-cloud-trace-context",
+    "x-api-key",
+    "x-goog-user-project",
 }
+
+# Anthropic beta header for Claude interleaved thinking
+ANTHROPIC_BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14"
+
+# Version auto-updater (mirrors opencode version.ts)
+# Fetches latest Antigravity version at startup to keep User-Agent current
+VERSION_FETCH_URL = "https://antigravity-auto-updater-974169037036.us-central1.run.app"
+VERSION_CHANGELOG_URL = "https://antigravity.google/changelog"
+VERSION_FETCH_TIMEOUT = 5.0
+VERSION_CHANGELOG_SCAN_CHARS = 5000
+VERSION_REGEX = re.compile(r"\d+\.\d+\.\d+")
 
 # Available models via Antigravity
 AVAILABLE_MODELS = [
@@ -1384,6 +1402,9 @@ class AntigravityProvider(
         self.model_definitions = ModelDefinitions()
         # NOTE: project_id_cache and project_tier_cache are inherited from AntigravityAuthBase
 
+        # Version auto-update (one-shot async fetch on first request)
+        self._version_fetched = False
+
         # Base URL management
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
@@ -1602,6 +1623,39 @@ class AntigravityProvider(
             "Client-Metadata": ANTIGRAVITY_HEADERS["Client-Metadata"],
         }
 
+    def _get_antigravity_content_headers(
+        self, credential_path: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Return headers for content requests (streamGenerateContent).
+
+        AM only sends User-Agent on content requests — no X-Goog-Api-Client,
+        no Client-Metadata header. This matches real Antigravity Manager behavior.
+
+        Args:
+            credential_path: Optional credential path for fingerprint lookup
+
+        Returns:
+            Dict with only User-Agent header
+        """
+        if credential_path:
+            email = self._get_credential_email(credential_path)
+            if email:
+                try:
+                    from .utilities.device_profile import (
+                        get_or_create_fingerprint,
+                        build_content_request_headers,
+                    )
+
+                    fingerprint = get_or_create_fingerprint(email)
+                    if fingerprint:
+                        return build_content_request_headers(fingerprint)
+                except Exception as e:
+                    lib_logger.debug(f"Failed to build content headers: {e}")
+
+        # Fallback to static User-Agent only
+        return {"User-Agent": ANTIGRAVITY_USER_AGENT}
+
     # NOTE: _load_tier_from_file() is inherited from GeminiCredentialManager mixin
     # NOTE: get_credential_tier_name() is inherited from GeminiCredentialManager mixin
 
@@ -1709,6 +1763,75 @@ class AntigravityProvider(
         """Reset to primary base URL."""
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
+
+    async def _ensure_version_initialized(self, client: httpx.AsyncClient) -> None:
+        """
+        Fetch latest Antigravity version on first request (one-shot).
+
+        Mirrors opencode's version.ts strategy:
+        1. Auto-updater API (plain text with semver)
+        2. Changelog page scrape (first 5000 chars)
+        3. Keep hardcoded fallback
+        """
+        if self._version_fetched:
+            return
+        self._version_fetched = True
+
+        try:
+            from .utilities.device_profile import (
+                set_antigravity_version,
+                get_antigravity_version,
+            )
+
+            old_version = get_antigravity_version()
+            version = None
+
+            # 1. Try auto-updater API
+            try:
+                resp = await client.get(
+                    VERSION_FETCH_URL, timeout=VERSION_FETCH_TIMEOUT
+                )
+                if resp.status_code == 200:
+                    match = VERSION_REGEX.search(resp.text)
+                    if match:
+                        version = match.group(0)
+            except Exception:
+                pass
+
+            # 2. Try changelog page scrape
+            if not version:
+                try:
+                    resp = await client.get(
+                        VERSION_CHANGELOG_URL, timeout=VERSION_FETCH_TIMEOUT
+                    )
+                    if resp.status_code == 200:
+                        text = resp.text[:VERSION_CHANGELOG_SCAN_CHARS]
+                        match = VERSION_REGEX.search(text)
+                        if match:
+                            version = match.group(0)
+                except Exception:
+                    pass
+
+            if version:
+                set_antigravity_version(version)
+
+                # Update module-level User-Agent to use fetched version
+                global ANTIGRAVITY_USER_AGENT
+                ANTIGRAVITY_USER_AGENT = (
+                    f"antigravity/{version} {_ua_platform}/{_ua_arch}"
+                )
+                ANTIGRAVITY_HEADERS["User-Agent"] = ANTIGRAVITY_USER_AGENT
+
+                if version != old_version:
+                    lib_logger.info(
+                        f"[Antigravity] Version updated: {old_version} → {version}"
+                    )
+            else:
+                lib_logger.debug(
+                    f"[Antigravity] Version fetch failed, using fallback: {old_version}"
+                )
+        except Exception as e:
+            lib_logger.debug(f"[Antigravity] Version init error: {e}")
 
     # =========================================================================
     # THINKING CACHE KEY GENERATION
@@ -1882,6 +2005,29 @@ class AntigravityProvider(
             if isinstance(part, dict) and part.get("thought") is True:
                 return True
         return False
+
+    def _sanitize_cross_model_payload(
+        self, messages: List[Dict[str, Any]], model: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Strip cross-model metadata that may leak between providers.
+
+        When targeting Claude, strip Gemini-specific fields like thoughtSignature
+        and thinkingMetadata from model messages to prevent leaking Gemini signatures
+        into Claude requests. Foreign signatures cause "Invalid signature in thinking
+        block" validation errors.
+        """
+        if not self._is_claude(model):
+            return messages
+
+        for msg in messages:
+            if msg.get("role") != "model":
+                continue
+            for part in msg.get("parts", []):
+                part.pop("thoughtSignature", None)
+                part.pop("thinkingMetadata", None)
+
+        return messages
 
     def _message_has_tool_calls(self, msg: Dict[str, Any]) -> bool:
         """Check if a message contains tool calls (Gemini format)."""
@@ -2769,11 +2915,11 @@ class AntigravityProvider(
                 },
             }
 
-            # Build headers (same as main request)
+            # Build headers for content request (User-Agent only, no X-Goog-Api-Client/Client-Metadata)
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                **ANTIGRAVITY_HEADERS,
+                **self._get_antigravity_content_headers(credential_path),
             }
 
             # Make non-streaming request using generateContent endpoint
@@ -4441,6 +4587,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Clear tool name mapping for fresh request
         self._clear_tool_name_mapping()
 
+        # Fetch latest Antigravity version on first request (non-blocking one-shot)
+        await self._ensure_version_initialized(client)
+
         # Extract parameters
         model = self._strip_provider_prefix(kwargs.get("model", "gemini-2.5-pro"))
         messages = kwargs.get("messages", [])
@@ -4516,6 +4665,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Sanitize thinking blocks for Claude AFTER transformation
         # Now we can see the full picture including cached thinking that was restored
         # This handles: context compression, model switching, mid-turn thinking toggle
+        # Strip cross-model metadata (e.g., Gemini thoughtSignature) when targeting Claude
+        if self._is_claude(model):
+            gemini_contents = self._sanitize_cross_model_payload(gemini_contents, model)
+
         force_disable_thinking = False
         if self._is_claude(model) and self._enable_thinking_sanitization:
             gemini_contents, force_disable_thinking = (
@@ -4664,14 +4817,18 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         endpoint = ":streamGenerateContent"
         url = f"{base_url}{endpoint}?alt=sse"
 
-        # These headers are REQUIRED for gemini-3-pro-high/low to work
-        # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
+        # Content request headers: only User-Agent (no X-Goog-Api-Client, no Client-Metadata)
+        # AM only sends User-Agent on content requests — matching real Antigravity Manager behavior
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
-            **self._get_antigravity_headers(credential_path),
+            **self._get_antigravity_content_headers(credential_path),
         }
+
+        # Add anthropic-beta header for Claude thinking models
+        if self._is_claude(model) and thinking_enabled:
+            headers["anthropic-beta"] = ANTHROPIC_BETA_INTERLEAVED_THINKING
 
         # Keep a mutable reference to gemini_contents for retry injection
         current_gemini_contents = gemini_contents

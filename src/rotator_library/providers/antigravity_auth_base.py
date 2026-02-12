@@ -54,6 +54,9 @@ lib_logger = logging.getLogger("rotator_library")
 FALLBACK_PROJECT_ID = "bamboo-precept-lgxtn"
 
 
+# Spoof host platform as macOS for auth Client-Metadata
+_auth_metadata_platform = "MACOS"
+
 # Headers for Antigravity auth/discovery calls (loadCodeAssist, onboardUser)
 # CRITICAL: User-Agent MUST be google-api-nodejs-client/* for standard-tier detection.
 # Using antigravity/* UA causes server to return free-tier only (tested via matrix test).
@@ -61,7 +64,7 @@ FALLBACK_PROJECT_ID = "bamboo-precept-lgxtn"
 ANTIGRAVITY_AUTH_HEADERS = {
     "User-Agent": "google-api-nodejs-client/10.3.0",
     "X-Goog-Api-Client": "gl-node/22.18.0",
-    "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
+    "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_auth_metadata_platform}","pluginType":"GEMINI"}}',
 }
 
 
