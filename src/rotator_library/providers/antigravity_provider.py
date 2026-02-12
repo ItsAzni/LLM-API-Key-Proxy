@@ -2006,29 +2006,6 @@ class AntigravityProvider(
                 return True
         return False
 
-    def _sanitize_cross_model_payload(
-        self, messages: List[Dict[str, Any]], model: str
-    ) -> List[Dict[str, Any]]:
-        """
-        Strip cross-model metadata that may leak between providers.
-
-        When targeting Claude, strip Gemini-specific fields like thoughtSignature
-        and thinkingMetadata from model messages to prevent leaking Gemini signatures
-        into Claude requests. Foreign signatures cause "Invalid signature in thinking
-        block" validation errors.
-        """
-        if not self._is_claude(model):
-            return messages
-
-        for msg in messages:
-            if msg.get("role") != "model":
-                continue
-            for part in msg.get("parts", []):
-                part.pop("thoughtSignature", None)
-                part.pop("thinkingMetadata", None)
-
-        return messages
-
     def _message_has_tool_calls(self, msg: Dict[str, Any]) -> bool:
         """Check if a message contains tool calls (Gemini format)."""
         parts = msg.get("parts", [])
@@ -4665,9 +4642,6 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Sanitize thinking blocks for Claude AFTER transformation
         # Now we can see the full picture including cached thinking that was restored
         # This handles: context compression, model switching, mid-turn thinking toggle
-        # Strip cross-model metadata (e.g., Gemini thoughtSignature) when targeting Claude
-        if self._is_claude(model):
-            gemini_contents = self._sanitize_cross_model_payload(gemini_contents, model)
 
         force_disable_thinking = False
         if self._is_claude(model) and self._enable_thinking_sanitization:
