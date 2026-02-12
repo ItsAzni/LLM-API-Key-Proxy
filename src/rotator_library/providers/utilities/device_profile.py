@@ -42,34 +42,39 @@ DEVICE_PROFILES_SUBDIR = "device_profiles"
 # FINGERPRINT CONSTANTS
 # =============================================================================
 
-# Fixed version - does NOT randomize per user request
-ANTIGRAVITY_VERSION = "1.15.8"
+# Runtime-mutable version — updated at startup from auto-updater API
+_antigravity_version = "1.104.0"  # Fallback if remote fetch fails
+_version_locked = False
+
+
+def get_antigravity_version() -> str:
+    """Return the current Antigravity version (may be updated at runtime)."""
+    return _antigravity_version
+
+
+def set_antigravity_version(version: str) -> None:
+    """Set the Antigravity version (one-shot, subsequent calls ignored)."""
+    global _antigravity_version, _version_locked
+    if _version_locked:
+        return
+    _antigravity_version = version
+    _version_locked = True
+
+
+# Keep module-level alias for backward compatibility with imports
+ANTIGRAVITY_VERSION = _antigravity_version
 
 # Platform configurations with OS versions
+# NOTE: Only darwin/MACOS is used to spoof as macOS consistently
 PLATFORMS = {
-    "win32": {
-        "name": "WINDOWS",
-        "os_versions": [
-            "10.0.19041",
-            "10.0.19042",
-            "10.0.19043",
-            "10.0.22000",
-            "10.0.22621",
-            "10.0.22631",
-        ],
-    },
     "darwin": {
         "name": "MACOS",
         "os_versions": ["10.15.7", "11.6.8", "12.6.3", "13.5.2", "14.2.1", "14.5"],
     },
-    "linux": {
-        "name": "LINUX",
-        "os_versions": ["5.15.0", "5.19.0", "6.1.0", "6.2.0", "6.5.0", "6.6.0"],
-    },
 }
 
 # Architecture options
-ARCHITECTURES = ["x64", "arm64"]
+ARCHITECTURES = ["arm64"]
 
 # SDK client strings (randomized per credential)
 SDK_CLIENTS = [
@@ -344,8 +349,8 @@ def generate_device_fingerprint() -> DeviceFingerprint:
     # Pick arch
     arch = random.choice(ARCHITECTURES)  # "x64"
 
-    # Build user agent with FIXED version
-    user_agent = f"antigravity/{ANTIGRAVITY_VERSION} {platform_raw}/{arch}"
+    # Build user agent with current version (may be updated at runtime)
+    user_agent = f"antigravity/{get_antigravity_version()} {platform_raw}/{arch}"
 
     # Other randomized fields (picked once, persisted)
     api_client = random.choice(SDK_CLIENTS)
@@ -401,8 +406,8 @@ def upgrade_legacy_profile(profile: DeviceProfile) -> DeviceFingerprint:
     # Pick arch
     arch = random.choice(ARCHITECTURES)
 
-    # Build user agent with FIXED version
-    user_agent = f"antigravity/{ANTIGRAVITY_VERSION} {platform_raw}/{arch}"
+    # Build user agent with current version (may be updated at runtime)
+    user_agent = f"antigravity/{get_antigravity_version()} {platform_raw}/{arch}"
 
     # Generate missing fields
     api_client = random.choice(SDK_CLIENTS)
@@ -462,6 +467,24 @@ def build_fingerprint_headers(fp: DeviceFingerprint) -> Dict[str, str]:
         "Client-Metadata": json.dumps(client_metadata),
         "X-Goog-QuotaUser": fp.quota_user,
         "X-Client-Device-Id": fp.device_id,
+    }
+
+
+def build_content_request_headers(fp: DeviceFingerprint) -> Dict[str, str]:
+    """
+    Build headers for content requests (only User-Agent).
+
+    AM only sends User-Agent on content requests — no X-Goog-Api-Client,
+    no Client-Metadata header. This matches real Antigravity Manager behavior.
+
+    Args:
+        fp: DeviceFingerprint to build headers from
+
+    Returns:
+        Dict with only User-Agent
+    """
+    return {
+        "User-Agent": fp.user_agent,
     }
 
 
