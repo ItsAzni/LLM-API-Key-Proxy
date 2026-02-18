@@ -16,6 +16,7 @@ from ..config import ProviderUsageConfig
 from ..tracking.windows import WindowManager
 from .base import LimitChecker
 from .concurrent import ConcurrentLimitChecker
+from .group_concurrent import GroupConcurrentChecker
 from .window_limits import WindowLimitChecker
 from .cooldowns import CooldownChecker
 from .fair_cycle import FairCycleChecker
@@ -50,12 +51,23 @@ class LimitEngine:
         self._window_manager = window_manager
 
         # Initialize all limit checkers
-        # Order matters: concurrent first (fast check), then others
+        # Order matters: concurrent first (fast check), then group concurrent, then others
         # Note: WindowLimitChecker is optional - only included if window_limits_enabled
+        self._concurrent_checker = ConcurrentLimitChecker()
+        self._cooldown_checker = CooldownChecker()
+
         self._checkers: List[LimitChecker] = [
-            ConcurrentLimitChecker(),
-            CooldownChecker(),
+            self._concurrent_checker,
         ]
+
+        # Group concurrent checker - only add if caps are configured
+        self._group_concurrent_checker = GroupConcurrentChecker(
+            config.group_concurrent_caps
+        )
+        if config.group_concurrent_caps:
+            self._checkers.append(self._group_concurrent_checker)
+
+        self._checkers.append(self._cooldown_checker)
 
         # Window limit checker - kept as reference for info purposes,
         # only added to blocking checkers if explicitly enabled
@@ -68,10 +80,6 @@ class LimitEngine:
         self._fair_cycle_checker = FairCycleChecker(config.fair_cycle, window_manager)
         self._checkers.append(self._custom_cap_checker)
         self._checkers.append(self._fair_cycle_checker)
-
-        # Quick access to specific checkers
-        self._concurrent_checker = self._checkers[0]
-        self._cooldown_checker = self._checkers[1]
 
     def check_all(
         self,
@@ -194,6 +202,11 @@ class LimitEngine:
         """
         for checker in self._checkers:
             checker.reset(state, model, quota_group)
+
+    @property
+    def group_concurrent_checker(self) -> GroupConcurrentChecker:
+        """Get the group concurrent checker."""
+        return self._group_concurrent_checker
 
     @property
     def concurrent_checker(self) -> ConcurrentLimitChecker:

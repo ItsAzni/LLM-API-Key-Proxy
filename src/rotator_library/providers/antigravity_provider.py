@@ -1189,6 +1189,14 @@ class AntigravityProvider(
     # Others: Use sequential fallback (2x) or balanced default (1x)
     default_priority_multipliers = {1: 2, 2: 1}
 
+    # Per-group concurrent caps: {priority: {quota_group: max_concurrent}}
+    # On ultra-tier (priority 1), cap flash at 1 concurrent to leave room for opus/claude
+    default_group_concurrent_caps = {
+        1: {  # Ultra tier only
+            "g3-flash": 1,  # Flash limited to 1 concurrent on ultra
+        },
+    }
+
     # For sequential mode, lower priority tiers still get 2x to maintain stickiness
     # For balanced mode, this doesn't apply (falls back to 1x)
     default_sequential_fallback_multiplier = 1

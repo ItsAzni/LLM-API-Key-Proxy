@@ -485,6 +485,10 @@ class ProviderUsageConfig:
     # Custom caps
     custom_caps: List[CustomCapConfig] = field(default_factory=list)
 
+    # Per-group concurrent caps: {priority: {quota_group: max_concurrent}}
+    # Example: {1: {"g3-flash": 1}} - on ultra tier, flash capped at 1 concurrent
+    group_concurrent_caps: Dict[int, Dict[str, int]] = field(default_factory=dict)
+
     # Exhaustion threshold (cooldown must exceed this to count as "exhausted")
     exhaustion_cooldown_threshold: int = DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD
 
@@ -657,6 +661,11 @@ def load_provider_usage_config(
                     )
                 )
 
+        # Group concurrent caps
+        if hasattr(plugin_class, "default_group_concurrent_caps"):
+            for priority, groups in plugin_class.default_group_concurrent_caps.items():
+                config.group_concurrent_caps[priority] = dict(groups)
+
     # Use default windows if none defined
     if not config.windows:
         config.windows = get_default_windows()
@@ -808,6 +817,26 @@ def load_provider_usage_config(
     # Derive fair cycle enabled from rotation mode if not explicitly set
     if config.fair_cycle.enabled is None:
         config.fair_cycle.enabled = config.rotation_mode == RotationMode.SEQUENTIAL
+
+    # Group concurrent caps from env
+    # Format: GROUP_CONCURRENT_CAP_{PROVIDER}_T{PRIORITY}_{GROUP}=value
+    # Example: GROUP_CONCURRENT_CAP_ANTIGRAVITY_T1_G3_FLASH=1
+    gcc_prefix = f"GROUP_CONCURRENT_CAP_{provider_upper}_T"
+    for env_key, env_value in os.environ.items():
+        if env_key.startswith(gcc_prefix):
+            remainder = env_key[len(gcc_prefix):]
+            # Split on first underscore to get priority and group
+            parts = remainder.split("_", 1)
+            if len(parts) != 2:
+                continue
+            priority_str, group_raw = parts
+            try:
+                priority = int(priority_str)
+                cap_value = int(env_value)
+            except ValueError:
+                continue
+            group_key = group_raw.lower().replace("_", "-")
+            config.group_concurrent_caps.setdefault(priority, {})[group_key] = cap_value
 
     return config
 

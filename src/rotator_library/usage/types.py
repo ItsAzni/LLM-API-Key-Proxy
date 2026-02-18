@@ -44,6 +44,7 @@ class LimitResult(str, Enum):
     BLOCKED_FAIR_CYCLE = "blocked_fair_cycle"
     BLOCKED_CUSTOM_CAP = "blocked_custom_cap"
     BLOCKED_CONCURRENT = "blocked_concurrent"
+    BLOCKED_GROUP_CONCURRENT = "blocked_group_concurrent"
 
 
 class RotationMode(str, Enum):
@@ -330,6 +331,7 @@ class CredentialState:
 
     # Active requests (for concurrent request limiting)
     active_requests: int = 0
+    active_requests_by_group: Dict[str, int] = field(default_factory=dict)
     max_concurrent: Optional[int] = None
 
     # Metadata

@@ -9,6 +9,7 @@ from .window_limits import WindowLimitChecker
 from .cooldowns import CooldownChecker
 from .fair_cycle import FairCycleChecker
 from .custom_caps import CustomCapChecker
+from .group_concurrent import GroupConcurrentChecker
 
 __all__ = [
     "LimitEngine",
@@ -17,4 +18,5 @@ __all__ = [
     "CooldownChecker",
     "FairCycleChecker",
     "CustomCapChecker",
+    "GroupConcurrentChecker",
 ]

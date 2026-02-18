@@ -89,7 +89,9 @@ class CredentialContext:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
         # Always release the credential
-        await self._manager._release_credential(self.stable_id, self.model)
+        await self._manager._release_credential(
+            self.stable_id, self.model, self.quota_group
+        )
 
         success = False
         error = self._error
@@ -439,6 +441,10 @@ class UsageManager:
                             or state.active_requests < state.max_concurrent
                         ):
                             state.active_requests += 1
+                            group_key = quota_group or normalized_model
+                            state.active_requests_by_group[group_key] = (
+                                state.active_requests_by_group.get(group_key, 0) + 1
+                            )
                             lib_logger.debug(
                                 f"Acquired credential {mask_credential(state.accessor, style='full')} "
                                 f"for {model} (active: {state.active_requests}"
@@ -454,6 +460,10 @@ class UsageManager:
                 else:
                     # No lock configured, just increment
                     state.active_requests += 1
+                    group_key = quota_group or normalized_model
+                    state.active_requests_by_group[group_key] = (
+                        state.active_requests_by_group.get(group_key, 0) + 1
+                    )
                     return CredentialContext(
                         manager=self,
                         credential=state.accessor,
@@ -1914,19 +1924,33 @@ class UsageManager:
             return FAIR_CYCLE_GLOBAL_KEY
         return group_key
 
-    async def _release_credential(self, stable_id: str, model: str) -> None:
+    async def _release_credential(
+        self, stable_id: str, model: str, quota_group: Optional[str] = None
+    ) -> None:
         """Release a credential after use and notify waiting tasks."""
         state = self._states.get(stable_id)
         if not state:
             return
+
+        group_key = quota_group or model
 
         # Decrement active requests
         lock = self._key_locks.get(stable_id)
         if lock:
             async with lock:
                 state.active_requests = max(0, state.active_requests - 1)
+                current_group = state.active_requests_by_group.get(group_key, 0)
+                if current_group > 0:
+                    state.active_requests_by_group[group_key] = current_group - 1
+                else:
+                    state.active_requests_by_group.pop(group_key, None)
         else:
             state.active_requests = max(0, state.active_requests - 1)
+            current_group = state.active_requests_by_group.get(group_key, 0)
+            if current_group > 0:
+                state.active_requests_by_group[group_key] = current_group - 1
+            else:
+                state.active_requests_by_group.pop(group_key, None)
 
         # Log release with current state
         remaining = state.active_requests
