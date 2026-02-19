@@ -131,5 +131,6 @@ cache/antigravity/thought_signatures.json
 *.env
 
 /oauth_creds/
+/oauth_creds_bak/
 
 /usage/

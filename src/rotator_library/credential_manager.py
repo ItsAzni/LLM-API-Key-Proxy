@@ -21,6 +21,7 @@ DEFAULT_OAUTH_DIRS = {
     "antigravity": Path.home() / ".antigravity",
     "codex": Path.home() / ".codex",
     "github_copilot": None,  # Uses oauth_creds/ directory only
+    "gitlab_duo": None,      # Uses oauth_creds/ directory only (OAuth PKCE)
     # Add other providers like 'claude' here if they have a standard CLI path
 }
 
@@ -33,6 +34,7 @@ ENV_OAUTH_PROVIDERS = {
     "iflow": "IFLOW",
     "codex": "CODEX",
     "github_copilot": "GITHUB_COPILOT",
+    "gitlab_duo": "GITLAB_DUO",
 }
 
 

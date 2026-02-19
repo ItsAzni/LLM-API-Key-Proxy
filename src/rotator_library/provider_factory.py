@@ -9,6 +9,7 @@ from .providers.iflow_auth_base import IFlowAuthBase
 from .providers.antigravity_auth_base import AntigravityAuthBase
 from .providers.openai_oauth_base import OpenAIOAuthBase
 from .providers.github_copilot_auth_base import GitHubCopilotAuthBase
+from .providers.gitlab_duo_auth_base import GitLabDuoAuthBase
 
 PROVIDER_MAP = {
     "gemini_cli": GeminiAuthBase,
@@ -17,6 +18,7 @@ PROVIDER_MAP = {
     "antigravity": AntigravityAuthBase,
     "codex": OpenAIOAuthBase,
     "github_copilot": GitHubCopilotAuthBase,
+    "gitlab_duo": GitLabDuoAuthBase,
 }
 
 def get_provider_auth_class(provider_name: str):
