@@ -16,6 +16,9 @@ httpx
 aiofiles
 aiohttp
 
+# TLS fingerprinting with Chrome impersonation (for stealth)
+curl_cffi
+
 colorlog
 
 rich
