@@ -9,7 +9,7 @@ All values can be overridden via environment variables:
     TIMEOUT_CONNECT - Connection establishment timeout (default: 30s)
     TIMEOUT_WRITE - Request body send timeout (default: 30s)
     TIMEOUT_POOL - Connection pool acquisition timeout (default: 60s)
-    TIMEOUT_READ_STREAMING - Read timeout between chunks for streaming (default: 180s / 3 min)
+    TIMEOUT_READ_STREAMING - Read timeout between chunks for streaming (default: 3600s / 1 hour)
     TIMEOUT_READ_NON_STREAMING - Read timeout for non-streaming responses (default: 600s / 10 min)
 """
 
@@ -31,7 +31,7 @@ class TimeoutConfig:
     _CONNECT = 30.0
     _WRITE = 30.0
     _POOL = 60.0
-    _READ_STREAMING = 300.0  # 5 minutes between chunks
+    _READ_STREAMING = 3600.0  # 1 hour between chunks — prevents truncation of long thinking chains
     _READ_NON_STREAMING = 600.0  # 10 minutes for full response
 
     @classmethod
@@ -77,9 +77,9 @@ class TimeoutConfig:
         """
         Timeout configuration for streaming LLM requests.
 
-        Uses a shorter read timeout (default 3 min) since we expect
-        periodic chunks. If no data arrives for this duration, the
-        connection is considered stalled.
+        Uses a long read timeout (default 1 hour) since thinking chains
+        can produce very long silent periods. If no data arrives for
+        this duration, the connection is considered stalled.
         """
         return httpx.Timeout(
             connect=cls.connect(),

@@ -197,10 +197,14 @@ def build_sec_ch_ua_headers() -> Dict[str, str]:
 
     These headers are sent by real Chrome/Electron browsers and help
     match the expected fingerprint of a legitimate Antigravity client.
+
+    Format matches zerogravity constants.rs exactly:
+      "Not_A Brand";v="99", "Chromium";v="{CHROME_MAJOR}"
+    Note: underscore in "Not_A Brand" (not dot), 2 entries only (no "Google Chrome").
     """
     chrome_major = _runtime_chrome_major
     return {
-        "sec-ch-ua": f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not-A.Brand";v="99"',
+        "sec-ch-ua": f'"Not_A Brand";v="99", "Chromium";v="{chrome_major}"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"macOS"',
     }
@@ -221,11 +225,28 @@ ANTIGRAVITY_HEADERS = {
     "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_metadata_platform}","pluginType":"GEMINI"}}',
 }
 
+# Chrome header emission order from zerogravity backend.rs STATIC_HEADERS:
+#   Origin → User-Agent → Accept → Accept-Encoding → Accept-Language
+#   → sec-ch-ua → sec-ch-ua-mobile → sec-ch-ua-platform
+#   → Sec-Fetch-Dest → Sec-Fetch-Mode → Sec-Fetch-Site
+#   → Priority → Connect-Protocol-Version
+ANTIGRAVITY_CHROME_STATIC_HEADERS = {
+    "Origin": "vscode-file://vscode-app",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Language": "en-US",
+    **build_sec_ch_ua_headers(),
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+    "Priority": "u=1, i",
+    "Connect-Protocol-Version": "1",
+}
+
 ANTIGRAVITY_HEADERS_STEALTH = {
     "User-Agent": ANTIGRAVITY_USER_AGENT_LEGACY,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_metadata_platform}","pluginType":"GEMINI"}}',
-    **build_sec_ch_ua_headers(),
+    **ANTIGRAVITY_CHROME_STATIC_HEADERS,
 }
 
 # Headers to strip from incoming requests for privacy/security
@@ -451,9 +472,13 @@ class ModelRateLimiter:
             entry["consecutive_429s"] += 1
 
             if server_delay is not None:
-                cooldown = server_delay
+                # Add ~10% jitter with a 200ms floor to avoid thundering-herd retries
+                # Matches zerogravity polling.rs: server_delay + uniform(0, max(0.2, delay*0.1))
+                jitter = max(0.2, server_delay * 0.1)
+                cooldown = server_delay + random.uniform(0, jitter)
                 lib_logger.info(
-                    f"Rate limiter: model {model} using server delay {server_delay:.1f}s"
+                    f"Rate limiter: model {model} using server delay {server_delay:.1f}s "
+                    f"(+{cooldown - server_delay:.2f}s jitter)"
                 )
             else:
                 consecutive = entry["consecutive_429s"]
@@ -494,14 +519,24 @@ def get_model_rate_limiter() -> ModelRateLimiter:
 
 
 # =============================================================================
-# WARMUP SEQUENCE (ported from ZeroGravity warmup.rs)
+# WARMUP SEQUENCE (ported from ZeroGravity warmup.rs + 7909c96)
 # =============================================================================
 
-
-WARMUP_METHODS = [
-    ("GetStatus", {}),
-    ("Heartbeat", {}),
+# Order matches real AG extension.js init flow (reverse-engineered, commit 7909c96).
+# "RecordEvent" body is built dynamically at call time (needs current unix_ms).
+_WARMUP_METHODS_STATIC = [
+    # Step 4: RegisterGdmUser — always called, even if user already exists
+    ("RegisterGdmUser", {}),
+    # Step 5: SetBaseExperiments — empty experiment config
+    ("SetBaseExperiments", {"experimentConfig": {}}),
+    # Step 7-8: status and panel init
     ("GetUserStatus", {}),
+    ("InitializeCascadePanelState", {}),
+    # Step 9: first heartbeat
+    ("Heartbeat", {}),
+    # Step 10: LS_STARTUP event (body injected dynamically below)
+    # Step 11+: additional status/config calls
+    ("GetStatus", {}),
     ("GetCascadeModelConfigs", {}),
     ("GetCascadeModelConfigData", {}),
     ("GetWorkspaceInfos", {}),
@@ -511,8 +546,26 @@ WARMUP_METHODS = [
     ("GetWebDocsOptions", {}),
     ("GetRepoInfos", {}),
     ("GetAllSkills", {}),
-    ("InitializeCascadePanelState", {}),
 ]
+
+
+def _build_warmup_methods() -> list:
+    """Build the warmup method list with a live timestamp for RecordEvent."""
+    import time as _time
+
+    unix_ms = int(_time.time() * 1000)
+    record_event = (
+        "RecordEvent",
+        {"event": {"eventType": 0, "timestampUnixMs": unix_ms}},  # 0 = LS_STARTUP
+    )
+    # Insert RecordEvent after Heartbeat (index 4 → insert at 5)
+    methods = list(_WARMUP_METHODS_STATIC)
+    methods.insert(5, record_event)
+    return methods
+
+
+# Legacy alias kept for compatibility — use _build_warmup_methods() at call time
+WARMUP_METHODS = _WARMUP_METHODS_STATIC
 
 
 async def run_warmup_sequence(http_client: httpx.AsyncClient, base_url: str) -> bool:
@@ -535,7 +588,7 @@ async def run_warmup_sequence(http_client: httpx.AsyncClient, base_url: str) -> 
     lib_logger.info("Running webview warmup sequence...")
     success_count = 0
 
-    for method, body in WARMUP_METHODS:
+    for method, body in _build_warmup_methods():
         try:
             url = f"{base_url}/{method}"
             async with asyncio.timeout(WARMUP_TIMEOUT):
@@ -551,7 +604,7 @@ async def run_warmup_sequence(http_client: httpx.AsyncClient, base_url: str) -> 
         await asyncio.sleep(random.uniform(0.05, 0.2))
 
     lib_logger.info(
-        f"Warmup complete ({success_count}/{len(WARMUP_METHODS)} succeeded)"
+        f"Warmup complete ({success_count} succeeded)"
     )
     return success_count > 0
 
@@ -1867,6 +1920,9 @@ class AntigravityProvider(
         # Version auto-update (one-shot async fetch on first request)
         self._version_fetched = False
 
+        # Warmup/heartbeat tracking — per-credential, triggered on first successful request
+        self._warmed_up_credentials: set = set()
+
         # Base URL management
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
@@ -2225,6 +2281,42 @@ class AntigravityProvider(
         """Reset to primary base URL."""
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
+
+    async def _ensure_warmed_up(
+        self, credential_path: str, token: str, base_url: str
+    ) -> None:
+        """
+        Fire warmup sequence + heartbeat for a credential on first successful request.
+
+        Keyed by credential_path (not token) so warmup survives token rotation.
+        Fired as a non-blocking background task so it doesn't delay the actual call.
+        Uses the full Chrome static headers to match real webview fingerprint
+        (zerogravity backend.rs STATIC_HEADERS pattern).
+        """
+        if credential_path in self._warmed_up_credentials:
+            return
+        if not WARMUP_ENABLED and not HEARTBEAT_ENABLED:
+            return
+
+        self._warmed_up_credentials.add(credential_path)
+
+        async def _run_warmup_and_heartbeat() -> None:
+            warmup_client = httpx.AsyncClient(
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "*/*",
+                    **ANTIGRAVITY_CHROME_STATIC_HEADERS,
+                },
+                timeout=httpx.Timeout(connect=10.0, read=10.0, write=10.0, pool=10.0),
+            )
+            try:
+                await run_warmup_sequence(warmup_client, base_url)
+                await start_heartbeat(warmup_client, base_url)
+            except Exception as e:
+                lib_logger.debug(f"[Antigravity] Warmup/heartbeat error: {e}")
+
+        asyncio.create_task(_run_warmup_and_heartbeat())
 
     async def _ensure_version_initialized(self, client: httpx.AsyncClient) -> None:
         """
@@ -3127,10 +3219,15 @@ class AntigravityProvider(
             effort = "high"
 
         # Gemini 3 Flash: minimal/low/medium/high
+        # Mapping mirrors zerogravity params.rs map_reasoning_effort_to_level()
         if is_gemini_3_flash:
             if effort in ("disable", "off", "none"):
+                # Bug fix: disable must set include_thoughts=False (zerogravity 2acb91d)
+                return {"thinkingLevel": "minimal", "include_thoughts": False}
+            if effort == "minimal":
+                # Bug fix: "minimal" maps to "minimal" not "low" (zerogravity 2acb91d)
                 return {"thinkingLevel": "minimal", "include_thoughts": True}
-            if effort in ("minimal", "low"):
+            if effort == "low":
                 return {"thinkingLevel": "low", "include_thoughts": True}
             if effort in ("low_medium", "medium"):
                 return {"thinkingLevel": "medium", "include_thoughts": True}
@@ -4723,9 +4820,17 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 or str(part.get("thought")).lower() == "true"
             )
 
-            # Accumulate signature for Claude caching
+            # Accumulate signature for Claude caching (from thought parts only — used for replay)
             if has_sig and is_thought and accumulator is not None:
                 accumulator["thought_signature"] = part["thoughtSignature"]
+
+            # Collect ALL signatures from ALL part types (thinking.rs phase 2 — 29da296)
+            # Zerogravity collects from thought, text, and functionCall parts alike.
+            if has_sig and accumulator is not None:
+                sig = part["thoughtSignature"]
+                sigs: list = accumulator.setdefault("thought_signatures", [])
+                if sig not in sigs:
+                    sigs.append(sig)
 
             # Skip standalone signature parts
             if has_sig and not has_func and (not has_text or not part.get("text")):
@@ -5233,6 +5338,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Get access token first (needed for project discovery)
         token = await self.get_valid_token(credential_path)
 
+        # Trigger warmup + heartbeat on first use of this credential (non-blocking)
+        asyncio.ensure_future(
+            self._ensure_warmed_up(credential_path, token, self._get_base_url())
+        )
+
         # Discover real project ID
         litellm_params = kwargs.get("litellm_params", {}) or {}
         project_id = await self._discover_project_id(
@@ -5355,6 +5465,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         collected_content = ""
         collected_reasoning = ""
         collected_tool_calls: List[Dict[str, Any]] = []
+        collected_thought_sigs: List[str] = []
         last_chunk = None
         usage_info = None
 
@@ -5372,6 +5483,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     if delta.get("tool_calls"):
                         for tc in delta["tool_calls"]:
                             self._accumulate_tool_call(tc, collected_tool_calls)
+                    # Collect thought_signatures from final synthetic chunk (29da296)
+                    psf = delta.get("provider_specific_fields", {}) or {}
+                    for sig in psf.get("thought_signatures", []):
+                        if sig not in collected_thought_sigs:
+                            collected_thought_sigs.append(sig)
                 else:
                     # Handle as object with attributes
                     if hasattr(delta, "content") and delta.content:
@@ -5381,6 +5497,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     if hasattr(delta, "tool_calls") and delta.tool_calls:
                         for tc in delta.tool_calls:
                             self._accumulate_tool_call(tc, collected_tool_calls)
+                    psf = getattr(delta, "provider_specific_fields", None) or {}
+                    for sig in (psf.get("thought_signatures", []) if isinstance(psf, dict) else []):
+                        if sig not in collected_thought_sigs:
+                            collected_thought_sigs.append(sig)
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_info = chunk.usage
 
@@ -5394,6 +5514,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             message_dict["content"] = collected_content
         if collected_reasoning:
             message_dict["reasoning_content"] = collected_reasoning
+        if collected_thought_sigs:
+            message_dict["provider_specific_fields"] = {
+                "thought_signatures": collected_thought_sigs
+            }
         if collected_tool_calls:
             # Convert to proper format
             message_dict["tool_calls"] = [
@@ -5539,6 +5663,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         accumulator = {
             "reasoning_content": "",
             "thought_signature": "",
+            "thought_signatures": [],  # ALL signatures across ALL parts (29da296)
             "text_content": "",
             "tool_calls": [],
             "tool_idx": 0,  # Track tool call index across chunks
@@ -5622,13 +5747,24 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if accumulator.get("yielded_any"):
             # Always emit a final chunk with usage for proper OpenAI format
             # This ensures finish_reason and usage are only on the final chunk
+            # Build final synthetic chunk delta
+            # Include thought_signatures from ALL parts (zerogravity thinking.rs phase 2 — 29da296)
+            final_delta: Dict[str, Any] = {}
+            thought_sigs = accumulator.get("thought_signatures", [])
+            if thought_sigs:
+                final_delta["provider_specific_fields"] = {
+                    "thought_signatures": thought_sigs
+                }
+
             final_chunk = {
                 "id": accumulator.get("response_id")
                 or f"chatcmpl-{uuid.uuid4().hex[:24]}",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                "choices": [
+                    {"index": 0, "delta": final_delta, "finish_reason": None}
+                ],
             }
             # Include accumulated usage on final chunk
             if accumulator.get("last_usage"):
