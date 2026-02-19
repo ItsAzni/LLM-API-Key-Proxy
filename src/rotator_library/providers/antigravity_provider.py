@@ -114,6 +114,11 @@ _ua_platform = "darwin"
 _ua_arch = "arm64"
 _metadata_platform = "MACOS"
 
+# OS-specific User-Agent parts (matching ZeroGravity constants.rs)
+_UA_OS_MACOS = "Macintosh; Intel Mac OS X 10_15_7"
+_UA_OS_WINDOWS = "Windows NT 10.0; Win64; x64"
+_UA_OS_LINUX = "X11; Linux x86_64"
+
 # Antigravity base URLs with fallback order
 # Priority: sandbox daily → daily (non-sandbox) → production
 BASE_URLS = [
@@ -122,19 +127,126 @@ BASE_URLS = [
     "https://cloudcode-pa.googleapis.com/v1internal",  # Production fallback
 ]
 
+# Version constants - updated dynamically from auto-updater API
+# These match ZeroGravity's detected versions from product.json
+_ANTIGRAVITY_VERSION = "1.107.0"
+_CHROME_VERSION = "142.0.7444.175"
+_ELECTRON_VERSION = "39.2.3"
+_CLIENT_VERSION = "1.16.5"
+_CHROME_MAJOR = _CHROME_VERSION.split(".")[0] if _CHROME_VERSION else "142"
+
+# Runtime-mutable versions (set by fetch_latest_version at startup)
+_runtime_antigravity_version: str = _ANTIGRAVITY_VERSION
+_runtime_chrome_version: str = _CHROME_VERSION
+_runtime_electron_version: str = _ELECTRON_VERSION
+_runtime_client_version: str = _CLIENT_VERSION
+_runtime_chrome_major: str = _CHROME_MAJOR
+
+
+def get_stealth_versions() -> dict:
+    """Return current stealth version info."""
+    return {
+        "antigravity": _runtime_antigravity_version,
+        "chrome": _runtime_chrome_version,
+        "electron": _runtime_electron_version,
+        "client": _runtime_client_version,
+        "chrome_major": _runtime_chrome_major,
+    }
+
+
+def update_stealth_versions(
+    antigravity: Optional[str] = None,
+    chrome: Optional[str] = None,
+    electron: Optional[str] = None,
+    client: Optional[str] = None,
+) -> None:
+    """Update runtime stealth versions (called after version fetch)."""
+    global _runtime_antigravity_version, _runtime_chrome_version
+    global _runtime_electron_version, _runtime_client_version, _runtime_chrome_major
+
+    if antigravity is not None:
+        _runtime_antigravity_version = antigravity
+    if chrome is not None:
+        _runtime_chrome_version = chrome
+        _runtime_chrome_major = chrome.split(".")[0] if chrome else _CHROME_MAJOR
+    if electron is not None:
+        _runtime_electron_version = electron
+    if client is not None:
+        _runtime_client_version = client
+
+
+def build_stealth_user_agent(use_legacy: bool = False) -> str:
+    """
+    Build User-Agent string matching real Electron/Chrome webview.
+
+    Ported from ZeroGravity constants.rs USER_AGENT construction.
+    Uses macOS as default platform for consistency.
+    """
+    if use_legacy:
+        return (
+            f"Mozilla/5.0 ({_UA_OS_MACOS}) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Antigravity/{_runtime_antigravity_version} "
+            f"Chrome/{_runtime_chrome_version} Electron/{_runtime_electron_version} Safari/537.36"
+        )
+    return f"antigravity/{_runtime_antigravity_version} {_ua_platform}/{_ua_arch}"
+
+
+def build_sec_ch_ua_headers() -> Dict[str, str]:
+    """
+    Build Chrome sec-ch-ua headers for fingerprinting.
+
+    These headers are sent by real Chrome/Electron browsers and help
+    match the expected fingerprint of a legitimate Antigravity client.
+
+    Format matches zerogravity constants.rs exactly:
+      "Not_A Brand";v="99", "Chromium";v="{CHROME_MAJOR}"
+    Note: underscore in "Not_A Brand" (not dot), 2 entries only (no "Google Chrome").
+    """
+    chrome_major = _runtime_chrome_major
+    return {
+        "sec-ch-ua": f'"Not_A Brand";v="99", "Chromium";v="{chrome_major}"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    }
+
+
 # Required headers for Antigravity API calls
 # These headers are CRITICAL for gemini-3-pro-high/low to work
 # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
-ANTIGRAVITY_USER_AGENT = f"antigravity/1.104.0 {_ua_platform}/{_ua_arch}"
+ANTIGRAVITY_USER_AGENT = f"antigravity/{_ANTIGRAVITY_VERSION} {_ua_platform}/{_ua_arch}"
 ANTIGRAVITY_USER_AGENT_LEGACY = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Antigravity/1.104.0 Chrome/138.0.7204.235 "
-    "Electron/37.3.1 Safari/537.36"
+    f"Mozilla/5.0 ({_UA_OS_MACOS}) AppleWebKit/537.36 "
+    f"(KHTML, like Gecko) Antigravity/{_ANTIGRAVITY_VERSION} "
+    f"Chrome/{_CHROME_VERSION} Electron/{_ELECTRON_VERSION} Safari/537.36"
 )
 ANTIGRAVITY_HEADERS = {
     "User-Agent": ANTIGRAVITY_USER_AGENT,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_metadata_platform}","pluginType":"GEMINI"}}',
+}
+
+# Chrome header emission order from zerogravity backend.rs STATIC_HEADERS:
+#   Origin → User-Agent → Accept → Accept-Encoding → Accept-Language
+#   → sec-ch-ua → sec-ch-ua-mobile → sec-ch-ua-platform
+#   → Sec-Fetch-Dest → Sec-Fetch-Mode → Sec-Fetch-Site
+#   → Priority → Connect-Protocol-Version
+ANTIGRAVITY_CHROME_STATIC_HEADERS = {
+    "Origin": "vscode-file://vscode-app",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Language": "en-US",
+    **build_sec_ch_ua_headers(),
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+    "Priority": "u=1, i",
+    "Connect-Protocol-Version": "1",
+}
+
+ANTIGRAVITY_HEADERS_STEALTH = {
+    "User-Agent": ANTIGRAVITY_USER_AGENT_LEGACY,
+    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+    "Client-Metadata": f'{{"ideType":"ANTIGRAVITY","platform":"{_metadata_platform}","pluginType":"GEMINI"}}',
+    **ANTIGRAVITY_CHROME_STATIC_HEADERS,
 }
 
 # Headers to strip from incoming requests for privacy/security
@@ -204,11 +316,347 @@ MALFORMED_CALL_RETRY_DELAY = env_int("ANTIGRAVITY_MALFORMED_CALL_DELAY", 1)
 CAPACITY_EXHAUSTED_MAX_ATTEMPTS = max(1, env_int("ANTIGRAVITY_503_MAX_ATTEMPTS", 10))
 CAPACITY_EXHAUSTED_RETRY_DELAY = env_int("ANTIGRAVITY_503_RETRY_DELAY", 5)
 
+# 429 with server-provided retry delay configuration
+# For quota errors with explicit retry timing, retry inline on the same credential
+# when delay is short, then fall back to normal credential cooldown/rotation.
+QUOTA_DELAY_RETRY_MAX_ATTEMPTS = max(
+    1, env_int("ANTIGRAVITY_QUOTA_DELAY_RETRY_ATTEMPTS", 2)
+)
+QUOTA_DELAY_RETRY_MAX_SECONDS = max(
+    1, env_int("ANTIGRAVITY_QUOTA_DELAY_RETRY_MAX_SECONDS", 120)
+)
+QUOTA_DELAY_RETRY_JITTER_MS = max(
+    0, env_int("ANTIGRAVITY_QUOTA_DELAY_RETRY_JITTER_MS", 250)
+)
+
+# Per-model rate limiter configuration (ported from ZeroGravity rate_limiter.rs)
+# When consecutive 429s occur, enter cooldown with incremental backoff:
+#   1 → 5s,  2 → 15s,  3 → 30s,  4 → 60s,  5+ → 120s
+MODEL_RATE_LIMIT_ENABLED = env_bool("ANTIGRAVITY_MODEL_RATE_LIMIT_ENABLED", True)
+MODEL_RATE_LIMIT_BACKOFF_SCHEDULE = [5, 15, 30, 60, 120]
+
+# Warmup/heartbeat configuration (ported from ZeroGravity warmup.rs)
+WARMUP_ENABLED = env_bool("ANTIGRAVITY_WARMUP_ENABLED", True)
+WARMUP_TIMEOUT = env_int("ANTIGRAVITY_WARMUP_TIMEOUT", 5)
+HEARTBEAT_ENABLED = env_bool("ANTIGRAVITY_HEARTBEAT_ENABLED", True)
+HEARTBEAT_INTERVAL_SECONDS = env_int("ANTIGRAVITY_HEARTBEAT_INTERVAL", 30)
+HEARTBEAT_JITTER_MS = env_int("ANTIGRAVITY_HEARTBEAT_JITTER_MS", 500)
+
+# Stealth/TLS fingerprinting configuration
+STEALTH_ENABLED = env_bool("ANTIGRAVITY_STEALTH_ENABLED", True)
+STEALTH_CHROME_VERSION = os.environ.get(
+    "ANTIGRAVITY_STEALTH_CHROME_VERSION", "chrome136"
+)
+
+
+def create_stealth_client(
+    headers: Optional[Dict[str, str]] = None,
+    proxy: Optional[str] = None,
+    timeout: float = 30.0,
+    http2: bool = True,
+) -> Any:
+    """
+    Create an HTTP client with TLS fingerprinting.
+
+    If curl_cffi is available and STEALTH_ENABLED is True, returns a
+    StealthAsyncClient that produces Chrome-identical TLS signatures.
+    Otherwise, falls back to httpx.AsyncClient.
+
+    Args:
+        headers: Default headers for all requests
+        proxy: Proxy URL (e.g., "http://127.0.0.1:8080")
+        timeout: Request timeout in seconds
+        http2: Enable HTTP/2 support
+
+    Returns:
+        StealthAsyncClient or httpx.AsyncClient
+    """
+    if STEALTH_ENABLED:
+        try:
+            from .utilities.stealth_client import (
+                StealthAsyncClient,
+                is_tls_fingerprinting_available,
+            )
+
+            if is_tls_fingerprinting_available():
+                lib_logger.info(
+                    f"Using stealth client with {STEALTH_CHROME_VERSION} TLS fingerprint"
+                )
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                return StealthAsyncClient(
+                    impersonate=STEALTH_CHROME_VERSION,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=timeout,
+                    http2=http2,
+                )
+        except ImportError:
+            pass
+
+    lib_logger.debug("Using standard httpx client (TLS fingerprinting disabled)")
+    return httpx.AsyncClient(
+        headers=headers,
+        proxy=proxy,
+        timeout=timeout,
+        http2=http2,
+    )
+
+
+# =============================================================================
+# PER-MODEL RATE LIMITER (ported from ZeroGravity rate_limiter.rs)
+# =============================================================================
+# PER-MODEL RATE LIMITER (ported from ZeroGravity rate_limiter.rs)
+# =============================================================================
+
+
+class ModelRateLimiter:
+    """
+    Per-model rate limiter with incremental backoff.
+
+    When Google returns RESOURCE_EXHAUSTED (429) for a model, the provider enters
+    a cooldown period for that model. During cooldown, new requests to that model
+    are rejected at the proxy level without hitting Google, preventing tight retry
+    loops that burn quota.
+
+    Backoff schedule (consecutive 429s → cooldown):
+      1 → 5s,  2 → 15s,  3 → 30s,  4 → 60s,  5+ → 120s
+    """
+
+    def __init__(self):
+        self._state: Dict[str, Dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def check_rate_limit(self, model: str) -> Optional[float]:
+        """
+        Check if a model is currently in cooldown.
+
+        Returns None if request can proceed, or seconds until cooldown expires.
+        """
+        if not MODEL_RATE_LIMIT_ENABLED:
+            return None
+
+        async with self._lock:
+            if model not in self._state:
+                return None
+
+            cd = self._state[model]
+            now = time.time()
+            cooldown_until = cd.get("cooldown_until", 0)
+
+            if now < cooldown_until:
+                remaining = cooldown_until - now + 1
+                return remaining
+
+            return None
+
+    async def record_exhausted(
+        self, model: str, server_delay: Optional[float] = None
+    ) -> None:
+        """
+        Record a RESOURCE_EXHAUSTED response for a model.
+        Increments consecutive counter and sets cooldown with backoff.
+
+        If server_delay is provided (in seconds), use it instead of backoff schedule.
+        """
+        if not MODEL_RATE_LIMIT_ENABLED:
+            return
+
+        async with self._lock:
+            if model not in self._state:
+                self._state[model] = {
+                    "consecutive_429s": 0,
+                    "cooldown_until": 0,
+                }
+
+            entry = self._state[model]
+            entry["consecutive_429s"] += 1
+
+            if server_delay is not None:
+                # Add ~10% jitter with a 200ms floor to avoid thundering-herd retries
+                # Matches zerogravity polling.rs: server_delay + uniform(0, max(0.2, delay*0.1))
+                jitter = max(0.2, server_delay * 0.1)
+                cooldown = server_delay + random.uniform(0, jitter)
+                lib_logger.info(
+                    f"Rate limiter: model {model} using server delay {server_delay:.1f}s "
+                    f"(+{cooldown - server_delay:.2f}s jitter)"
+                )
+            else:
+                consecutive = entry["consecutive_429s"]
+                backoff_idx = min(
+                    consecutive - 1, len(MODEL_RATE_LIMIT_BACKOFF_SCHEDULE) - 1
+                )
+                cooldown = MODEL_RATE_LIMIT_BACKOFF_SCHEDULE[backoff_idx]
+                lib_logger.warning(
+                    f"Rate limiter: model {model} cooldown {cooldown}s "
+                    f"(consecutive 429 #{consecutive})"
+                )
+
+            entry["cooldown_until"] = time.time() + cooldown
+
+    async def record_success(self, model: str) -> None:
+        """Record a successful response, resetting the consecutive counter."""
+        if not MODEL_RATE_LIMIT_ENABLED:
+            return
+
+        async with self._lock:
+            if model in self._state:
+                del self._state[model]
+                lib_logger.debug(
+                    f"Rate limiter: model {model} recovered, reset cooldown"
+                )
+
+
+# Global rate limiter instance
+_model_rate_limiter: Optional[ModelRateLimiter] = None
+
+
+def get_model_rate_limiter() -> ModelRateLimiter:
+    """Get or create the global model rate limiter."""
+    global _model_rate_limiter
+    if _model_rate_limiter is None:
+        _model_rate_limiter = ModelRateLimiter()
+    return _model_rate_limiter
+
+
+# =============================================================================
+# WARMUP SEQUENCE (ported from ZeroGravity warmup.rs + 7909c96)
+# =============================================================================
+
+# Order matches real AG extension.js init flow (reverse-engineered, commit 7909c96).
+# "RecordEvent" body is built dynamically at call time (needs current unix_ms).
+_WARMUP_METHODS_STATIC = [
+    # Step 4: RegisterGdmUser — always called, even if user already exists
+    ("RegisterGdmUser", {}),
+    # Step 5: SetBaseExperiments — empty experiment config
+    ("SetBaseExperiments", {"experimentConfig": {}}),
+    # Step 7-8: status and panel init
+    ("GetUserStatus", {}),
+    ("InitializeCascadePanelState", {}),
+    # Step 9: first heartbeat
+    ("Heartbeat", {}),
+    # Step 10: LS_STARTUP event (body injected dynamically below)
+    # Step 11+: additional status/config calls
+    ("GetStatus", {}),
+    ("GetCascadeModelConfigs", {}),
+    ("GetCascadeModelConfigData", {}),
+    ("GetWorkspaceInfos", {}),
+    ("GetWorkingDirectories", {}),
+    ("GetAllCascadeTrajectories", {}),
+    ("GetMcpServerStates", {}),
+    ("GetWebDocsOptions", {}),
+    ("GetRepoInfos", {}),
+    ("GetAllSkills", {}),
+]
+
+
+def _build_warmup_methods() -> list:
+    """Build the warmup method list with a live timestamp for RecordEvent."""
+    import time as _time
+
+    unix_ms = int(_time.time() * 1000)
+    record_event = (
+        "RecordEvent",
+        {"event": {"eventType": 0, "timestampUnixMs": unix_ms}},  # 0 = LS_STARTUP
+    )
+    # Insert RecordEvent after Heartbeat (index 4 → insert at 5)
+    methods = list(_WARMUP_METHODS_STATIC)
+    methods.insert(5, record_event)
+    return methods
+
+
+# Legacy alias kept for compatibility — use _build_warmup_methods() at call time
+WARMUP_METHODS = _WARMUP_METHODS_STATIC
+
+
+async def run_warmup_sequence(http_client: httpx.AsyncClient, base_url: str) -> bool:
+    """
+    Run the startup warmup sequence mimicking real Antigravity webview.
+
+    The real Electron webview calls these methods on startup. Without this,
+    the server sees a "user" that never initializes - an obvious bot fingerprint.
+
+    Args:
+        http_client: Async HTTP client to use
+        base_url: Base URL for Antigravity API
+
+    Returns:
+        True if at least one call succeeded, False otherwise
+    """
+    if not WARMUP_ENABLED:
+        return True
+
+    lib_logger.info("Running webview warmup sequence...")
+    success_count = 0
+
+    for method, body in _build_warmup_methods():
+        try:
+            url = f"{base_url}/{method}"
+            async with asyncio.timeout(WARMUP_TIMEOUT):
+                resp = await http_client.post(url, json=body)
+                if resp.status_code < 500:
+                    success_count += 1
+                    lib_logger.debug(f"Warmup {method}: {resp.status_code}")
+        except asyncio.TimeoutError:
+            lib_logger.debug(f"Warmup {method}: timeout")
+        except Exception as e:
+            lib_logger.debug(f"Warmup {method}: {e}")
+
+        await asyncio.sleep(random.uniform(0.05, 0.2))
+
+    lib_logger.info(
+        f"Warmup complete ({success_count} succeeded)"
+    )
+    return success_count > 0
+
+
+_heartbeat_task: Optional[asyncio.Task] = None
+
+
+async def start_heartbeat(
+    http_client: httpx.AsyncClient, base_url: str
+) -> asyncio.Task:
+    """
+    Spawn a background task that sends Heartbeat every ~30s ± jitter.
+
+    Matches real Antigravity webview's setInterval(30000) behavior.
+    """
+    global _heartbeat_task
+
+    if not HEARTBEAT_ENABLED:
+        _heartbeat_task = asyncio.create_task(asyncio.sleep(0))
+        return _heartbeat_task
+
+    async def heartbeat_loop():
+        while True:
+            interval = HEARTBEAT_INTERVAL_SECONDS + random.uniform(
+                -HEARTBEAT_JITTER_MS / 1000, HEARTBEAT_JITTER_MS / 1000
+            )
+            await asyncio.sleep(interval)
+
+            try:
+                url = f"{base_url}/Heartbeat"
+                async with asyncio.timeout(5):
+                    await http_client.post(url, json={})
+            except Exception:
+                pass
+
+    _heartbeat_task = asyncio.create_task(heartbeat_loop())
+    return _heartbeat_task
+
+
+def stop_heartbeat() -> None:
+    """Stop the heartbeat background task."""
+    global _heartbeat_task
+    if _heartbeat_task is not None:
+        _heartbeat_task.cancel()
+        _heartbeat_task = None
+
+
 # =============================================================================
 # INTERNAL RETRY COUNTING (for usage tracking)
 # =============================================================================
 # Tracks the number of API attempts made per request, including internal retries
-# for empty responses, bare 429s, and malformed function calls.
+# for empty responses, 429s, and malformed function calls.
 #
 # Uses ContextVar for thread-safety: each async task (request) gets its own
 # isolated value, so concurrent requests don't interfere with each other.
@@ -1272,66 +1720,88 @@ class AntigravityProvider(
         """
         import re as regex_module
 
-        def parse_duration(duration_str: str) -> Optional[int]:
-            """Parse duration strings like '143h4m52.73s' or '515092.73s' to seconds.
+        def parse_duration(duration_value: Any) -> Optional[int]:
+            """Parse Go/Google duration formats into whole seconds."""
+            if duration_value is None:
+                return None
 
-            Also handles millisecond format: '290.979975ms' -> 0 seconds (rounded).
-            Returns 0 for sub-second durations (not None), as 0 is a valid value.
-            """
+            # Structured protobuf form: {"seconds": "123", "nanos": 456000000}
+            if isinstance(duration_value, dict):
+                try:
+                    seconds = float(duration_value.get("seconds", 0) or 0)
+                    nanos = float(duration_value.get("nanos", 0) or 0)
+                    total = seconds + (nanos / 1_000_000_000.0)
+                    if total > 0:
+                        return max(1, int(total))
+                    return 0
+                except (TypeError, ValueError):
+                    return None
+
+            duration_str = str(duration_value).strip().strip('"')
             if not duration_str:
                 return None
 
-            # Handle pure milliseconds format: "290.979975ms"
-            # MUST check this BEFORE checking 'm' for minutes to avoid misinterpreting 'ms'
-            ms_match = regex_module.match(r"^([\d.]+)ms$", duration_str)
-            if ms_match:
-                ms_value = float(ms_match.group(1))
-                # Convert milliseconds to seconds, round up to at least 1 if > 0
-                seconds = ms_value / 1000.0
-                return max(1, int(seconds)) if seconds > 0 else 0
+            # Plain number (seconds)
+            try:
+                as_float = float(duration_str)
+                if as_float > 0:
+                    return max(1, int(as_float))
+                return 0
+            except ValueError:
+                pass
 
-            # Handle pure seconds format: "515092.730699158s" or "0.290979975s"
-            pure_seconds_match = regex_module.match(r"^([\d.]+)s$", duration_str)
-            if pure_seconds_match:
-                seconds = float(pure_seconds_match.group(1))
-                # For sub-second values, round up to 1 to avoid immediate retry floods
-                return max(1, int(seconds)) if seconds > 0 else 0
-
-            # Handle compound format: "143h4m52.730699158s"
-            # Note: 'm' here means minutes, not milliseconds (ms is handled above)
+            # Unit-based duration (supports: 754ms, 2.4s, 16m30s, 2h57m16.9s, 5h20m)
             total_seconds = 0.0
-            patterns = [
-                (r"(\d+)h", 3600),  # hours
-                (
-                    r"(\d+)m(?!s)",
-                    60,
-                ),  # minutes - negative lookahead to avoid matching 'ms'
-                (
-                    r"([\d.]+)s$",
-                    1,
-                ),  # seconds - anchor to end to avoid matching 's' in 'ms'
-            ]
-            for pattern, multiplier in patterns:
-                match = regex_module.search(pattern, duration_str)
-                if match:
-                    total_seconds += float(match.group(1)) * multiplier
+            found_unit = False
+            for match in regex_module.finditer(r"([\d.]+)(ms|h|m|s)", duration_str):
+                found_unit = True
+                value = float(match.group(1))
+                unit = match.group(2)
+                if unit == "h":
+                    total_seconds += value * 3600
+                elif unit == "m":
+                    total_seconds += value * 60
+                elif unit == "s":
+                    total_seconds += value
+                elif unit == "ms":
+                    total_seconds += value / 1000.0
 
-            # Return 0 explicitly for very small values (it's valid, not "no value")
+            if not found_unit:
+                return None
             if total_seconds > 0:
                 return max(1, int(total_seconds))
-            return None
+            return 0
+
+        def parse_timestamp_delay(timestamp_str: Any) -> Optional[int]:
+            """Parse quotaResetTimeStamp and return seconds until reset."""
+            if not timestamp_str:
+                return None
+            try:
+                reset_dt = datetime.fromisoformat(
+                    str(timestamp_str).replace("Z", "+00:00")
+                )
+                delta = reset_dt.timestamp() - time.time()
+                # If timestamp is in the past, keep a tiny floor to avoid retry storms
+                if delta <= 0:
+                    return 1
+                return max(1, int(delta))
+            except (ValueError, AttributeError, TypeError):
+                return None
 
         # Get error body from exception if not provided
         body = error_body
         if not body:
             # Try to extract from various exception attributes
-            if hasattr(error, "response") and hasattr(error.response, "text"):
-                body = error.response.text
-            elif hasattr(error, "body"):
-                body = str(error.body)
-            elif hasattr(error, "message"):
-                body = str(error.message)
-            else:
+            response = getattr(error, "response", None)
+            if response is not None:
+                response_text = getattr(response, "text", None)
+                if response_text:
+                    body = str(response_text)
+            if not body and hasattr(error, "body"):
+                body = str(getattr(error, "body"))
+            if not body and hasattr(error, "message"):
+                body = str(getattr(error, "message"))
+            if not body:
                 body = str(error)
 
         # Try to find JSON in the body
@@ -1348,8 +1818,10 @@ class AntigravityProvider(
         # Navigate to error.details
         error_obj = data.get("error", data)
         details = error_obj.get("details", [])
+        if not isinstance(details, list):
+            details = []
 
-        result = {
+        result: Dict[str, Any] = {
             "retry_after": None,
             "reason": None,
             "reset_timestamp": None,
@@ -1357,45 +1829,80 @@ class AntigravityProvider(
         }
 
         for detail in details:
-            detail_type = detail.get("@type", "")
+            if not isinstance(detail, dict):
+                continue
 
-            # Parse RetryInfo - most authoritative source for retry delay
-            if "RetryInfo" in detail_type:
+            detail_type = str(detail.get("@type", ""))
+            metadata = detail.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            # Reason can come from ErrorInfo; keep first non-empty value
+            if not result["reason"] and detail.get("reason"):
+                result["reason"] = detail.get("reason")
+
+            # Capture reset timestamp for logging and authoritative reset time
+            reset_ts_str = metadata.get("quotaResetTimeStamp") or detail.get(
+                "quotaResetTimeStamp"
+            )
+            if reset_ts_str:
+                result["reset_timestamp"] = str(reset_ts_str)
+                try:
+                    reset_dt = datetime.fromisoformat(
+                        str(reset_ts_str).replace("Z", "+00:00")
+                    )
+                    result["quota_reset_timestamp"] = reset_dt.timestamp()
+                except (ValueError, AttributeError, TypeError):
+                    pass
+
+            # Parse retry delay by priority:
+            #   1) RetryInfo.retryDelay
+            #   2) ErrorInfo.metadata.quotaResetDelay
+            #   3) ErrorInfo.metadata.quotaResetTimeStamp (delta)
+            if result["retry_after"] is None:
                 retry_delay = detail.get("retryDelay")
-                if retry_delay:
+                if retry_delay is not None:
                     parsed = parse_duration(retry_delay)
-                    if parsed is not None:  # 0 is valid, only None means "no value"
+                    if parsed is not None:
                         result["retry_after"] = parsed
 
-            # Parse ErrorInfo - contains reason and quota reset metadata
-            elif "ErrorInfo" in detail_type:
-                result["reason"] = detail.get("reason")
-                metadata = detail.get("metadata", {})
+            if result["retry_after"] is None:
+                quota_delay = metadata.get("quotaResetDelay") or detail.get(
+                    "quotaResetDelay"
+                )
+                if quota_delay is not None:
+                    parsed = parse_duration(quota_delay)
+                    if parsed is not None:
+                        result["retry_after"] = parsed
 
-                # Get quotaResetDelay as fallback if RetryInfo not present
-                if result["retry_after"] is None:
-                    quota_delay = metadata.get("quotaResetDelay")
-                    if quota_delay:
-                        parsed = parse_duration(quota_delay)
-                        if parsed is not None:  # 0 is valid, only None means "no value"
-                            result["retry_after"] = parsed
+            if result["retry_after"] is None and reset_ts_str:
+                parsed = parse_timestamp_delay(reset_ts_str)
+                if parsed is not None:
+                    result["retry_after"] = parsed
 
-                # Capture reset timestamp for logging and authoritative reset time
-                reset_ts_str = metadata.get("quotaResetTimeStamp")
-                result["reset_timestamp"] = reset_ts_str
+            # If this detail explicitly declares RetryInfo, prioritize it and continue
+            if "RetryInfo" in detail_type and result["retry_after"] is not None:
+                break
 
-                # Parse ISO timestamp to Unix timestamp for usage tracking
-                if reset_ts_str:
-                    try:
-                        # Handle ISO format: "2025-12-11T22:53:16Z"
-                        reset_dt = datetime.fromisoformat(
-                            reset_ts_str.replace("Z", "+00:00")
-                        )
-                        result["quota_reset_timestamp"] = reset_dt.timestamp()
-                    except (ValueError, AttributeError) as e:
-                        lib_logger.warning(
-                            f"Failed to parse quota reset timestamp '{reset_ts_str}': {e}"
-                        )
+        # Fallback: parse human-readable message if details are incomplete
+        if result["retry_after"] is None:
+            message = error_obj.get("message")
+            if isinstance(message, str) and message:
+                message_match = regex_module.search(
+                    r"(?:quota will reset after|reset after|retry after)\s*([\dhms.]+)",
+                    message,
+                    regex_module.IGNORECASE,
+                )
+                if message_match:
+                    parsed = parse_duration(message_match.group(1))
+                    if parsed is not None:
+                        result["retry_after"] = parsed
+
+        # Fallback reason from top-level status
+        if not result["reason"]:
+            status = error_obj.get("status")
+            if isinstance(status, str) and status:
+                result["reason"] = status
 
         # Return None if we couldn't extract retry_after
         if result["retry_after"] is None:
@@ -1412,6 +1919,9 @@ class AntigravityProvider(
 
         # Version auto-update (one-shot async fetch on first request)
         self._version_fetched = False
+
+        # Warmup/heartbeat tracking — per-credential, triggered on first successful request
+        self._warmed_up_credentials: set = set()
 
         # Base URL management
         self._base_url_index = 0
@@ -1772,6 +2282,42 @@ class AntigravityProvider(
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
 
+    async def _ensure_warmed_up(
+        self, credential_path: str, token: str, base_url: str
+    ) -> None:
+        """
+        Fire warmup sequence + heartbeat for a credential on first successful request.
+
+        Keyed by credential_path (not token) so warmup survives token rotation.
+        Fired as a non-blocking background task so it doesn't delay the actual call.
+        Uses the full Chrome static headers to match real webview fingerprint
+        (zerogravity backend.rs STATIC_HEADERS pattern).
+        """
+        if credential_path in self._warmed_up_credentials:
+            return
+        if not WARMUP_ENABLED and not HEARTBEAT_ENABLED:
+            return
+
+        self._warmed_up_credentials.add(credential_path)
+
+        async def _run_warmup_and_heartbeat() -> None:
+            warmup_client = httpx.AsyncClient(
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "*/*",
+                    **ANTIGRAVITY_CHROME_STATIC_HEADERS,
+                },
+                timeout=httpx.Timeout(connect=10.0, read=10.0, write=10.0, pool=10.0),
+            )
+            try:
+                await run_warmup_sequence(warmup_client, base_url)
+                await start_heartbeat(warmup_client, base_url)
+            except Exception as e:
+                lib_logger.debug(f"[Antigravity] Warmup/heartbeat error: {e}")
+
+        asyncio.create_task(_run_warmup_and_heartbeat())
+
     async def _ensure_version_initialized(self, client: httpx.AsyncClient) -> None:
         """
         Fetch latest Antigravity version on first request (one-shot).
@@ -1780,6 +2326,8 @@ class AntigravityProvider(
         1. Auto-updater API (plain text with semver)
         2. Changelog page scrape (first 5000 chars)
         3. Keep hardcoded fallback
+
+        Also updates stealth version constants for User-Agent and sec-ch-ua headers.
         """
         if self._version_fetched:
             return
@@ -1823,12 +2371,23 @@ class AntigravityProvider(
             if version:
                 set_antigravity_version(version)
 
+                # Update stealth version constants
+                update_stealth_versions(antigravity=version)
+
                 # Update module-level User-Agent to use fetched version
-                global ANTIGRAVITY_USER_AGENT
+                global ANTIGRAVITY_USER_AGENT, ANTIGRAVITY_USER_AGENT_LEGACY
                 ANTIGRAVITY_USER_AGENT = (
                     f"antigravity/{version} {_ua_platform}/{_ua_arch}"
                 )
+                ANTIGRAVITY_USER_AGENT_LEGACY = (
+                    f"Mozilla/5.0 ({_UA_OS_MACOS}) AppleWebKit/537.36 "
+                    f"(KHTML, like Gecko) Antigravity/{version} "
+                    f"Chrome/{_runtime_chrome_version} Electron/{_runtime_electron_version} Safari/537.36"
+                )
                 ANTIGRAVITY_HEADERS["User-Agent"] = ANTIGRAVITY_USER_AGENT
+                ANTIGRAVITY_HEADERS_STEALTH["User-Agent"] = (
+                    ANTIGRAVITY_USER_AGENT_LEGACY
+                )
 
                 if version != old_version:
                     lib_logger.info(
@@ -2660,10 +3219,15 @@ class AntigravityProvider(
             effort = "high"
 
         # Gemini 3 Flash: minimal/low/medium/high
+        # Mapping mirrors zerogravity params.rs map_reasoning_effort_to_level()
         if is_gemini_3_flash:
             if effort in ("disable", "off", "none"):
+                # Bug fix: disable must set include_thoughts=False (zerogravity 2acb91d)
+                return {"thinkingLevel": "minimal", "include_thoughts": False}
+            if effort == "minimal":
+                # Bug fix: "minimal" maps to "minimal" not "low" (zerogravity 2acb91d)
                 return {"thinkingLevel": "minimal", "include_thoughts": True}
-            if effort in ("minimal", "low"):
+            if effort == "low":
                 return {"thinkingLevel": "low", "include_thoughts": True}
             if effort in ("low_medium", "medium"):
                 return {"thinkingLevel": "medium", "include_thoughts": True}
@@ -4256,9 +4820,17 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 or str(part.get("thought")).lower() == "true"
             )
 
-            # Accumulate signature for Claude caching
+            # Accumulate signature for Claude caching (from thought parts only — used for replay)
             if has_sig and is_thought and accumulator is not None:
                 accumulator["thought_signature"] = part["thoughtSignature"]
+
+            # Collect ALL signatures from ALL part types (thinking.rs phase 2 — 29da296)
+            # Zerogravity collects from thought, text, and functionCall parts alike.
+            if has_sig and accumulator is not None:
+                sig = part["thoughtSignature"]
+                sigs: list = accumulator.setdefault("thought_signatures", [])
+                if sig not in sigs:
+                    sigs.append(sig)
 
             # Skip standalone signature parts
             if has_sig and not has_func and (not has_text or not part.get("text")):
@@ -4766,6 +5338,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Get access token first (needed for project discovery)
         token = await self.get_valid_token(credential_path)
 
+        # Trigger warmup + heartbeat on first use of this credential (non-blocking)
+        asyncio.ensure_future(
+            self._ensure_warmed_up(credential_path, token, self._get_base_url())
+        )
+
         # Discover real project ID
         litellm_params = kwargs.get("litellm_params", {}) or {}
         project_id = await self._discover_project_id(
@@ -4888,6 +5465,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         collected_content = ""
         collected_reasoning = ""
         collected_tool_calls: List[Dict[str, Any]] = []
+        collected_thought_sigs: List[str] = []
         last_chunk = None
         usage_info = None
 
@@ -4905,6 +5483,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     if delta.get("tool_calls"):
                         for tc in delta["tool_calls"]:
                             self._accumulate_tool_call(tc, collected_tool_calls)
+                    # Collect thought_signatures from final synthetic chunk (29da296)
+                    psf = delta.get("provider_specific_fields", {}) or {}
+                    for sig in psf.get("thought_signatures", []):
+                        if sig not in collected_thought_sigs:
+                            collected_thought_sigs.append(sig)
                 else:
                     # Handle as object with attributes
                     if hasattr(delta, "content") and delta.content:
@@ -4914,6 +5497,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     if hasattr(delta, "tool_calls") and delta.tool_calls:
                         for tc in delta.tool_calls:
                             self._accumulate_tool_call(tc, collected_tool_calls)
+                    psf = getattr(delta, "provider_specific_fields", None) or {}
+                    for sig in (psf.get("thought_signatures", []) if isinstance(psf, dict) else []):
+                        if sig not in collected_thought_sigs:
+                            collected_thought_sigs.append(sig)
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_info = chunk.usage
 
@@ -4927,6 +5514,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             message_dict["content"] = collected_content
         if collected_reasoning:
             message_dict["reasoning_content"] = collected_reasoning
+        if collected_thought_sigs:
+            message_dict["provider_specific_fields"] = {
+                "thought_signatures": collected_thought_sigs
+            }
         if collected_tool_calls:
             # Convert to proper format
             message_dict["tool_calls"] = [
@@ -5072,6 +5663,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         accumulator = {
             "reasoning_content": "",
             "thought_signature": "",
+            "thought_signatures": [],  # ALL signatures across ALL parts (29da296)
             "text_content": "",
             "tool_calls": [],
             "tool_idx": 0,  # Track tool call index across chunks
@@ -5155,13 +5747,24 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if accumulator.get("yielded_any"):
             # Always emit a final chunk with usage for proper OpenAI format
             # This ensures finish_reason and usage are only on the final chunk
+            # Build final synthetic chunk delta
+            # Include thought_signatures from ALL parts (zerogravity thinking.rs phase 2 — 29da296)
+            final_delta: Dict[str, Any] = {}
+            thought_sigs = accumulator.get("thought_signatures", [])
+            if thought_sigs:
+                final_delta["provider_specific_fields"] = {
+                    "thought_signatures": thought_sigs
+                }
+
             final_chunk = {
                 "id": accumulator.get("response_id")
                 or f"chatcmpl-{uuid.uuid4().hex[:24]}",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                "choices": [
+                    {"index": 0, "delta": final_delta, "finish_reason": None}
+                ],
             }
             # Include accumulated usage on final chunk
             if accumulator.get("last_usage"):
@@ -5230,12 +5833,15 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
         """
-        Wrapper around _handle_streaming that retries on empty responses, bare 429s,
+        Wrapper around _handle_streaming that retries on empty responses, 429s,
         and MALFORMED_FUNCTION_CALL errors.
 
         If the stream yields zero chunks (Antigravity returned nothing) or encounters
         a bare 429 (no retry info), retry up to EMPTY_RESPONSE_MAX_ATTEMPTS times
         before giving up.
+
+        If a 429 includes server retry timing and the delay is short enough,
+        retry inline on the same credential to avoid unnecessary rotation.
 
         If MALFORMED_FUNCTION_CALL is detected, inject corrective messages and retry
         up to MALFORMED_CALL_MAX_RETRIES times.
@@ -5249,8 +5855,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             "This may indicate a temporary service issue. Please try again."
         )
 
-        # Track malformed call retries (separate from empty response retries)
+        # Track retries by category
         malformed_retry_count = 0
+        quota_delay_retry_count = 0
         current_gemini_contents = gemini_contents
         current_payload = payload
 
@@ -5262,7 +5869,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # own limit via internal checks (EMPTY_RESPONSE_MAX_ATTEMPTS for empty/429,
         # CAPACITY_EXHAUSTED_MAX_ATTEMPTS for 503).
         max_loop_attempts = max(
-            EMPTY_RESPONSE_MAX_ATTEMPTS, CAPACITY_EXHAUSTED_MAX_ATTEMPTS
+            EMPTY_RESPONSE_MAX_ATTEMPTS,
+            CAPACITY_EXHAUSTED_MAX_ATTEMPTS,
+            QUOTA_DELAY_RETRY_MAX_ATTEMPTS + 1,
         )
         for attempt in range(max_loop_attempts):
             chunk_count = 0
@@ -5470,7 +6079,37 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                                 model=model,
                                 message=transient_429_msg,
                             )
-                    # Has retry info - real quota exhaustion, propagate for cooldown
+                    # Has retry info - retry inline if delay is short enough.
+                    retry_after = quota_info.get("retry_after")
+                    should_inline_retry = (
+                        isinstance(retry_after, int)
+                        and retry_after > 0
+                        and retry_after <= QUOTA_DELAY_RETRY_MAX_SECONDS
+                        and quota_delay_retry_count < QUOTA_DELAY_RETRY_MAX_ATTEMPTS
+                        and attempt < max_loop_attempts - 1
+                    )
+
+                    if should_inline_retry:
+                        quota_delay_retry_count += 1
+                        jitter_ms = (
+                            random.randint(0, QUOTA_DELAY_RETRY_JITTER_MS)
+                            if QUOTA_DELAY_RETRY_JITTER_MS > 0
+                            else 0
+                        )
+                        wait_seconds = retry_after + (jitter_ms / 1000.0)
+                        lib_logger.info(
+                            f"[Antigravity] 429 with retry info from {model}, "
+                            f"inline retry {quota_delay_retry_count}/"
+                            f"{QUOTA_DELAY_RETRY_MAX_ATTEMPTS} after "
+                            f"{wait_seconds:.2f}s (server={retry_after}s, "
+                            f"jitter={jitter_ms}ms)"
+                        )
+                        # Increment attempt count before retry (for usage tracking)
+                        _internal_attempt_count.set(_internal_attempt_count.get() + 1)
+                        await asyncio.sleep(wait_seconds)
+                        continue
+
+                    # Has retry info but no inline retry - propagate for cooldown/rotation.
                     lib_logger.debug(
                         f"429 with retry info - propagating for cooldown: {e}"
                     )
