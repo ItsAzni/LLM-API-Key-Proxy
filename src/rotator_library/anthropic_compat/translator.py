@@ -614,15 +614,14 @@ def translate_anthropic_request(request: AnthropicMessagesRequest) -> Dict[str, 
     # Handle Anthropic thinking config -> reasoning_effort translation
     # Only set reasoning_effort if thinking is explicitly configured
     if request.thinking:
-        if request.thinking.type == "enabled":
-            # Only set reasoning_effort if budget_tokens was specified
-            if request.thinking.budget_tokens is not None:
-                openai_request["reasoning_effort"] = _budget_to_reasoning_effort(
-                    request.thinking.budget_tokens, request.model
-                )
-            # If thinking enabled but no budget specified, don't set anything
-            # Let the provider decide the default
-        elif request.thinking.type == "disabled":
+        if request.thinking.type == "disabled":
             openai_request["reasoning_effort"] = "disable"
+        elif request.thinking.budget_tokens is not None:
+            # type can be "enabled", "adaptive", etc. — anything not "disabled" means on
+            openai_request["reasoning_effort"] = _budget_to_reasoning_effort(
+                request.thinking.budget_tokens, request.model
+            )
+        # If thinking enabled but no budget specified, don't set anything
+        # Let the provider decide the default
 
     return openai_request

@@ -1235,6 +1235,14 @@ async def anthropic_messages(
         )
 
     try:
+        # DEBUG: trace thinking field from Anthropic request
+        logging.getLogger("rotator_library").info(
+            "[/v1/messages] body.thinking=%s, body.max_tokens=%s, body.model=%s",
+            body.thinking,
+            body.max_tokens,
+            body.model,
+        )
+
         # Log the request to console
         log_request_to_console(
             url=str(request.url),

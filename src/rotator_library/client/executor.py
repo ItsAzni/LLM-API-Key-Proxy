@@ -55,7 +55,7 @@ from ..core.constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
 )
-from ..config.defaults import MAX_RETRIES_GITHUB_COPILOT
+from ..config.defaults import MAX_RETRIES_GITHUB_COPILOT, MAX_RETRIES_GITLAB_DUO
 from ..request_sanitizer import sanitize_request_payload
 from ..transaction_logger import TransactionLogger
 from ..failure_logger import log_failure
@@ -137,9 +137,12 @@ class RequestExecutor:
         """Get provider-specific max retries.
 
         GitHub Copilot uses a higher max retry count due to aggressive rate limiting.
+        GitLab Duo uses an even higher count due to transient 402/429 errors.
         """
         if provider == "github_copilot":
             return MAX_RETRIES_GITHUB_COPILOT
+        if provider == "gitlab_duo":
+            return MAX_RETRIES_GITLAB_DUO
         return self._max_retries
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:

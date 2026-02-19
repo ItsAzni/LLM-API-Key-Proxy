@@ -98,6 +98,21 @@ class AnthropicHandler:
         # Translate Anthropic request to OpenAI format
         openai_request = translate_anthropic_request(request)
 
+        # DEBUG: trace thinking config from Anthropic request
+        import logging as _logging
+        _logging.getLogger("rotator_library").info(
+            "[AnthropicHandler] request.thinking=%s, max_tokens=%s, model=%s",
+            request.thinking,
+            request.max_tokens,
+            request.model,
+        )
+
+        # Pass exact thinking budget for providers that handle it natively (e.g. GitLab Duo)
+        # This preserves the original budget_tokens without lossy reasoning_effort roundtrip
+        # Note: type can be "enabled", "adaptive", etc. — anything not "disabled" means thinking is on
+        if request.thinking and request.thinking.type != "disabled" and request.thinking.budget_tokens is not None:
+            openai_request["thinking_budget"] = request.thinking.budget_tokens
+
         # Pass parent log directory to acompletion for nested logging
         if anthropic_logger and anthropic_logger.log_dir:
             openai_request["_parent_log_dir"] = anthropic_logger.log_dir
