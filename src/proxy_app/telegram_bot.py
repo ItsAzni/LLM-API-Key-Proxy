@@ -353,7 +353,11 @@ def get_primary_window(windows: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Get the primary window (daily or api_authoritative) from windows dict."""
     if not windows:
         return None
-    return windows.get("daily") or windows.get("api_authoritative") or next(iter(windows.values()), None)
+    return (
+        windows.get("daily")
+        or windows.get("api_authoritative")
+        or next(iter(windows.values()), None)
+    )
 
 
 def get_window_remaining_pct(window: Optional[Dict[str, Any]]) -> Optional[int]:
@@ -380,6 +384,7 @@ def format_timestamp_to_iso(timestamp: Optional[float]) -> Optional[str]:
         return None
     try:
         from datetime import timezone
+
         return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
     except Exception:
         return None
@@ -451,7 +456,9 @@ def adapt_stats_response(stats: Dict[str, Any]) -> Dict[str, Any]:
                     "requests_used": requests_used,
                     "requests_max": requests_max,
                     "is_exhausted": is_exhausted,
-                    "reset_time_iso": format_timestamp_to_iso(reset_at) if reset_at else None,
+                    "reset_time_iso": format_timestamp_to_iso(reset_at)
+                    if reset_at
+                    else None,
                 }
 
                 # Aggregate for provider-level quota_groups
@@ -470,7 +477,10 @@ def adapt_stats_response(stats: Dict[str, Any]) -> Dict[str, Any]:
                 if remaining_pct is not None:
                     agg["remaining_pcts"].append(remaining_pct)
                 if reset_at:
-                    if agg["earliest_reset"] is None or reset_at < agg["earliest_reset"]:
+                    if (
+                        agg["earliest_reset"] is None
+                        or reset_at < agg["earliest_reset"]
+                    ):
                         agg["earliest_reset"] = reset_at
 
             adapted_credentials.append(adapted_cred)
@@ -489,7 +499,9 @@ def adapt_stats_response(stats: Dict[str, Any]) -> Dict[str, Any]:
                 "total_requests_used": agg["total_requests_used"],
                 "total_requests_max": agg["total_requests_max"],
                 "total_remaining_pct": total_pct,
-                "next_reset_time_iso": format_timestamp_to_iso(agg["earliest_reset"]) if agg["earliest_reset"] else None,
+                "next_reset_time_iso": format_timestamp_to_iso(agg["earliest_reset"])
+                if agg["earliest_reset"]
+                else None,
             }
 
         adapted["providers"][provider_name] = {
@@ -895,18 +907,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 Available commands:
 
 *Quota Commands:*
-/quota \\- Summary of all providers
-/quota \\[provider\\] \\- Details for a provider
-/refresh \\- Force refresh quota data
+/quota \\\\- Summary of all providers
+/quota \\\\[provider\\\\] \\\\- Details for a provider
+/refresh \\\\- Force refresh quota data
 
 *Chat Commands:*
-/models \\- List available models
-/model \\[name\\] \\- View or set model
-/new \\[name\\] \\- Start new chat session
-/sessions \\- List your sessions
-/session \\[id\\] \\- Switch session
-/delete \\[id\\] \\- Delete a session
-/clear \\- Clear current session
+/models \\\\- List available models
+/model \\\\[name\\\\] \\\\- View or set model
+/new \\\\[name\\\\] \\\\- Start new chat session
+/sessions \\\\- List your sessions
+/session \\\\[id\\\\] \\\\- Switch session
+/delete \\\\[id\\\\] \\\\- Delete a session
+/clear \\\\- Clear current session
+
+*Account Management:*
+/newaccount \\\\- Create a new GitLab Duo trial account
 
 Just send a message to chat with the LLM\\!
 """
@@ -937,19 +952,32 @@ async def quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if provider:
             message = format_provider_detail(provider, stats)
             keyboard = [
-                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh", callback_data=f"refresh:{provider}"
+                    )
+                ],
                 [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
             ]
         else:
             message = format_summary_message(stats)
-            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]
+            ]
             # Add provider-specific buttons for antigravity
             providers = stats.get("providers", {})
             if "antigravity" in providers:
-                keyboard.append([
-                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
-                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh Antigravity",
+                            callback_data="refresh:antigravity",
+                        ),
+                        InlineKeyboardButton(
+                            "📋 Antigravity", callback_data="view:antigravity"
+                        ),
+                    ]
+                )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         chunks = chunk_message(message)
@@ -1086,19 +1114,32 @@ async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if provider:
             message = refresh_info + format_provider_detail(provider, stats)
             keyboard = [
-                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh", callback_data=f"refresh:{provider}"
+                    )
+                ],
                 [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
             ]
         else:
             message = refresh_info + format_summary_message(stats)
-            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]
+            ]
             # Add provider-specific buttons
             providers = stats.get("providers", {})
             if "antigravity" in providers:
-                keyboard.append([
-                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
-                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh Antigravity",
+                            callback_data="refresh:antigravity",
+                        ),
+                        InlineKeyboardButton(
+                            "📋 Antigravity", callback_data="view:antigravity"
+                        ),
+                    ]
+                )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1110,7 +1151,9 @@ async def refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # Send additional chunks without buttons
             if query.message:
                 for chunk in chunks[1:]:
-                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+                    await query.message.reply_text(
+                        chunk, parse_mode=ParseMode.MARKDOWN_V2
+                    )
         except Exception:
             plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
             plain_chunks = chunk_message(plain_message)
@@ -1156,19 +1199,32 @@ async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if provider:
             message = format_provider_detail(provider, stats)
             keyboard = [
-                [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{provider}")],
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh", callback_data=f"refresh:{provider}"
+                    )
+                ],
                 [InlineKeyboardButton("📊 Summary", callback_data="view:summary")],
             ]
         else:
             message = format_summary_message(stats)
-            keyboard = [[InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]]
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh All", callback_data="refresh:all")]
+            ]
             # Add provider-specific buttons
             providers = stats.get("providers", {})
             if "antigravity" in providers:
-                keyboard.append([
-                    InlineKeyboardButton("🔄 Refresh Antigravity", callback_data="refresh:antigravity"),
-                    InlineKeyboardButton("📋 Antigravity", callback_data="view:antigravity"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh Antigravity",
+                            callback_data="refresh:antigravity",
+                        ),
+                        InlineKeyboardButton(
+                            "📋 Antigravity", callback_data="view:antigravity"
+                        ),
+                    ]
+                )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1179,7 +1235,9 @@ async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             if query.message:
                 for chunk in chunks[1:]:
-                    await query.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
+                    await query.message.reply_text(
+                        chunk, parse_mode=ParseMode.MARKDOWN_V2
+                    )
         except Exception:
             plain_message = message.replace("*", "").replace("`", "").replace("\\", "")
             plain_chunks = chunk_message(plain_message)
@@ -1421,6 +1479,193 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # =============================================================================
+# Account Creation Command
+# =============================================================================
+
+
+async def newaccount_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /newaccount command — create a GitLab trial + Duo OAuth credential."""
+    user = update.effective_user
+    if not user or not is_authorized(user.id):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if update.message is None:
+        return
+
+    status_msg = await update.message.reply_text(
+        "🔧 *Creating new GitLab Duo account...*\n\n⏳ Initializing automation...",
+        parse_mode="Markdown",
+    )
+
+    async def update_status(text: str) -> None:
+        """Edit the status message with progress updates."""
+        try:
+            await status_msg.edit_text(text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Failed to update Telegram status message: {e}")
+
+    try:
+        # Late imports — these are heavy and optional dependencies
+        from rotator_library.providers.gitlab_duo_provider import (
+            DEFAULT_OAUTH_CALLBACK_PORT,
+            DEFAULT_OAUTH_CLIENT_ID,
+            GitLabDuoProvider,
+            _get_instance_url,
+        )
+        from rotator_library.providers.utilities.gitlab_trial_automation import (
+            GitLabTrialAutomator,
+        )
+    except ImportError as e:
+        await update_status(
+            f"❌ *Import error*\n\n"
+            f"Missing dependency: `{e}`\n\n"
+            f"Ensure patchright is installed:\n"
+            f"`pip install patchright && patchright install chromium`"
+        )
+        return
+
+    try:
+        instance_url = _get_instance_url()
+        client_id = os.getenv("GITLAB_OAUTH_CLIENT_ID", DEFAULT_OAUTH_CLIENT_ID)
+        callback_port = int(
+            os.getenv("GITLAB_DUO_OAUTH_PORT", str(DEFAULT_OAUTH_CALLBACK_PORT))
+        )
+
+        if not client_id:
+            await update_status(
+                "❌ *Configuration error*\n\n"
+                "`GITLAB_OAUTH_CLIENT_ID` is not set.\n"
+                "Configure it in `.env` and restart the bot."
+            )
+            return
+
+        # Determine output path
+        oauth_dir = Path("oauth_creds")
+        oauth_dir.mkdir(exist_ok=True)
+        idx = 1
+        while (oauth_dir / f"gitlab_duo_oauth_{idx}.json").exists():
+            idx += 1
+        output_path = str(oauth_dir / f"gitlab_duo_oauth_{idx}.json")
+
+        await update_status(
+            "🔧 *Creating new GitLab Duo account...*\n\n"
+            "⏳ Setting up temp email and identity..."
+        )
+
+        # Build a Console that silently discards Rich output instead of
+        # printing to a terminal.  The automator only uses console.print()
+        # for status messages — we relay progress via Telegram instead.
+        from io import StringIO
+        from rich.console import Console as RichConsole
+
+        _quiet_console = RichConsole(file=StringIO(), quiet=True)
+        automator = GitLabTrialAutomator(console=_quiet_console)
+
+        async def oauth_runner(auth_url_handler):
+            """Run the GitLab OAuth PKCE flow."""
+            return await GitLabDuoProvider.oauth_setup(
+                instance_url=instance_url,
+                client_id=client_id,
+                callback_port=callback_port,
+                output_path=output_path,
+                auth_url_handler=auth_url_handler,
+                auto_open_browser=False,
+            )
+
+        await update_status(
+            "🔧 *Creating new GitLab Duo account...*\n\n"
+            "🌐 Launching browser and registering account...\n"
+            "This may take a few minutes."
+        )
+
+        # Run the full automation
+        auto_result = await automator.run(oauth_runner)
+        saved_path = auto_result.oauth_path
+
+        # Add proxy metadata to the credential file
+        try:
+            with open(saved_path, "r") as f:
+                creds = json.load(f)
+
+            metadata = creds.setdefault("_proxy_metadata", {})
+            metadata["email"] = auto_result.email
+            metadata["gitlab_duo_group"] = auto_result.group_path or ""
+            metadata["gitlab_trial_automated"] = True
+            metadata["created_via"] = "telegram_bot"
+
+            with open(saved_path, "w") as f:
+                json.dump(creds, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to write proxy metadata to {saved_path}: {e}")
+
+        await update_status(
+            "🔧 *Creating new GitLab Duo account...*\n\n"
+            f"✅ Account created: `{auto_result.email}`\n"
+            f"✅ Credentials saved: `{Path(saved_path).name}`\n\n"
+            "⏳ Reloading proxy credentials..."
+        )
+
+        # Hot-reload credentials in the proxy
+        reload_result = None
+        try:
+            base_url = get_proxy_base_url()
+            url = f"{base_url}/v1/reload-credentials"
+            async with httpx.AsyncClient(timeout=30.0) as http_client:
+                response = await http_client.post(url, headers=get_auth_headers())
+                if response.status_code == 200:
+                    reload_result = response.json()
+                else:
+                    logger.error(
+                        f"Credential reload returned HTTP {response.status_code}: "
+                        f"{response.text[:200]}"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to call /v1/reload-credentials: {e}")
+
+        # Final success message
+        reload_info = ""
+        if reload_result and reload_result.get("added"):
+            reload_info = (
+                f"🔄 Proxy reloaded: +{len(reload_result['added'])} credential(s)\n"
+            )
+        elif reload_result is not None:
+            reload_info = "🔄 Proxy reloaded (credential was already known)\n"
+        else:
+            reload_info = "⚠️ Could not reload proxy — restart may be needed\n"
+
+        duo_info = ""
+        if auto_result.duo_enabled:
+            duo_info = f"🤖 Duo enabled for group: `{auto_result.group_path}`\n"
+
+        await update_status(
+            f"✅ *New GitLab Duo account ready\\!*\n\n"
+            f"📧 Email: `{auto_result.email}`\n"
+            f"👤 Username: `{auto_result.username}`\n"
+            f"📁 Credentials: `{Path(saved_path).name}`\n"
+            f"{duo_info}"
+            f"{reload_info}\n"
+            f"The new credential is live and accepting requests\\."
+        )
+
+    except Exception as e:
+        logger.exception("newaccount_command failed")
+        error_msg = str(e)
+        if len(error_msg) > 500:
+            error_msg = error_msg[:500] + "..."
+        # Escape MarkdownV2 special characters in the error message
+        escaped_error = error_msg
+        for char in "_*[]()~`>#+-=|{}.!":
+            escaped_error = escaped_error.replace(char, f"\\{char}")
+        await update_status(
+            f"❌ *Account creation failed*\n\n```\n{escaped_error}\n```"
+        )
+
+
+# =============================================================================
 # Chat Message Handler
 # =============================================================================
 
@@ -1594,7 +1839,9 @@ def main() -> None:
     application.add_handler(CommandHandler("refresh", refresh_command))
 
     # Callback handlers for inline buttons
-    application.add_handler(CallbackQueryHandler(refresh_callback, pattern=r"^refresh:"))
+    application.add_handler(
+        CallbackQueryHandler(refresh_callback, pattern=r"^refresh:")
+    )
     application.add_handler(CallbackQueryHandler(view_callback, pattern=r"^view:"))
 
     # LLM Chat handlers
@@ -1605,6 +1852,9 @@ def main() -> None:
     application.add_handler(CommandHandler("session", session_command))
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("clear", clear_command))
+
+    # Account management handlers
+    application.add_handler(CommandHandler("newaccount", newaccount_command))
 
     # Message handler for chat (must be last - catches all text messages)
     application.add_handler(

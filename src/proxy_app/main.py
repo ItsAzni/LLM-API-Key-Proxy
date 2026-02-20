@@ -809,36 +809,46 @@ async def streaming_response_wrapper(
                             # If we see content/reasoning after a tool call, we've moved on
                             if tool_calls_pending:
                                 content = delta.get("content")
-                                reasoning = (
-                                    delta.get("reasoning")
-                                    or delta.get("reasoning_content")
+                                reasoning = delta.get("reasoning") or delta.get(
+                                    "reasoning_content"
                                 )
-                                if (
-                                    (isinstance(content, str) and content)
-                                    or (isinstance(reasoning, str) and reasoning)
+                                if (isinstance(content, str) and content) or (
+                                    isinstance(reasoning, str) and reasoning
                                 ):
                                     tool_calls_pending = False
 
                         # Check if this is the final chunk
                         # Final chunk detection: has usage with real tokens OR empty delta with usage present
                         usage = chunk_data.get("usage", {})
-                        completion_tokens = usage.get("completion_tokens", 0) if usage else 0
+                        completion_tokens = (
+                            usage.get("completion_tokens", 0) if usage else 0
+                        )
                         is_empty_delta = not delta
 
                         # Final chunk conditions:
                         # 1. Has meaningful usage (completion_tokens > 0)
                         # 2. OR has usage dict (even with zeros) + empty delta (common for Copilot/Responses API)
-                        is_final_chunk = completion_tokens > 0 or (usage is not None and is_empty_delta and has_tool_calls)
+                        is_final_chunk = completion_tokens > 0 or (
+                            usage is not None and is_empty_delta and has_tool_calls
+                        )
 
                         # FIX: If final chunk and we had tool_calls, ensure finish_reason is correct
                         if is_final_chunk and tool_calls_pending:
-                            current_fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                            current_fr = chunk_data.get("choices", [{}])[0].get(
+                                "finish_reason"
+                            )
                             if current_fr != "tool_calls":
-                                logging.debug(f"Correcting finish_reason from {current_fr} to tool_calls")
+                                logging.debug(
+                                    f"Correcting finish_reason from {current_fr} to tool_calls"
+                                )
                                 if chunk_data.get("choices"):
-                                    chunk_data["choices"][0]["finish_reason"] = "tool_calls"
+                                    chunk_data["choices"][0]["finish_reason"] = (
+                                        "tool_calls"
+                                    )
                                     # Re-serialize the chunk with corrected finish_reason
-                                    chunk_to_yield = f"data: {json.dumps(chunk_data)}\n\n"
+                                    chunk_to_yield = (
+                                        f"data: {json.dumps(chunk_data)}\n\n"
+                                    )
 
                         response_chunks.append(chunk_data)
                         if logger:
@@ -1598,6 +1608,51 @@ async def get_quota_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v1/reload-credentials")
+async def reload_credentials(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """
+    Hot-reload OAuth credentials from the oauth_creds/ directory.
+
+    Scans for new credential files that aren't already loaded,
+    initializes their tokens, and adds them to the running proxy
+    without requiring a restart.
+
+    Returns:
+        {
+            "added": ["gitlab_duo_oauth_3.json", ...],
+            "total_credentials": {"provider": count, ...}
+        }
+    """
+    try:
+        cred_manager = CredentialManager(os.environ)
+        discovered = cred_manager.discover_and_prepare()
+
+        added = []
+        for provider, paths in discovered.items():
+            for path in paths:
+                if path.startswith("env://"):
+                    continue
+                was_new = await client.add_oauth_credential(provider, path)
+                if was_new:
+                    added.append(Path(path).name)
+                    logging.info(
+                        f"Hot-loaded new credential: {provider}/{Path(path).name}"
+                    )
+
+        totals = {p: len(c) for p, c in client.all_credentials.items()}
+        return {
+            "added": added,
+            "total_credentials": totals,
+        }
+    except Exception as e:
+        logging.error(f"Credential reload failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/v1/quota-stats")
 async def refresh_quota_stats(
     request: Request,
@@ -1957,7 +2012,9 @@ if ENABLE_OLLAMA_ROUTES:
         model_id = _resolve_ollama_model(body.model, registry)
 
         if not model_id:
-            raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+            raise HTTPException(
+                status_code=400, detail=f"Model '{body.model}' not found"
+            )
 
         # Get model info for context length and capabilities
         context_length = 128000
@@ -2023,7 +2080,9 @@ if ENABLE_OLLAMA_ROUTES:
         model_id = _resolve_ollama_model(body.model, registry)
 
         if not model_id:
-            raise HTTPException(status_code=400, detail=f"Model '{body.model}' not found")
+            raise HTTPException(
+                status_code=400, detail=f"Model '{body.model}' not found"
+            )
 
         tool_follow_up = False
         if body.messages:
@@ -2088,7 +2147,9 @@ if ENABLE_OLLAMA_ROUTES:
                     request=request,
                 )
             else:
-                openai_stream = await client.acompletion(request=request, **openai_request)
+                openai_stream = await client.acompletion(
+                    request=request, **openai_request
+                )
 
             async def is_disconnected():
                 return await request.is_disconnected()
@@ -2131,7 +2192,9 @@ if ENABLE_OLLAMA_ROUTES:
                 response = await client.acompletion(request=request, **openai_request)
 
             # Convert to Ollama format
-            from rotator_library.ollama_compat.translator import openai_to_ollama_response
+            from rotator_library.ollama_compat.translator import (
+                openai_to_ollama_response,
+            )
 
             ollama_response = openai_to_ollama_response(
                 response.model_dump() if hasattr(response, "model_dump") else response,
@@ -2186,7 +2249,9 @@ if ENABLE_OLLAMA_ROUTES:
         """
         search_service = get_search_service()
 
-        result = await search_service.search(query=body.query, max_results=body.max_results)
+        result = await search_service.search(
+            query=body.query, max_results=body.max_results
+        )
 
         if "error" in result and not result.get("results") and not result.get("answer"):
             raise HTTPException(status_code=500, detail=result["error"])
@@ -2289,9 +2354,13 @@ if ENABLE_OLLAMA_ROUTES:
             )
 
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to fetch URL: {str(e)}"
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error processing page: {str(e)}")
+            raise HTTPException(
+                status_code=500, detail=f"Error processing page: {str(e)}"
+            )
 
 
 if __name__ == "__main__":

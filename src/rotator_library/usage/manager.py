@@ -342,6 +342,68 @@ class UsageManager:
                 f"UsageManager initialized for {self.provider} with {len(credentials)} credentials"
             )
 
+    async def register_new_credential(
+        self,
+        accessor: str,
+        priority: Optional[int] = None,
+        tier: Optional[str] = None,
+    ) -> bool:
+        """Register a new credential after initialization.
+
+        This allows hot-loading credentials at runtime without restarting.
+        Returns True if the credential was newly registered, False if it
+        already existed.
+        """
+        async with self._lock:
+            stable_id = self._registry.get_stable_id(accessor, self.provider)
+            if stable_id in self._active_stable_ids:
+                return False  # Already registered
+
+            self._active_stable_ids.add(stable_id)
+            reg_info = self._registry.get_info(accessor, self.provider)
+
+            if stable_id not in self._states:
+                self._states[stable_id] = CredentialState(
+                    stable_id=stable_id,
+                    provider=self.provider,
+                    accessor=accessor,
+                    display_name=reg_info.display_name,
+                    created_at=time.time(),
+                )
+            else:
+                self._states[stable_id].accessor = accessor
+                if reg_info.display_name:
+                    self._states[stable_id].display_name = reg_info.display_name
+
+            if priority is not None:
+                self._states[stable_id].priority = priority
+            if tier is not None:
+                self._states[stable_id].tier = tier
+
+            # Set max concurrent
+            base_concurrent = (
+                self._max_concurrent_per_key
+                if self._max_concurrent_per_key is not None
+                else 1
+            )
+            p = self._states[stable_id].priority
+            multiplier = self._config.get_effective_multiplier(p)
+            self._states[stable_id].max_concurrent = base_concurrent * multiplier
+
+            # Populate window definitions for the new credential
+            state = self._states[stable_id]
+            state.window_definitions = self._get_window_definitions_for_state(state)
+            valid_windows = self._get_valid_window_names_for_state(state)
+            self._cleanup_stale_windows_for_state(state, valid_windows)
+
+            if self._storage:
+                self._storage.mark_dirty()
+
+            lib_logger.info(
+                f"Hot-loaded new credential for {self.provider}: {stable_id}"
+            )
+            return True
+
     async def acquire_credential(
         self,
         model: str,
