@@ -1,0 +1,3632 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# Copyright (c) 2026 Mirrowel
+
+"""GitLab trial + Duo OAuth automation utilities.
+
+This module is intentionally optional. It is imported lazily by the credential
+tool so normal proxy and Docker flows keep working without Playwright.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import html
+import importlib
+import inspect
+import json
+import logging
+import math
+import os
+import random
+import re
+import secrets
+import shutil
+import string
+import subprocess
+import sys
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
+
+import httpx
+from rich.console import Console
+from rich.panel import Panel
+
+lib_logger = logging.getLogger("rotator_library")
+
+TRIAL_REGISTRATION_URL = "https://gitlab.com/-/trial_registrations/new"
+GROUP_CREATE_URL = "https://gitlab.com/groups/new"
+GITLAB_API_BASE = "https://gitlab.com/api/v4"
+GUERRILLA_API_URL = "https://api.guerrillamail.com/ajax.php"
+TEMP_MAIL_API_BASE = "https://api.temp-mail.io"
+MAIL_TM_API_BASE = "https://api.mail.tm"
+
+
+@dataclass
+class GitLabTrialAutomationResult:
+    oauth_path: str
+    email: str
+    username: str
+    group_path: Optional[str]
+    duo_enabled: bool
+
+
+class GitLabTrialAutomator:
+    """Automates GitLab trial signup, confirmation, and Duo enablement."""
+
+    def __init__(self, console: Optional[Console] = None):
+        self.console = console or Console()
+        self.email_poll_interval_seconds = int(
+            os.getenv("GITLAB_TRIAL_EMAIL_POLL_INTERVAL", "4")
+        )
+        self.email_poll_timeout_seconds = int(
+            os.getenv("GITLAB_TRIAL_EMAIL_TIMEOUT", "300")
+        )
+        self.low_risk_mode = self._env_to_bool(
+            os.getenv("GITLAB_TRIAL_LOW_RISK_MODE", "false")
+        )
+        self.clear_browser_state = self._env_to_bool(
+            os.getenv("GITLAB_TRIAL_CLEAR_BROWSER_STATE", "false")
+        )
+        self.phone_verification_wait_seconds = int(
+            os.getenv("GITLAB_TRIAL_PHONE_WAIT_TIMEOUT", "900")
+        )
+        self._headless_mode = False
+
+    @staticmethod
+    def _env_to_bool(value: str) -> bool:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _resolve_headless_mode(cls) -> bool:
+        configured = os.getenv("GITLAB_TRIAL_HEADLESS")
+        if configured is not None:
+            return cls._env_to_bool(configured)
+
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+            return True
+
+        if os.name != "nt" and sys.platform != "darwin":
+            if not os.getenv("DISPLAY"):
+                return True
+
+        return False
+
+    @staticmethod
+    def _has_visible_display() -> bool:
+        if os.name == "nt" or sys.platform == "darwin":
+            return True
+        return bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+
+    async def _human_pause(
+        self,
+        page: Any,
+        min_ms: int = 250,
+        max_ms: int = 700,
+    ) -> None:
+        if self.low_risk_mode:
+            await page.wait_for_timeout(random.randint(min_ms, max_ms))
+        else:
+            # Always inject a small random delay between actions; instant
+            # form-filling with zero think-time is a strong bot signal.
+            await page.wait_for_timeout(random.randint(100, 350))
+
+    async def _human_mouse_move(
+        self, page: Any, target_x: float, target_y: float
+    ) -> None:
+        """Move the mouse to (target_x, target_y) along a curved Bézier path.
+
+        Arkose Labs tracks mouse movement events during form filling.
+        Zero mouse movement is the strongest bot signal.  This generates
+        a quadratic Bézier curve with varying speed (slow at endpoints,
+        faster in the middle) to mimic a real hand-guided cursor.
+        """
+        steps = random.randint(18, 35)
+        start_x = getattr(self, "_mouse_x", random.randint(200, 600))
+        start_y = getattr(self, "_mouse_y", random.randint(150, 400))
+
+        # Perpendicular offset for the control point → curved path.
+        dx, dy = target_x - start_x, target_y - start_y
+        dist = math.hypot(dx, dy) or 1.0
+        perp_x, perp_y = -dy / dist, dx / dist
+        offset = random.uniform(-0.3, 0.3) * dist
+        ctrl_x = (start_x + target_x) / 2 + perp_x * offset
+        ctrl_y = (start_y + target_y) / 2 + perp_y * offset
+
+        for i in range(1, steps + 1):
+            t = i / steps
+            # Quadratic Bézier: B(t) = (1-t)²·P0 + 2(1-t)t·P1 + t²·P2
+            bx = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t**2 * target_x
+            by = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t**2 * target_y
+            # Slight jitter to avoid machine-perfect curves.
+            bx += random.uniform(-0.5, 0.5)
+            by += random.uniform(-0.5, 0.5)
+            await page.mouse.move(bx, by)
+            # Variable speed: slower at start and end (ease-in-out).
+            speed = max(math.sin(t * math.pi), 0.25)
+            await page.wait_for_timeout(int(random.uniform(3, 10) / speed))
+
+        self._mouse_x = target_x
+        self._mouse_y = target_y
+
+    async def _mouse_move_to_locator(self, page: Any, locator: Any) -> None:
+        """Move the mouse to a locator's bounding box with a human curve."""
+        try:
+            box = await locator.bounding_box(timeout=2000)
+            if not box:
+                return
+            # Click near center but not exactly — humans aren't precise.
+            x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+            y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+            await self._human_mouse_move(page, x, y)
+        except Exception:
+            pass
+
+    async def _mouse_wander(self, page: Any) -> None:
+        """Small random mouse movement to generate idle activity."""
+        x = getattr(self, "_mouse_x", 400) + random.randint(-80, 80)
+        y = getattr(self, "_mouse_y", 300) + random.randint(-60, 60)
+        x = max(10, min(x, 1400))
+        y = max(10, min(y, 880))
+        await self._human_mouse_move(page, x, y)
+
+    # ------------------------------------------------------------------
+    #  CDP (Chrome DevTools Protocol) launch helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_chrome_binary() -> Optional[str]:
+        """Locate the system's real Chrome binary."""
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            shutil.which("google-chrome") or "",
+            shutil.which("google-chrome-stable") or "",
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(
+                r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+            ),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+    async def _launch_chrome_cdp(self, headless: bool) -> Optional[tuple]:
+        """Launch real Chrome with remote debugging + persistent profile.
+
+        Returns ``(Popen, ws_endpoint_url)`` on success, or ``None``
+        if Chrome is not installed or fails to start.
+        """
+        chrome_bin = self._find_chrome_binary()
+        if not chrome_bin:
+            return None
+
+        port = random.randint(9200, 9399)
+        user_data_dir = os.path.join(
+            os.path.expanduser("~"),
+            ".cache",
+            "gitlab-trial-automation",
+            "chrome-profile",
+        )
+        os.makedirs(user_data_dir, exist_ok=True)
+
+        args = [
+            chrome_bin,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-features=MediaRouter",
+            "--window-size=1440,900",
+        ]
+        if headless:
+            args.append("--headless=new")
+
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        endpoint = f"http://localhost:{port}"
+        for _ in range(30):
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{endpoint}/json/version", timeout=2.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ws_url = data.get("webSocketDebuggerUrl", "")
+                        return process, ws_url or endpoint
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+        # Chrome didn't start in time.
+        with suppress(Exception):
+            process.terminate()
+        return None
+
+    @staticmethod
+    def _random_identity() -> Dict[str, str]:
+        first_names = [
+            "Alex",
+            "Jordan",
+            "Taylor",
+            "Morgan",
+            "Casey",
+            "Riley",
+            "Avery",
+            "Jamie",
+        ]
+        last_names = [
+            "Parker",
+            "Brooks",
+            "Hayes",
+            "Wright",
+            "Carter",
+            "Reed",
+            "Bennett",
+            "Shaw",
+        ]
+
+        first_name = random.choice(first_names)
+        last_name = random.choice(last_names)
+        username_suffix = "".join(
+            secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8)
+        )
+        username = f"{first_name.lower()}{last_name.lower()}{username_suffix}"
+
+        allowed = string.ascii_letters + string.digits + "!@#$%*-_"
+        password = "".join(secrets.choice(allowed) for _ in range(20))
+
+        return {
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "password": password,
+        }
+
+    @staticmethod
+    def _extract_gitlab_confirmation_link(content: str) -> Optional[str]:
+        if not content:
+            return None
+
+        decoded = html.unescape(content).replace("\\/", "/")
+        patterns = [
+            r"https://gitlab\.com/users/confirmation\?[^\s\"'<>]+",
+            r"https://gitlab\.com/[^\s\"'<>]*confirmation[^\s\"'<>]*",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, decoded, flags=re.IGNORECASE)
+            if match:
+                return match.group(0)
+        return None
+
+    @staticmethod
+    def _extract_gitlab_verification_code(content: str) -> Optional[str]:
+        if not content:
+            return None
+
+        decoded = html.unescape(content)
+
+        # Common GitLab email layout: the code is on its own line.
+        for line in decoded.splitlines():
+            token = line.strip()
+            if re.fullmatch(r"[0-9]{6}", token):
+                return token
+
+        targeted_patterns = [
+            r"(?:verification code|verify code|one[- ]time code)[^0-9]{0,30}([0-9]{6,8})",
+            r"(?:code de v[ée]rification|code de confirmation)[^0-9]{0,30}([0-9]{6,8})",
+            r"(?:following code|enter[^\n]{0,40}code)[^0-9]{0,40}([0-9]{6,8})",
+        ]
+
+        for pattern in targeted_patterns:
+            match = re.search(pattern, decoded, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        # Fallback: prefer 6-digit tokens, then trim longer candidates.
+        for match in re.finditer(r"\b([0-9]{6})\b", decoded):
+            return match.group(1)
+
+        for match in re.finditer(r"\b([0-9]{7,8})\b", decoded):
+            return match.group(1)[:6]
+
+        return None
+
+    @staticmethod
+    def _is_email_rejected_error(message: str) -> bool:
+        lowered = message.lower()
+        indicators = [
+            "email is not allowed",
+            "not allowed for sign-up",
+            "regular email address",
+            "adresse email n'est pas autorisée",
+            "adresse de courriel n'est pas autorisée",
+            "courriel n'est pas autorisé",
+        ]
+        return any(indicator in lowered for indicator in indicators)
+
+    @staticmethod
+    def _is_signup_confirmation_notice(messages: List[str]) -> bool:
+        combined = " | ".join(messages).lower()
+        success_indicators = [
+            "you must confirm your email within 3 days",
+            "confirm your email",
+            "check your email",
+            "confirmer votre adresse",
+            "confirmez votre adresse",
+            "vérifiez votre adresse",
+        ]
+        return any(indicator in combined for indicator in success_indicators)
+
+    @staticmethod
+    def _is_missing_browser_channel_error(message: str) -> bool:
+        lowered = message.lower()
+        indicators = [
+            "chromium distribution",
+            "channel",
+            "is not found",
+            "executable doesn't exist",
+            "failed to launch",
+            "could not find",
+        ]
+        return all(word in lowered for word in ["channel", "not"]) or any(
+            indicator in lowered for indicator in indicators
+        )
+
+    @staticmethod
+    def _import_playwright() -> tuple[Any, Callable[[Any], Awaitable[None]]]:
+        # Try patchright first — it is a drop-in replacement for Playwright
+        # that patches Chrome DevTools Protocol leaks (Runtime.enable,
+        # addBinding, JS injection signatures) which Arkose Labs and similar
+        # bot-detection systems use to identify automated browsers.
+        using_patchright = False
+        try:
+            playwright_async = importlib.import_module("patchright.async_api")
+            async_playwright = getattr(playwright_async, "async_playwright")
+            using_patchright = True
+            lib_logger.info("Using patchright (patched Playwright with CDP stealth)")
+        except Exception:
+            try:
+                playwright_async = importlib.import_module("playwright.async_api")
+                async_playwright = getattr(playwright_async, "async_playwright")
+                lib_logger.info(
+                    "Using vanilla playwright (install patchright for better "
+                    "stealth: pip install patchright && patchright install chromium)"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    "GitLab trial automation requires Patchright (recommended) "
+                    "or Playwright. Install with:\n"
+                    "  pip install patchright && patchright install chromium\n"
+                    "or:\n"
+                    "  pip install playwright playwright-stealth && "
+                    "python -m playwright install chromium"
+                ) from e
+
+        # playwright_stealth: required for vanilla playwright, optional for
+        # patchright (patchright already patches CDP leaks at the driver
+        # level, but stealth adds extra JS-level coverage).
+        # IMPORTANT: when using patchright, playwright_stealth (and any
+        # add_init_script calls) must be SKIPPED — patchright's isolated
+        # JS context system is incompatible with add_init_script() in
+        # headed mode and causes the browser to crash.
+        apply_stealth: Callable[[Any], Awaitable[None]]
+        if using_patchright:
+
+            async def apply_stealth(target: Any) -> None:
+                pass
+        else:
+            try:
+                stealth_module = importlib.import_module("playwright_stealth")
+                stealth_async = getattr(stealth_module, "stealth_async", None)
+                stealth_class = getattr(stealth_module, "Stealth", None)
+
+                if callable(stealth_async):
+
+                    async def apply_stealth(target: Any) -> None:
+                        result = stealth_async(target)
+                        if inspect.isawaitable(result):
+                            await result
+
+                elif stealth_class is not None:
+                    stealth_instance = stealth_class()
+
+                    async def apply_stealth(target: Any) -> None:
+                        result = stealth_instance.apply_stealth_async(target)
+                        if inspect.isawaitable(result):
+                            await result
+
+                else:
+                    raise RuntimeError(
+                        "Unsupported playwright-stealth API: expected stealth_async "
+                        "or Stealth.apply_stealth_async"
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    "GitLab trial automation requires playwright-stealth when "
+                    "using vanilla Playwright. Install with:\n"
+                    "  pip install playwright-stealth\n"
+                    "Alternatively, install patchright for built-in stealth:\n"
+                    "  pip install patchright && patchright install chromium"
+                ) from e
+
+        return async_playwright, apply_stealth
+
+    @staticmethod
+    def _resolve_mail_provider(override: Optional[str] = None) -> str:
+        raw = override or os.getenv("GITLAB_TRIAL_MAIL_PROVIDER", "auto")
+        provider = raw.strip().lower().replace("-", "_")
+
+        if provider in {
+            "temp_mail",
+            "tempmail",
+            "tempmail_io",
+            "temp_mail_io",
+            "temp_mail_org",
+        }:
+            return "temp_mail"
+
+        if provider in {"guerrilla", "guerrilla_mail", "guerrillamail"}:
+            return "guerrilla"
+
+        if provider in {"mail_tm", "mailtm", "mail.tm"}:
+            return "mail_tm"
+
+        if provider not in {"", "auto"}:
+            raise RuntimeError(
+                "Unsupported GITLAB_TRIAL_MAIL_PROVIDER value. "
+                "Use one of: auto, temp_mail, mail_tm, guerrilla."
+            )
+
+        if os.getenv("TEMP_MAIL_API_KEY", "").strip():
+            return "temp_mail"
+        return "mail_tm"
+
+    @staticmethod
+    def _decode_possible_base64(value: str) -> str:
+        text = str(value).strip()
+        if len(text) < 24:
+            return str(value)
+
+        compact = text.replace("\n", "").replace("\r", "")
+        if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+            return str(value)
+
+        padded = compact + "=" * ((4 - (len(compact) % 4)) % 4)
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            with suppress(binascii.Error, ValueError, UnicodeDecodeError):
+                decoded = decoder(padded.encode("ascii")).decode("utf-8")
+                score = sum(ch.isprintable() for ch in decoded)
+                if not decoded:
+                    continue
+                if score / max(len(decoded), 1) < 0.9:
+                    continue
+                return decoded
+
+        return str(value)
+
+    @classmethod
+    def _extract_temp_mail_contents(cls, message: Dict[str, Any]) -> List[str]:
+        keys = [
+            "subject",
+            "from",
+            "to",
+            "intro",
+            "text",
+            "html",
+            "body",
+            "body_text",
+            "body_html",
+            "excerpt",
+            "snippet",
+            "source",
+        ]
+        parts: List[str] = []
+        for key in keys:
+            value = message.get(key)
+            if not value:
+                continue
+            if isinstance(value, str):
+                decoded = cls._decode_possible_base64(value)
+                parts.append(decoded)
+            elif isinstance(value, dict):
+                for nested_key in [
+                    "address",
+                    "name",
+                    "subject",
+                    "intro",
+                    "text",
+                    "html",
+                    "body",
+                    "value",
+                ]:
+                    nested = value.get(nested_key)
+                    if isinstance(nested, str):
+                        parts.append(cls._decode_possible_base64(nested))
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        parts.append(cls._decode_possible_base64(item))
+                    elif isinstance(item, dict):
+                        for nested_key in ["address", "name", "text", "html", "value"]:
+                            nested = item.get(nested_key)
+                            if isinstance(nested, str):
+                                parts.append(cls._decode_possible_base64(nested))
+        return parts
+
+    async def _guerrilla_call(
+        self,
+        client: httpx.AsyncClient,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = {
+            "ip": "127.0.0.1",
+            "agent": "Mozilla/5.0",
+            **params,
+        }
+        response = await client.get(GUERRILLA_API_URL, params=payload, timeout=20.0)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Unexpected Guerrilla Mail API response")
+        return data
+
+    async def _temp_mail_call(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        api_key: str,
+        json_body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        base_url = (
+            os.getenv("TEMP_MAIL_API_BASE", TEMP_MAIL_API_BASE).strip().rstrip("/")
+        )
+        headers = {
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+        }
+
+        response = await client.request(
+            method=method,
+            url=f"{base_url}{path}",
+            headers=headers,
+            json=json_body,
+            timeout=20.0,
+        )
+
+        with suppress(ValueError):
+            payload = response.json()
+            if isinstance(payload, dict):
+                if response.status_code < 400:
+                    return payload
+
+                error = payload.get("error", {})
+                if isinstance(error, dict):
+                    detail = (
+                        error.get("detail") or error.get("code") or "request failed"
+                    )
+                    raise RuntimeError(
+                        f"Temp Mail API request failed ({response.status_code}): {detail}"
+                    )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Temp Mail API request failed ({response.status_code}): {response.text[:300]}"
+            )
+
+        raise RuntimeError("Unexpected Temp Mail API response")
+
+    async def _mail_tm_call(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        token: Optional[str] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        base_url = os.getenv("MAIL_TM_API_BASE", MAIL_TM_API_BASE).strip().rstrip("/")
+        headers = {
+            "Accept": "application/ld+json",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        response = await client.request(
+            method=method,
+            url=f"{base_url}{path}",
+            headers=headers,
+            json=json_body,
+            timeout=20.0,
+        )
+
+        with suppress(ValueError):
+            payload = response.json()
+            if isinstance(payload, dict):
+                if response.status_code < 400:
+                    return payload
+
+                detail = (
+                    payload.get("hydra:description")
+                    or payload.get("detail")
+                    or payload.get("message")
+                    or payload.get("title")
+                    or "request failed"
+                )
+                raise RuntimeError(
+                    f"mail.tm API request failed ({response.status_code}): {detail}"
+                )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"mail.tm API request failed ({response.status_code}): {response.text[:300]}"
+            )
+
+        raise RuntimeError("Unexpected mail.tm API response")
+
+    async def _create_mail_tm_mailbox(self) -> Dict[str, str]:
+        base_url = os.getenv("MAIL_TM_API_BASE", MAIL_TM_API_BASE).strip().rstrip("/")
+        preferred_domains = [
+            item.strip().lower()
+            for item in os.getenv("MAIL_TM_DOMAINS", "").split(",")
+            if item.strip()
+        ]
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            domains_payload = await self._mail_tm_call(client, "GET", "/domains")
+            members = domains_payload.get("hydra:member", [])
+            if not isinstance(members, list):
+                members = []
+
+            domains: List[str] = []
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                domain = member.get("domain")
+                is_active = member.get("isActive", True)
+                if isinstance(domain, str) and domain and bool(is_active):
+                    domains.append(domain.strip().lower())
+
+            if preferred_domains:
+                filtered = [domain for domain in domains if domain in preferred_domains]
+                if filtered:
+                    domains = filtered
+
+            if not domains:
+                raise RuntimeError("mail.tm returned no active domains")
+
+            random.shuffle(domains)
+
+            max_attempts = max(len(domains) * 4, 6)
+            for attempt in range(max_attempts):
+                domain = domains[attempt % len(domains)]
+                local = "u" + "".join(
+                    secrets.choice(string.ascii_lowercase + string.digits)
+                    for _ in range(12)
+                )
+                password = "P" + "".join(
+                    secrets.choice(string.ascii_letters + string.digits)
+                    for _ in range(20)
+                )
+                address = f"{local}@{domain}"
+
+                response = await client.post(
+                    f"{base_url}/accounts",
+                    headers={"Accept": "application/ld+json"},
+                    json={"address": address, "password": password},
+                    timeout=20.0,
+                )
+
+                if response.status_code not in {200, 201}:
+                    if response.status_code in {409, 422}:
+                        continue
+
+                    detail = response.text[:300]
+                    with suppress(ValueError):
+                        body = response.json()
+                        if isinstance(body, dict):
+                            detail = str(
+                                body.get("hydra:description")
+                                or body.get("detail")
+                                or body.get("message")
+                                or detail
+                            )
+                    raise RuntimeError(
+                        f"mail.tm account creation failed ({response.status_code}): {detail}"
+                    )
+
+                token_payload = await self._mail_tm_call(
+                    client,
+                    "POST",
+                    "/token",
+                    json_body={"address": address, "password": password},
+                )
+                token = token_payload.get("token")
+                if isinstance(token, str) and token:
+                    return {
+                        "provider": "mail_tm",
+                        "email": address,
+                        "token": token,
+                        "password": password,
+                    }
+
+            raise RuntimeError("Failed to create mail.tm mailbox after retries")
+
+    async def _create_temp_mailbox(
+        self,
+        provider_override: Optional[str] = None,
+    ) -> Dict[str, str]:
+        provider = self._resolve_mail_provider(provider_override)
+
+        if provider == "temp_mail":
+            api_key = os.getenv("TEMP_MAIL_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    "TEMP_MAIL_API_KEY is required when using Temp Mail provider"
+                )
+
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                data = await self._temp_mail_call(client, "POST", "/v1/emails", api_key)
+
+            email_addr = data.get("email")
+            if not email_addr and isinstance(data.get("data"), dict):
+                email_addr = data["data"].get("email")
+            if not email_addr:
+                raise RuntimeError("Failed to create Temp Mail inbox")
+
+            return {
+                "provider": "temp_mail",
+                "email": str(email_addr),
+                "api_key": api_key,
+            }
+
+        if provider == "mail_tm":
+            return await self._create_mail_tm_mailbox()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            data = await self._guerrilla_call(
+                client,
+                {
+                    "f": "get_email_address",
+                    "lang": "en",
+                },
+            )
+
+        email_addr = data.get("email_addr")
+        sid_token = data.get("sid_token")
+        if not email_addr or not sid_token:
+            raise RuntimeError("Failed to create Guerrilla Mail inbox")
+
+        return {
+            "provider": "guerrilla",
+            "email": str(email_addr),
+            "sid_token": str(sid_token),
+        }
+
+    async def _wait_for_confirmation_email_guerrilla(self, sid_token: str) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._guerrilla_call(
+                    client,
+                    {
+                        "f": "get_email_list",
+                        "sid_token": sid_token,
+                        "offset": 0,
+                    },
+                )
+
+                messages = listing.get("list", [])
+                if isinstance(messages, list):
+                    for message in messages:
+                        mail_id = str(message.get("mail_id", ""))
+                        if not mail_id or mail_id in seen_ids:
+                            continue
+                        seen_ids.add(mail_id)
+
+                        details = await self._guerrilla_call(
+                            client,
+                            {
+                                "f": "fetch_email",
+                                "sid_token": sid_token,
+                                "email_id": mail_id,
+                            },
+                        )
+
+                        body = "\n".join(
+                            str(v)
+                            for v in [
+                                details.get("mail_subject", ""),
+                                details.get("mail_excerpt", ""),
+                                details.get("mail_body", ""),
+                            ]
+                            if v
+                        )
+                        link = self._extract_gitlab_confirmation_link(body)
+                        if link:
+                            return link
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab confirmation email from Guerrilla Mail"
+        )
+
+    async def _wait_for_confirmation_email_temp_mail(
+        self,
+        email_addr: str,
+        api_key: str,
+    ) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._temp_mail_call(
+                    client,
+                    "GET",
+                    f"/v1/emails/{quote(email_addr, safe='')}/messages",
+                    api_key,
+                )
+
+                messages = listing.get("messages", [])
+                if not messages and isinstance(listing.get("data"), dict):
+                    messages = listing["data"].get("messages", [])
+                if isinstance(messages, dict):
+                    messages = [messages]
+                if not isinstance(messages, list):
+                    messages = []
+
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+
+                    msg_id = str(message.get("id") or message.get("message_id") or "")
+                    if not msg_id or msg_id in seen_ids:
+                        continue
+                    seen_ids.add(msg_id)
+
+                    combined = "\n".join(self._extract_temp_mail_contents(message))
+                    link = self._extract_gitlab_confirmation_link(combined)
+                    if link:
+                        return link
+
+                    details = await self._temp_mail_call(
+                        client,
+                        "GET",
+                        f"/v1/messages/{quote(msg_id, safe='')}",
+                        api_key,
+                    )
+
+                    if isinstance(details.get("message"), dict):
+                        details = details["message"]
+
+                    if isinstance(details, dict):
+                        detail_text = "\n".join(
+                            self._extract_temp_mail_contents(details)
+                        )
+                        link = self._extract_gitlab_confirmation_link(detail_text)
+                        if link:
+                            return link
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab confirmation email from Temp Mail"
+        )
+
+    async def _wait_for_confirmation_email_mail_tm(
+        self,
+        token: str,
+    ) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._mail_tm_call(
+                    client, "GET", "/messages", token=token
+                )
+
+                messages = listing.get("hydra:member", [])
+                if isinstance(messages, dict):
+                    messages = [messages]
+                if not isinstance(messages, list):
+                    messages = []
+
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+
+                    msg_id = str(message.get("id") or "")
+                    if not msg_id or msg_id in seen_ids:
+                        continue
+                    seen_ids.add(msg_id)
+
+                    combined = "\n".join(self._extract_temp_mail_contents(message))
+                    link = self._extract_gitlab_confirmation_link(combined)
+                    if link:
+                        return link
+
+                    details = await self._mail_tm_call(
+                        client,
+                        "GET",
+                        f"/messages/{quote(msg_id, safe='')}",
+                        token=token,
+                    )
+
+                    detail_text = "\n".join(self._extract_temp_mail_contents(details))
+                    link = self._extract_gitlab_confirmation_link(detail_text)
+                    if link:
+                        return link
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab confirmation email from mail.tm"
+        )
+
+    async def _wait_for_verification_code_guerrilla(self, sid_token: str) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._guerrilla_call(
+                    client,
+                    {
+                        "f": "get_email_list",
+                        "sid_token": sid_token,
+                        "offset": 0,
+                    },
+                )
+
+                messages = listing.get("list", [])
+                if isinstance(messages, list):
+                    for message in messages:
+                        mail_id = str(message.get("mail_id", ""))
+                        if not mail_id or mail_id in seen_ids:
+                            continue
+                        seen_ids.add(mail_id)
+
+                        details = await self._guerrilla_call(
+                            client,
+                            {
+                                "f": "fetch_email",
+                                "sid_token": sid_token,
+                                "email_id": mail_id,
+                            },
+                        )
+
+                        body = "\n".join(
+                            str(v)
+                            for v in [
+                                details.get("mail_subject", ""),
+                                details.get("mail_excerpt", ""),
+                                details.get("mail_body", ""),
+                            ]
+                            if v
+                        )
+                        code = self._extract_gitlab_verification_code(body)
+                        if code:
+                            return code
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab verification code from Guerrilla Mail"
+        )
+
+    async def _wait_for_verification_code_temp_mail(
+        self,
+        email_addr: str,
+        api_key: str,
+    ) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._temp_mail_call(
+                    client,
+                    "GET",
+                    f"/v1/emails/{quote(email_addr, safe='')}/messages",
+                    api_key,
+                )
+
+                messages = listing.get("messages", [])
+                if not messages and isinstance(listing.get("data"), dict):
+                    messages = listing["data"].get("messages", [])
+                if isinstance(messages, dict):
+                    messages = [messages]
+                if not isinstance(messages, list):
+                    messages = []
+
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+
+                    msg_id = str(message.get("id") or message.get("message_id") or "")
+                    if not msg_id or msg_id in seen_ids:
+                        continue
+                    seen_ids.add(msg_id)
+
+                    combined = "\n".join(self._extract_temp_mail_contents(message))
+                    code = self._extract_gitlab_verification_code(combined)
+                    if code:
+                        return code
+
+                    details = await self._temp_mail_call(
+                        client,
+                        "GET",
+                        f"/v1/messages/{quote(msg_id, safe='')}",
+                        api_key,
+                    )
+
+                    if isinstance(details.get("message"), dict):
+                        details = details["message"]
+
+                    if isinstance(details, dict):
+                        detail_text = "\n".join(
+                            self._extract_temp_mail_contents(details)
+                        )
+                        code = self._extract_gitlab_verification_code(detail_text)
+                        if code:
+                            return code
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab verification code from Temp Mail"
+        )
+
+    async def _wait_for_verification_code_mail_tm(self, token: str) -> str:
+        deadline = asyncio.get_event_loop().time() + self.email_poll_timeout_seconds
+        seen_ids: set[str] = set()
+
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                listing = await self._mail_tm_call(
+                    client, "GET", "/messages", token=token
+                )
+
+                messages = listing.get("hydra:member", [])
+                if isinstance(messages, dict):
+                    messages = [messages]
+                if not isinstance(messages, list):
+                    messages = []
+
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+
+                    msg_id = str(message.get("id") or "")
+                    if not msg_id or msg_id in seen_ids:
+                        continue
+                    seen_ids.add(msg_id)
+
+                    combined = "\n".join(self._extract_temp_mail_contents(message))
+                    code = self._extract_gitlab_verification_code(combined)
+                    if code:
+                        return code
+
+                    details = await self._mail_tm_call(
+                        client,
+                        "GET",
+                        f"/messages/{quote(msg_id, safe='')}",
+                        token=token,
+                    )
+
+                    detail_text = "\n".join(self._extract_temp_mail_contents(details))
+                    code = self._extract_gitlab_verification_code(detail_text)
+                    if code:
+                        return code
+
+                await asyncio.sleep(self.email_poll_interval_seconds)
+
+        raise RuntimeError(
+            "Timed out waiting for GitLab verification code from mail.tm"
+        )
+
+    async def _wait_for_verification_code(self, mailbox: Dict[str, str]) -> str:
+        provider = mailbox.get("provider", "guerrilla")
+
+        try:
+            if provider == "temp_mail":
+                return await self._wait_for_verification_code_temp_mail(
+                    mailbox["email"],
+                    mailbox["api_key"],
+                )
+
+            if provider == "mail_tm":
+                return await self._wait_for_verification_code_mail_tm(mailbox["token"])
+
+            if provider == "guerrilla":
+                return await self._wait_for_verification_code_guerrilla(
+                    mailbox["sid_token"]
+                )
+
+            raise RuntimeError(f"Unsupported mailbox provider: {provider}")
+        except RuntimeError as e:
+            if "Timed out waiting" in str(e) and self._headless_mode:
+                raise RuntimeError(
+                    "Timed out waiting for GitLab verification code email. "
+                    "In headless/container mode this usually means CAPTCHA or phone "
+                    "verification was required. Retry with GITLAB_TRIAL_HEADLESS=false "
+                    "on a machine with a visible browser."
+                ) from e
+            raise
+
+    async def _wait_for_confirmation_email(self, mailbox: Dict[str, str]) -> str:
+        provider = mailbox.get("provider", "guerrilla")
+
+        try:
+            if provider == "temp_mail":
+                return await self._wait_for_confirmation_email_temp_mail(
+                    mailbox["email"],
+                    mailbox["api_key"],
+                )
+
+            if provider == "mail_tm":
+                return await self._wait_for_confirmation_email_mail_tm(mailbox["token"])
+
+            if provider == "guerrilla":
+                return await self._wait_for_confirmation_email_guerrilla(
+                    mailbox["sid_token"]
+                )
+
+            raise RuntimeError(f"Unsupported mailbox provider: {provider}")
+        except RuntimeError as e:
+            if "Timed out waiting" in str(e) and self._headless_mode:
+                raise RuntimeError(
+                    "Timed out waiting for GitLab confirmation email. "
+                    "In headless/container mode this usually means CAPTCHA or phone "
+                    "verification was required. Retry with GITLAB_TRIAL_HEADLESS=false "
+                    "on a machine with a visible browser."
+                ) from e
+            raise
+
+    async def _first_visible_locator(self, page: Any, selector: str) -> Any:
+        try:
+            locator = page.locator(selector)
+            count = await locator.count()
+            if count <= 0:
+                return None
+            for idx in range(min(count, 10)):
+                candidate = locator.nth(idx)
+                with suppress(Exception):
+                    if await candidate.is_visible():
+                        return candidate
+        except Exception:
+            return None
+        return None
+
+    async def _safe_click(self, page: Any, selectors: List[str]) -> bool:
+        for _ in range(3):
+            for selector in selectors:
+                locator = await self._first_visible_locator(page, selector)
+                if locator is None:
+                    continue
+                try:
+                    with suppress(Exception):
+                        await locator.scroll_into_view_if_needed(timeout=2000)
+                    await locator.click(timeout=3500)
+                    return True
+                except Exception:
+                    with suppress(Exception):
+                        await locator.click(timeout=3500, force=True)
+                        return True
+            await page.wait_for_timeout(250)
+
+        for selector in selectors:
+            try:
+                clicked = await page.evaluate(
+                    """
+                    (sel) => {
+                      const nodes = Array.from(document.querySelectorAll(sel));
+                      const el = nodes.find((node) => {
+                        const cs = window.getComputedStyle(node);
+                        if (!cs) return false;
+                        if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+                        if (node.getBoundingClientRect().width <= 0) return false;
+                        if (node.getBoundingClientRect().height <= 0) return false;
+                        return true;
+                      });
+                      if (!el) return false;
+                      el.click();
+                      return true;
+                    }
+                    """,
+                    selector,
+                )
+                if clicked:
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    async def _safe_fill(self, page: Any, selectors: List[str], value: str) -> bool:
+        for _ in range(3):
+            for selector in selectors:
+                locator = await self._first_visible_locator(page, selector)
+                if locator is None:
+                    continue
+                try:
+                    with suppress(Exception):
+                        await locator.scroll_into_view_if_needed(timeout=2000)
+                    # Move cursor to the field before clicking — Arkose
+                    # tracks mouse events and flags sessions with none.
+                    await self._mouse_move_to_locator(page, locator)
+                    await locator.click(timeout=3500)
+                    await locator.fill("")
+                    if self.low_risk_mode:
+                        await locator.type(value, delay=random.randint(60, 140))
+                    else:
+                        await locator.type(value, delay=random.randint(25, 75))
+                    current = await locator.input_value()
+                    if current.strip() == value:
+                        return True
+                except Exception:
+                    with suppress(Exception):
+                        await locator.fill("")
+                        await locator.type(value, delay=random.randint(35, 95))
+                        current = await locator.input_value()
+                        if current.strip() == value:
+                            return True
+            await page.wait_for_timeout(250)
+        return False
+
+    async def _safe_click_by_button_name(self, page: Any, names: List[str]) -> bool:
+        for _ in range(3):
+            for name in names:
+                try:
+                    locator = page.get_by_role(
+                        "button", name=re.compile(name, re.IGNORECASE)
+                    )
+                    count = await locator.count()
+                    for idx in range(min(count, 10)):
+                        button = locator.nth(idx)
+                        with suppress(Exception):
+                            if not await button.is_visible():
+                                continue
+                            await button.click(timeout=3500)
+                            return True
+                except Exception:
+                    continue
+
+                # Fallback for pages using links or non-semantic controls.
+                fallback_selectors = [
+                    f"button:has-text('{name}')",
+                    f"a:has-text('{name}')",
+                    f"[role='button']:has-text('{name}')",
+                    f"input[type='submit'][value*='{name}' i]",
+                ]
+                if await self._safe_click(page, fallback_selectors):
+                    return True
+
+            await page.wait_for_timeout(250)
+        return False
+
+    async def _current_alert_messages(self, page: Any) -> List[str]:
+        try:
+            messages = await page.evaluate(
+                """
+                () => Array.from(document.querySelectorAll('[role="alert"], .gl-alert, .invalid-feedback'))
+                    .map((el) => (el.textContent || '').trim())
+                    .filter(Boolean)
+                """
+            )
+            if isinstance(messages, list):
+                return [str(message) for message in messages if str(message).strip()]
+        except Exception:
+            return []
+        return []
+
+    async def _wait_for_arkose_token(self, page: Any, timeout_ms: int = 15000) -> bool:
+        # In headed mode, if Arkose shows a CAPTCHA puzzle the user can
+        # solve it manually.  Give them a generous timeout.
+        if not getattr(self, "_headless_mode", True):
+            timeout_ms = max(timeout_ms, 120_000)
+
+        prompted = False
+        start = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start) * 1000 < timeout_ms:
+            try:
+                token = await page.evaluate(
+                    """
+                    () => {
+                      const input = document.querySelector('input[name="arkose_labs_token"]');
+                      return input ? (input.value || '') : '';
+                    }
+                    """
+                )
+                if isinstance(token, str) and len(token.strip()) > 20:
+                    if prompted:
+                        self.console.print(
+                            "[green]CAPTCHA solved — continuing.[/green]"
+                        )
+                    return True
+            except Exception:
+                pass
+
+            # Detect if the Arkose challenge iframe / puzzle is visible.
+            if not prompted:
+                try:
+                    has_challenge = await page.evaluate(
+                        """
+                        () => {
+                          const frame = document.querySelector(
+                            'iframe[src*="arkoselabs"], iframe[data-e2e="enforcement-frame"]'
+                          );
+                          if (frame) return true;
+                          const modal = document.querySelector(
+                            '[class*="arkose"], [id*="arkose"], [class*="FunCaptcha"]'
+                          );
+                          return !!modal;
+                        }
+                        """
+                    )
+                    if has_challenge:
+                        prompted = True
+                        self.console.print(
+                            "[bold yellow]CAPTCHA puzzle detected — please "
+                            "solve it in the browser window.[/bold yellow]"
+                        )
+                except Exception:
+                    pass
+
+            await page.wait_for_timeout(500)
+        return False
+
+    async def _dismiss_cookie_banners(self, page: Any) -> None:
+        await self._safe_click(
+            page,
+            [
+                "#accept-recommended-btn-handler",
+                "button:has-text('Accept All Cookies')",
+                "button:has-text('Allow All')",
+                "button:has-text('Consent')",
+                "button:has-text('Accept all cookies')",
+            ],
+        )
+
+    async def _apply_extra_stealth(self, page: Any) -> None:
+        """Apply additional stealth patches beyond playwright-stealth.
+
+        Registers an init script that runs on every navigation, covering
+        fingerprint vectors that playwright-stealth does not patch.
+        """
+        with suppress(Exception):
+            await page.add_init_script(
+                """
+                // -- webdriver flag --------------------------------------------------
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+
+                // -- chrome.runtime (present in real Chrome) -------------------------
+                if (!window.chrome) window.chrome = {};
+                if (!window.chrome.runtime) {
+                    window.chrome.runtime = {
+                        connect: function() {},
+                        sendMessage: function() {},
+                    };
+                }
+
+                // -- permissions.query (Notification) --------------------------------
+                try {
+                    const _origQuery = navigator.permissions.query.bind(
+                        navigator.permissions
+                    );
+                    navigator.permissions.query = (params) =>
+                        params.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : _origQuery(params);
+                } catch (_) {}
+
+                // -- navigator.plugins (Chromium ships 5 by default) -----------------
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => {
+                        const arr = [
+                            {
+                                name: 'Chrome PDF Plugin',
+                                filename: 'internal-pdf-viewer',
+                                description: 'Portable Document Format',
+                                length: 1,
+                            },
+                            {
+                                name: 'Chrome PDF Viewer',
+                                filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                                description: '',
+                                length: 1,
+                            },
+                            {
+                                name: 'Native Client',
+                                filename: 'internal-nacl-plugin',
+                                description: '',
+                                length: 1,
+                            },
+                        ];
+                        arr.length = 3;
+                        return arr;
+                    },
+                });
+
+                // -- navigator.languages ---------------------------------------------
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                });
+
+                // -- WebGL vendor/renderer (avoid "Google SwiftShader" giveaway) ------
+                try {
+                    const getParameter = WebGLRenderingContext.prototype.getParameter;
+                    WebGLRenderingContext.prototype.getParameter = function (param) {
+                        if (param === 37445) return 'Google Inc. (Apple)';
+                        if (param === 37446)
+                            return 'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)';
+                        return getParameter.call(this, param);
+                    };
+                } catch (_) {}
+
+                // -- navigator.userAgentData (Client Hints, Chrome 90+) ---------------
+                // Bundled Chromium may omit this or report a wrong version.
+                // Must match the UA string version.
+                try {
+                    if (!navigator.userAgentData || !navigator.userAgentData.brands
+                        || navigator.userAgentData.brands.length === 0) {
+                        Object.defineProperty(navigator, 'userAgentData', {
+                            get: () => ({
+                                brands: [
+                                    { brand: 'Chromium', version: '133' },
+                                    { brand: 'Not(A:Brand', version: '24' },
+                                    { brand: 'Google Chrome', version: '133' },
+                                ],
+                                mobile: false,
+                                platform: 'macOS',
+                                getHighEntropyValues: (hints) =>
+                                    Promise.resolve({
+                                        architecture: 'arm',
+                                        bitness: '64',
+                                        model: '',
+                                        platform: 'macOS',
+                                        platformVersion: '15.3.0',
+                                        uaFullVersion: '133.0.6943.98',
+                                        fullVersionList: [
+                                            { brand: 'Chromium', version: '133.0.6943.98' },
+                                            { brand: 'Not(A:Brand', version: '24.0.0.0' },
+                                            { brand: 'Google Chrome', version: '133.0.6943.98' },
+                                        ],
+                                    }),
+                            }),
+                        });
+                    }
+                } catch (_) {}
+
+                // -- chrome.csi / chrome.loadTimes (Chrome-only, missing in Chromium) --
+                if (!window.chrome.csi) {
+                    window.chrome.csi = function () {
+                        return {
+                            startE: Date.now(),
+                            onloadT: Date.now(),
+                            pageT: Math.random() * 500 + 300,
+                            tran: 15,
+                        };
+                    };
+                }
+                if (!window.chrome.loadTimes) {
+                    window.chrome.loadTimes = function () {
+                        return {
+                            commitLoadTime: Date.now() / 1000,
+                            connectionInfo: 'h2',
+                            finishDocumentLoadTime: Date.now() / 1000,
+                            finishLoadTime: Date.now() / 1000,
+                            firstPaintAfterLoadTime: 0,
+                            firstPaintTime: Date.now() / 1000,
+                            navigationType: 'Other',
+                            npnNegotiatedProtocol: 'h2',
+                            requestTime: Date.now() / 1000 - 0.3,
+                            startLoadTime: Date.now() / 1000 - 0.5,
+                            wasAlternateProtocolAvailable: false,
+                            wasFetchedViaSpdy: true,
+                            wasNpnNegotiated: true,
+                        };
+                    };
+                }
+                if (!window.chrome.app) {
+                    window.chrome.app = {
+                        isInstalled: false,
+                        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+                        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+                    };
+                }
+                """
+            )
+
+    async def _perform_low_risk_warmup(self, page: Any) -> None:
+        if not self.low_risk_mode:
+            return
+
+        self.console.print("[dim]Low-risk mode: warming up browser session...[/dim]")
+
+        with suppress(Exception):
+            await page.goto(
+                "https://gitlab.com/users/sign_in?redirect_to_referer=yes",
+                wait_until="domcontentloaded",
+                timeout=90000,
+            )
+            await self._dismiss_cookie_banners(page)
+            await self._human_pause(page, 900, 1800)
+
+        with suppress(Exception):
+            await page.goto(
+                "https://gitlab.com/explore",
+                wait_until="domcontentloaded",
+                timeout=90000,
+            )
+            await self._human_pause(page, 900, 1800)
+
+    async def _is_phone_verification_required(self, page: Any) -> bool:
+        if "identity_verification" not in page.url:
+            return False
+
+        try:
+            return bool(
+                await page.evaluate(
+                    """
+                    () => {
+                      const bodyText = (document.body?.innerText || '').toLowerCase();
+                      const phoneWords = [
+                        'phone',
+                        'telephone',
+                        'mobile',
+                        'sms',
+                        'téléphone',
+                        'numéro',
+                        'numero',
+                      ];
+
+                      const hasPhoneText = phoneWords.some((word) => bodyText.includes(word));
+                      const hasPhoneInput = Boolean(
+                        document.querySelector('input[type="tel"], input[name*="phone" i], input[id*="phone" i]')
+                      );
+
+                      return hasPhoneText || hasPhoneInput;
+                    }
+                    """
+                )
+            )
+        except Exception:
+            return False
+
+    async def _wait_for_manual_phone_verification(self, page: Any) -> None:
+        if "identity_verification" not in page.url:
+            return
+
+        if self._headless_mode:
+            raise RuntimeError(
+                "GitLab requested phone verification. This requires manual completion in "
+                "a visible browser. Set GITLAB_TRIAL_HEADLESS=false and retry."
+            )
+
+        self.console.print(
+            Panel(
+                "GitLab requested phone verification.\n"
+                "Complete the phone step in the opened browser and automation will continue.",
+                title="Manual Phone Verification Required",
+                style="yellow",
+            )
+        )
+
+        deadline = (
+            asyncio.get_event_loop().time() + self.phone_verification_wait_seconds
+        )
+        while asyncio.get_event_loop().time() < deadline:
+            if "identity_verification" not in page.url:
+                return
+            await page.wait_for_timeout(2000)
+
+        raise RuntimeError(
+            "Timed out waiting for manual phone verification completion. "
+            "You can increase GITLAB_TRIAL_PHONE_WAIT_TIMEOUT and retry."
+        )
+
+    async def _submit_trial_registration(
+        self,
+        page: Any,
+        profile: Dict[str, str],
+        email: str,
+    ) -> None:
+        await page.goto(
+            TRIAL_REGISTRATION_URL, wait_until="domcontentloaded", timeout=90000
+        )
+        await self._dismiss_cookie_banners(page)
+
+        # Generate idle mouse activity before filling the form.  Arkose's
+        # enforcement script starts collecting behavioral telemetry on page
+        # load; a session with zero mouse events gets a high risk score.
+        for _ in range(random.randint(2, 4)):
+            await self._mouse_wander(page)
+            await page.wait_for_timeout(random.randint(200, 500))
+        # Small scroll to mimic reading the page.
+        with suppress(Exception):
+            await page.mouse.wheel(0, random.randint(50, 150))
+            await page.wait_for_timeout(random.randint(300, 700))
+
+        if not await self._safe_fill(
+            page,
+            ['input[data-testid="new-user-first-name-field"]', "#new_user_first_name"],
+            profile["first_name"],
+        ):
+            raise RuntimeError("Failed to fill first name on trial form")
+        await self._human_pause(page)
+
+        if not await self._safe_fill(
+            page,
+            ['input[data-testid="new-user-last-name-field"]', "#new_user_last_name"],
+            profile["last_name"],
+        ):
+            raise RuntimeError("Failed to fill last name on trial form")
+        await self._human_pause(page)
+
+        if not await self._safe_fill(
+            page,
+            ['input[data-testid="new-user-username-field"]', "#new_user_username"],
+            profile["username"],
+        ):
+            raise RuntimeError("Failed to fill username on trial form")
+        await self._human_pause(page)
+
+        if not await self._safe_fill(
+            page,
+            ['input[data-testid="new-user-email-field"]', "#new_user_email"],
+            email,
+        ):
+            raise RuntimeError("Failed to fill email on trial form")
+        await self._human_pause(page)
+
+        if not await self._safe_fill(
+            page,
+            ['input[data-testid="new-user-password-field"]', "#new_user_password"],
+            profile["password"],
+        ):
+            raise RuntimeError("Failed to fill password on trial form")
+        await self._human_pause(page)
+
+        # Trigger frontend validation before submit.
+        with suppress(Exception):
+            await page.keyboard.press("Tab")
+        await page.wait_for_timeout(700)
+
+        await self._wait_for_arkose_token(page)
+
+        submit_selectors = [
+            'button[data-testid="new-user-register-button"]',
+            "#new_user_register_button",
+            'form#new_new_user button[type="submit"]',
+            'form[action*="trial_registrations"] button[type="submit"]',
+        ]
+
+        starting_url = page.url
+        for attempt in range(3):
+            if not await self._safe_click(page, submit_selectors):
+                continue
+
+            await page.wait_for_timeout(1800)
+
+            if page.url != starting_url:
+                return
+
+            alert_messages = await self._current_alert_messages(page)
+            if alert_messages:
+                if self._is_signup_confirmation_notice(alert_messages):
+                    return
+
+                joined = " | ".join(alert_messages)
+                lower_joined = joined.lower()
+                if (
+                    "password" in lower_joined
+                    and "server" in lower_joined
+                    and attempt < 2
+                ):
+                    # Retry with a fresh password when GitLab transiently fails
+                    # complexity validation calls.
+                    profile["password"] = self._random_identity()["password"]
+                    await self._safe_fill(
+                        page,
+                        [
+                            'input[data-testid="new-user-password-field"]',
+                            "#new_user_password",
+                        ],
+                        profile["password"],
+                    )
+                    continue
+                raise RuntimeError(f"GitLab rejected registration: {joined}")
+
+            with suppress(Exception):
+                submitted = await page.evaluate(
+                    """
+                    () => {
+                      const form = document.querySelector('form#new_new_user, form[action*="trial_registrations"]');
+                      if (!form) return false;
+                      if (typeof form.requestSubmit === 'function') {
+                        form.requestSubmit();
+                        return true;
+                      }
+                      const btn = form.querySelector('button[type="submit"], input[type="submit"]');
+                      if (btn) {
+                        btn.click();
+                        return true;
+                      }
+                      return false;
+                    }
+                    """
+                )
+                if submitted:
+                    await page.wait_for_timeout(1200)
+                    if page.url != starting_url:
+                        return
+
+        final_alerts = await self._current_alert_messages(page)
+        if final_alerts:
+            if self._is_signup_confirmation_notice(final_alerts):
+                return
+            raise RuntimeError(
+                f"Failed to submit trial form: {' | '.join(final_alerts)}"
+            )
+        raise RuntimeError(
+            "Failed to submit trial registration form (Continue click had no effect)"
+        )
+
+    async def _try_sign_in_if_needed(
+        self,
+        page: Any,
+        login_value: str,
+        password: str,
+    ) -> bool:
+        login_present = await self._safe_fill(
+            page,
+            ["#user_login", 'input[name="user[login]"]', 'input[name="username"]'],
+            login_value,
+        )
+        if not login_present:
+            return False
+
+        if not await self._safe_fill(
+            page,
+            [
+                "#user_password",
+                'input[name="user[password]"]',
+                'input[name="password"]',
+            ],
+            password,
+        ):
+            return False
+
+        clicked = await self._safe_click_by_button_name(
+            page,
+            ["Sign in", "Log in", "Connexion", "Se connecter"],
+        )
+        if clicked:
+            with suppress(Exception):
+                await page.wait_for_timeout(1500)
+        return clicked
+
+    async def _handle_welcome_onboarding(self, page: Any) -> bool:
+        """Handle GitLab's multi-step post-signup onboarding flow.
+
+        The onboarding consists of up to three pages:
+        1. Welcome – role, reason, usage context
+        2. Company info – company name, size, country
+        3. Create first project – group + project names
+        """
+        handled_any = False
+
+        for step in range(5):  # Safety cap
+            await page.wait_for_timeout(1500)
+            url = page.url
+
+            if await self._onboard_step_welcome(page, url):
+                handled_any = True
+                continue
+
+            if await self._onboard_step_company(page, url):
+                handled_any = True
+                continue
+
+            if await self._onboard_step_project(page, url):
+                handled_any = True
+                continue
+
+            # No known onboarding page detected – we're done.
+            break
+
+        return handled_any
+
+    # ------------------------------------------------------------------
+    # Onboarding step 1 – "Welcome to GitLab"
+    # ------------------------------------------------------------------
+    async def _onboard_step_welcome(self, page: Any, url: str) -> bool:
+        is_welcome = any(f in url for f in ("sign_up/welcome", "registrations/welcome"))
+        if not is_welcome:
+            try:
+                heading = await page.text_content("h2, h1", timeout=2000)
+                if heading and any(
+                    w in heading.lower() for w in ("welcome", "bienvenue")
+                ):
+                    is_welcome = True
+            except Exception:
+                pass
+
+        if not is_welcome:
+            return False
+
+        self.console.print("[cyan]Onboarding step 1/3 – Welcome…[/cyan]")
+        await self._human_pause(page, 400, 800)
+
+        # ---- Nuclear first: force every <select> on the page to have a
+        # valid (non-placeholder) value via raw JS BEFORE trying anything
+        # else.  This handles cases where selectors have changed or the
+        # element is hidden behind a custom component overlay.
+        with suppress(Exception):
+            await page.evaluate(
+                """() => {
+                    document.querySelectorAll('select').forEach((sel) => {
+                        // Skip truly invisible selects (display:none on an
+                        // ancestor), but do NOT skip selects that merely have
+                        // zero size (they may be overlaid by custom widgets).
+                        const style = window.getComputedStyle(sel);
+                        if (style.display === 'none' &&
+                            !sel.closest('[style*="display"]')) return;
+
+                        const cur = sel.options[sel.selectedIndex];
+                        const curText = (cur ? cur.textContent : '').trim().toLowerCase();
+                        const curVal  = (sel.value || '').trim();
+
+                        // Already has a real value selected?
+                        const isPlaceholder = (
+                            !curVal ||
+                            curVal === '' ||
+                            curText === '' ||
+                            curText.includes('select') ||
+                            curText.includes('please') ||
+                            curText.includes('choose') ||
+                            curText.includes('choisir') ||
+                            curText.includes('sélectionner') ||
+                            curText.startsWith('--')
+                        );
+                        if (!isPlaceholder) return;
+
+                        // Pick the first non-placeholder option (usually idx 1)
+                        for (let i = 1; i < sel.options.length; i++) {
+                            const opt = sel.options[i];
+                            const t = (opt.textContent || '').trim();
+                            const v = (opt.value || '').trim();
+                            if (t && v && v !== '') {
+                                sel.selectedIndex = i;
+                                sel.dispatchEvent(new Event('input', { bubbles: true }));
+                                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                break;
+                            }
+                        }
+
+                        // Strip required so browser validation can't block
+                        sel.removeAttribute('required');
+                    });
+
+                    // Also strip required from any other form elements
+                    document.querySelectorAll('[required]').forEach((el) => {
+                        if (el.tagName === 'SELECT') return; // already handled
+                        if (!el.value || el.value.trim() === '') {
+                            el.removeAttribute('required');
+                        }
+                    });
+                }"""
+            )
+        await self._human_pause(page, 200, 400)
+
+        # Role dropdown - prefer direct native select first to avoid hover
+        # overlays that can occasionally intercept clicks.
+        role_selectors = [
+            "#user_onboarding_status_role",
+            'select[name="user[onboarding_status_role]"]',
+            '[data-testid="role-dropdown"]',
+            'select[id*="role" i]',
+            'select[name*="role" i]',
+            'select[title*="role" i]',
+        ]
+        role_picked = False
+        with suppress(Exception):
+            role_picked = await self._pick_native_select(
+                page,
+                role_selectors,
+                ["software developer", "developer"],
+            )
+        # Always try GL dropdown fallback if native select didn't work,
+        # even if the native <select> element exists in the DOM (it may
+        # be hidden behind a custom Vue component overlay).
+        if not role_picked:
+            with suppress(Exception):
+                role_picked = await self._pick_gl_dropdown(
+                    page,
+                    label_hints=["role", "r\u00f4le"],
+                    option_hints=["software developer", "d\u00e9veloppeur"],
+                )
+        await self._human_pause(page, 300, 500)
+
+        # Reason dropdown - same approach as role.
+        reason_selectors = [
+            "#user_onboarding_status_registration_objective",
+            'select[name="user[onboarding_status_registration_objective]"]',
+            'select[id*="objective" i]',
+            'select[id*="registration" i]',
+            'select[name*="objective" i]',
+            'select[title*="reason" i]',
+            'select[title*="objective" i]',
+        ]
+        reason_picked = False
+        with suppress(Exception):
+            reason_picked = await self._pick_native_select(
+                page,
+                reason_selectors,
+                ["store my code", "code", "learn"],
+            )
+        if not reason_picked:
+            with suppress(Exception):
+                reason_picked = await self._pick_gl_dropdown(
+                    page,
+                    label_hints=[
+                        "signing up",
+                        "reason",
+                        "raison",
+                        "pourquoi",
+                        "because",
+                        "objectif",
+                        "objective",
+                        "registration_objective",
+                        "jobs_to_be_done",
+                    ],
+                    option_hints=["learn", "store my code", "code", "apprendre"],
+                )
+        await self._human_pause(page, 300, 500)
+
+        # Ensure required selects are valid before submitting; Chrome shows
+        # "Please select an item in the list" if one stayed on placeholder.
+        await self._ensure_select_has_value(
+            page,
+            selectors=role_selectors,
+            option_hints=["software developer", "developer"],
+        )
+        await self._ensure_select_has_value(
+            page,
+            selectors=reason_selectors,
+            option_hints=["store my code", "code", "learn"],
+        )
+
+        # Final nuclear pass: force all selects again + strip required from
+        # every element to absolutely prevent browser validation popups.
+        with suppress(Exception):
+            await page.evaluate(
+                """() => {
+                    document.querySelectorAll('select').forEach((sel) => {
+                        // If still on placeholder (index 0 with empty value), pick index 1
+                        if (sel.selectedIndex <= 0 && sel.options.length > 1) {
+                            const cur = sel.options[0];
+                            const t = (cur ? cur.textContent : '').trim().toLowerCase();
+                            const v = (sel.value || '').trim();
+                            if (!v || t.includes('select') || t.includes('choose') || t === '' || t.startsWith('--')) {
+                                sel.selectedIndex = 1;
+                                sel.dispatchEvent(new Event('input', { bubbles: true }));
+                                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                        }
+                        sel.removeAttribute('required');
+                    });
+                    // Remove required from everything
+                    document.querySelectorAll('[required]').forEach((el) => {
+                        el.removeAttribute('required');
+                    });
+                    // Also disable HTML5 validation on forms
+                    document.querySelectorAll('form').forEach((f) => {
+                        f.setAttribute('novalidate', 'true');
+                    });
+                }"""
+            )
+
+        # "Just me" radio
+        await self._click_first_visible(
+            page,
+            [
+                'label:has-text("Just me")',
+                'label:has-text("Juste moi")',
+                'input[value="just_me"]',
+                'input[value="myself"]',
+                '[data-testid="radio-just-me"]',
+                'input[type="radio"]'
+            ],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Continue
+        await self._safe_click_by_button_name(
+            page,
+            ["Continue", "Continuer", "Get started", "Commencer"],
+        )
+        with suppress(Exception):
+            await page.wait_for_timeout(2500)
+        self.console.print("[green]Welcome step done.[/green]")
+        return True
+
+    # ------------------------------------------------------------------
+    # Onboarding step 2 – "Tell us about your company"
+    # ------------------------------------------------------------------
+    async def _onboard_step_company(self, page: Any, url: str) -> bool:
+        is_company = any(
+            f in url
+            for f in (
+                "registrations/company",
+                "sign_up/company",
+                "users/sign_up/company",
+            )
+        )
+        if not is_company:
+            try:
+                heading = await page.text_content("h2, h1", timeout=2000)
+                if heading and any(
+                    w in heading.lower()
+                    for w in ("company", "entreprise", "organization", "organisation")
+                ):
+                    is_company = True
+            except Exception:
+                pass
+
+        if not is_company:
+            # Check for the company_name input as a fallback signal.
+            try:
+                loc = page.locator(
+                    '#company_name, input[name="company_name"], '
+                    'input[name="trial_company_name"], '
+                    '[data-testid="company-name-input"]'
+                )
+                if await loc.count() > 0:
+                    is_company = True
+            except Exception:
+                pass
+
+        if not is_company:
+            return False
+
+        self.console.print("[cyan]Onboarding step 2/3 – Company info…[/cyan]")
+        await self._human_pause(page, 400, 800)
+
+        # Company name
+        company = f"DevTeam {secrets.token_hex(3)}"
+        await self._safe_fill(
+            page,
+            [
+                "#company_name",
+                'input[name="company_name"]',
+                'input[name="trial_company_name"]',
+                '[data-testid="company-name-input"]',
+                'input[placeholder*="Company" i]',
+                'input[placeholder*="company" i]',
+                'input[placeholder*="entreprise" i]',
+            ],
+            company,
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Number of employees / company size dropdown
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["employees", "size", "taille", "employ"],
+            option_hints=["1-99", "1 - 99", "small"],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Country dropdown
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["country", "pays", "region"],
+            option_hints=["france", "united states", "canada"],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Some countries (for example the United States) require a
+        # state/province selection before Continue is enabled.
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["state", "province", "etat"],
+            option_hints=["california", "texas", "new york"],
+        )
+        await self._human_pause(page, 250, 450)
+
+        # Phone – leave blank (optional), just skip.
+
+        # Continue
+        await self._safe_click_by_button_name(
+            page,
+            ["Continue", "Continuer", "Start your free trial", "Submit", "Commencer"],
+        )
+        with suppress(Exception):
+            await page.wait_for_timeout(2500)
+        self.console.print("[green]Company step done.[/green]")
+        return True
+
+    # ------------------------------------------------------------------
+    # Onboarding step 3 – "Create or import your first project"
+    # ------------------------------------------------------------------
+    async def _onboard_step_project(self, page: Any, url: str) -> bool:
+        is_project = any(
+            f in url
+            for f in (
+                "registrations/project",
+                "projects/new",
+                "sign_up/project",
+            )
+        )
+        if not is_project:
+            try:
+                heading = await page.text_content("h2, h1", timeout=2000)
+                if heading and any(
+                    w in heading.lower() for w in ("project", "projet", "import")
+                ):
+                    is_project = True
+            except Exception:
+                pass
+
+        if not is_project:
+            return False
+
+        self.console.print("[cyan]Onboarding step 3/3 – Create project…[/cyan]")
+        await self._human_pause(page, 400, 800)
+
+        slug = f"duo-{secrets.token_hex(4)}"
+
+        # Group name (may already be pre-filled)
+        await self._safe_fill(
+            page,
+            [
+                "#group_name",
+                'input[name="group[name]"]',
+                '[data-testid="group-name-input"]',
+                'input[placeholder*="group" i]',
+            ],
+            f"Duo {slug}",
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Project name
+        await self._safe_fill(
+            page,
+            [
+                "#project_name",
+                'input[name="project[name]"]',
+                '[data-testid="project-name-input"]',
+                'input[placeholder*="project" i]',
+                'input[placeholder*="My awesome" i]',
+            ],
+            f"project-{slug}",
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Click "Create project" or equivalent
+        clicked = await self._safe_click_by_button_name(
+            page,
+            [
+                "Create project",
+                "Créer un projet",
+                "Create",
+                "Créer",
+                "Continue",
+                "Continuer",
+            ],
+        )
+
+        if not clicked:
+            # Try skip link if available
+            await self._safe_click_by_button_name(
+                page,
+                ["Skip", "Passer", "Skip this step"],
+            )
+
+        with suppress(Exception):
+            await page.wait_for_timeout(3000)
+        self.console.print("[green]Project step done.[/green]")
+        return True
+
+    # ------------------------------------------------------------------
+    # Helpers for onboarding forms
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_placeholder_option_text(text: str) -> bool:
+        low = text.strip().lower()
+        if not low:
+            return True
+        return any(
+            token in low
+            for token in (
+                "select",
+                "please select",
+                "choose",
+                "choisir",
+                "selectionner",
+                "--",
+            )
+        )
+
+    async def _pick_native_select_option(
+        self,
+        select: Any,
+        option_hints: List[str],
+    ) -> bool:
+        options = select.locator("option")
+        count = await options.count()
+        if count <= 0:
+            return False
+
+        normalized_hints = [hint.lower() for hint in option_hints if hint.strip()]
+        preferred_index: Optional[int] = None
+        fallback_index: Optional[int] = None
+
+        for idx in range(count):
+            option = options.nth(idx)
+            try:
+                text = (await option.text_content(timeout=500) or "").strip()
+            except Exception:
+                continue
+            if not text:
+                continue
+
+            low = text.lower()
+            if fallback_index is None and not self._is_placeholder_option_text(text):
+                fallback_index = idx
+
+            if normalized_hints and any(hint in low for hint in normalized_hints):
+                preferred_index = idx
+                break
+
+        chosen_index = (
+            preferred_index if preferred_index is not None else fallback_index
+        )
+        if chosen_index is None:
+            return False
+
+        # Prefer JS assignment first to avoid opening dropdown popovers.
+        with suppress(Exception):
+            applied = await select.evaluate(
+                """(el, idx) => {
+                    if (!(el instanceof HTMLSelectElement)) return false;
+                    if (idx < 0 || idx >= el.options.length) return false;
+                    el.selectedIndex = idx;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return el.selectedIndex === idx;
+                }""",
+                chosen_index,
+            )
+            if applied:
+                return True
+
+        with suppress(Exception):
+            await select.select_option(index=chosen_index, timeout=2500)
+            return True
+
+        return False
+
+    async def _pick_native_select(
+        self,
+        page: Any,
+        selectors: List[str],
+        option_hints: List[str],
+    ) -> bool:
+        for selector in selectors:
+            select = await self._first_visible_locator(page, selector)
+            if select is None:
+                continue
+            if await self._pick_native_select_option(select, option_hints):
+                return True
+        return False
+
+    async def _ensure_select_has_value(
+        self,
+        page: Any,
+        selectors: List[str],
+        option_hints: List[str],
+    ) -> bool:
+        with suppress(Exception):
+            result = await page.evaluate(
+                """({ selectors, hints }) => {
+                    const isPlaceholder = (text, value) => {
+                        const low = (text || '').trim().toLowerCase();
+                        const val = (value || '').trim().toLowerCase();
+                        if (!val) return true;
+                        return (
+                            low.includes('select') ||
+                            low.includes('please') ||
+                            low.includes('choose') ||
+                            low.includes('--')
+                        );
+                    };
+
+                    const nodes = [];
+                    for (const sel of selectors) {
+                        const found = document.querySelectorAll(sel);
+                        for (const el of found) nodes.push(el);
+                    }
+
+                    const select = nodes.find(
+                        (el) => el instanceof HTMLSelectElement
+                    );
+                    if (!select) return false;
+
+                    const cur = select.options[select.selectedIndex] || null;
+                    if (cur && !isPlaceholder(cur.textContent || '', select.value || '')) {
+                        return true;
+                    }
+
+                    const options = Array.from(select.options || []);
+                    let target = -1;
+                    const normalizedHints = (hints || [])
+                        .map((h) => String(h || '').toLowerCase().trim())
+                        .filter(Boolean);
+
+                    for (const hint of normalizedHints) {
+                        const idx = options.findIndex((opt) => {
+                            const txt = (opt.textContent || '').toLowerCase();
+                            const val = (opt.value || '').toLowerCase();
+                            return txt.includes(hint) && !isPlaceholder(txt, val);
+                        });
+                        if (idx >= 0) {
+                            target = idx;
+                            break;
+                        }
+                    }
+
+                    if (target < 0) {
+                        target = options.findIndex((opt) => {
+                            const txt = (opt.textContent || '').toLowerCase();
+                            const val = (opt.value || '').toLowerCase();
+                            return !isPlaceholder(txt, val);
+                        });
+                    }
+
+                    if (target < 0) return false;
+
+                    select.selectedIndex = target;
+                    select.dispatchEvent(new Event('input', { bubbles: true }));
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }""",
+                {
+                    "selectors": selectors,
+                    "hints": option_hints,
+                },
+            )
+            return bool(result)
+
+        # Fallback through locator APIs if JS path fails.
+        return await self._pick_native_select(page, selectors, option_hints)
+
+    async def _pick_gl_dropdown(
+        self,
+        page: Any,
+        label_hints: List[str],
+        option_hints: List[str],
+    ) -> bool:
+        """Open a GitLab dropdown (native or custom) and pick an option.
+
+        Works with both native ``<select>`` elements and GitLab's Vue-based
+        ``GlCollapsibleListbox`` / ``GlDropdown`` components.
+        """
+        # --- Strategy 1: native <select> near a matching label ----------
+        try:
+            selects = page.locator("select")
+            count = await selects.count()
+            for i in range(count):
+                sel = selects.nth(i)
+                try:
+                    # Ignore visibility check for selects as they might be visually hidden behind custom UI
+                    pass
+                except Exception:
+                    continue
+
+                sel_id = await sel.get_attribute("id") or ""
+                sel_name = await sel.get_attribute("name") or ""
+                label_text = ""
+                with suppress(Exception):
+                    if sel_id:
+                        lbl = page.locator(f'label[for="{sel_id}"]')
+                        if await lbl.count() > 0:
+                            label_text = await lbl.text_content(timeout=1000) or ""
+                nearby_text = ""
+                with suppress(Exception):
+                    nearby_text = (
+                        await page.evaluate(
+                            """(el) => {
+                                const p = el.closest(
+                                    '.form-group, .gl-form-group, '
+                                    + 'fieldset, [class*="field"], [class*="dropdown"]'
+                                );
+                                return p ? p.textContent : '';
+                            }""",
+                            await sel.element_handle(),
+                        )
+                        or ""
+                    )
+
+                combo = f"{sel_id} {sel_name} {label_text} {nearby_text}".lower()
+                if not any(h in combo for h in label_hints):
+                    continue
+
+                if await self._pick_native_select_option(sel, option_hints):
+                    return True
+        except Exception:
+            pass
+
+        # --- Strategy 2: custom GlCollapsibleListbox / GlDropdown -------
+        try:
+            trigger_sels = [
+                "button.gl-new-dropdown-toggle",
+                "button.gl-dropdown-toggle",
+                "button.dropdown-toggle",
+                '[data-testid="base-dropdown-toggle"]',
+                '[role="combobox"]',
+                'button[aria-haspopup="listbox"]',
+                'button[aria-haspopup="true"]',
+                '.gl-dropdown > button',
+                '.dropdown > button',
+            ]
+            for tsel in trigger_sels:
+                triggers = page.locator(tsel)
+                tcount = await triggers.count()
+                for ti in range(tcount):
+                    trigger = triggers.nth(ti)
+                    try:
+                        if not await trigger.is_visible(timeout=1000):
+                            continue
+                    except Exception:
+                        continue
+
+                    nearby_text = ""
+                    with suppress(Exception):
+                        nearby_text = (
+                            await page.evaluate(
+                                """(el) => {
+                                let p = el.closest(
+                                    '.form-group, .gl-form-group, '
+                                    + 'fieldset, [class*="field"], [class*="dropdown"]'
+                                );
+                                return p ? p.textContent : '';
+                            }""",
+                                await trigger.element_handle(),
+                            )
+                            or ""
+                        )
+                    if not any(h in nearby_text.lower() for h in label_hints):
+                        continue
+
+                    with suppress(Exception):
+                        # Close any other open dropdowns first to prevent overlap issues
+                        await page.evaluate("() => { document.body.click(); }")
+                        await page.wait_for_timeout(200)
+
+                    with suppress(Exception):
+                        await page.evaluate(
+                            """() => {
+                                const overlays = document.querySelectorAll(
+                                  '[role="tooltip"], .gl-tooltip, [class*="tooltip"], [id*="tooltip"]'
+                                );
+                                overlays.forEach((el) => {
+                                    el.style.pointerEvents = 'none';
+                                });
+                            }"""
+                        )
+
+                    opened = False
+                    with suppress(Exception):
+                        # Scroll into view and click
+                        handle = await trigger.element_handle()
+                        if handle:
+                            await handle.scroll_into_view_if_needed()
+                        await trigger.click(timeout=3000)
+                        opened = True
+                    if not opened:
+                        with suppress(Exception):
+                            await trigger.click(timeout=2500, force=True)
+                            opened = True
+                    if not opened:
+                        with suppress(Exception):
+                            handle = await trigger.element_handle()
+                            if handle is not None:
+                                await page.evaluate("(el) => { el.scrollIntoView({block: 'center'}); el.click(); }", handle)
+                                opened = True
+                    if not opened:
+                        continue
+
+                    await page.wait_for_timeout(1000) # Wait a bit longer for animation
+
+                    if await self._pick_option_from_open_listbox(
+                        page,
+                        option_hints,
+                    ):
+                        return True
+
+                    with suppress(Exception):
+                        await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+        # --- Strategy 3: brute-force buttons with "Select" placeholder --
+        try:
+            all_btns = page.locator("button, .gl-dropdown-toggle, [data-testid*='dropdown'], [class*='dropdown']")
+            btn_count = await all_btns.count()
+            for bi in range(btn_count):
+                btn = all_btns.nth(bi)
+                try:
+                    # Ignore visibility check, button may be obscured
+                    pass
+                except Exception:
+                    continue
+                
+                try:
+                    txt = (await btn.text_content(timeout=500) or "").strip().lower()
+                    if not any(
+                        w in txt
+                        for w in (
+                            "select",
+                            "s\u00e9lectionner",
+                            "choose",
+                            "choisir",
+                            "-- ",
+                        )
+                    ):
+                        continue
+
+                    parent_text = ""
+                    with suppress(Exception):
+                        parent_text = (
+                            await page.evaluate(
+                                """(el) => {
+                                let p = el.closest(
+                                    '.form-group, .gl-form-group, '
+                                    + 'fieldset, [class*="field"], [class*="dropdown"]'
+                                );
+                                return p ? p.textContent : '';
+                            }""",
+                                await btn.element_handle(),
+                            )
+                            or ""
+                        )
+                    if not any(h in parent_text.lower() for h in label_hints):
+                        continue
+
+                    await btn.click(timeout=3000)
+                    await page.wait_for_timeout(500)
+
+                    if await self._pick_option_from_open_listbox(
+                        page,
+                        option_hints,
+                    ):
+                        return True
+
+                    with suppress(Exception):
+                        await page.keyboard.press("Escape")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        return False
+
+    async def _pick_option_from_open_listbox(
+        self,
+        page: Any,
+        option_hints: List[str],
+    ) -> bool:
+        """Pick an option from an already-open dropdown/listbox."""
+        option_selectors = [
+            '[role="option"]',
+            ".dropdown-item",
+            ".gl-dropdown-item",
+            "li[data-value]",
+            '[role="menuitem"]',
+            '[data-testid*="dropdown-item"]',
+            '.gl-listbox-item'
+        ]
+        for osel in option_selectors:
+            opts = page.locator(osel)
+            count = await opts.count()
+            if count == 0:
+                continue
+
+            # Try to match a preferred option.
+            for hint in option_hints:
+                for oi in range(count):
+                    opt = opts.nth(oi)
+                    try:
+                        opt_text = (await opt.text_content(timeout=500) or "").lower()
+                        if hint in opt_text:
+                            await opt.click(timeout=3000)
+                            return True
+                    except Exception:
+                        pass
+                    
+                    try:
+                        handle = await opt.element_handle()
+                        if handle:
+                            await page.evaluate("(el) => el.click()", handle)
+                            return True
+                    except Exception:
+                        continue
+                        
+                # Alternative Strategy: if element can't be clicked directly, try JS click
+                for oi in range(count):
+                    opt = opts.nth(oi)
+                    try:
+                        opt_text = (await opt.text_content(timeout=500) or "").lower()
+                        if hint in opt_text:
+                            handle = await opt.element_handle()
+                            if handle:
+                                await page.evaluate("(el) => el.click()", handle)
+                                return True
+                    except Exception:
+                        continue
+
+            # No hint matched -- pick the first visible non-placeholder
+            # option.
+            for oi in range(count):
+                opt = opts.nth(oi)
+                try:
+                    opt_text = (await opt.text_content(timeout=500) or "").strip()
+                    if not opt_text:
+                        continue
+                    low = opt_text.lower()
+                    if any(
+                        w in low
+                        for w in (
+                            "select",
+                            "s\u00e9lectionner",
+                            "choose",
+                            "choisir",
+                            "-- ",
+                        )
+                    ):
+                        continue
+                        
+                    try:
+                        await opt.click(timeout=3000)
+                        return True
+                    except Exception:
+                        pass
+                        
+                    try:
+                        handle = await opt.element_handle()
+                        if handle:
+                            await page.evaluate("(el) => el.click()", handle)
+                            return True
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+
+        return False
+
+    async def _click_first_visible(
+        self,
+        page: Any,
+        selectors: List[str],
+    ) -> bool:
+        """Click the first visible element matching any selector."""
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    with suppress(Exception):
+                        await loc.click(timeout=3000)
+                        return True
+                    with suppress(Exception):
+                        await loc.click(timeout=2500, force=True)
+                        return True
+                    with suppress(Exception):
+                        handle = await loc.element_handle()
+                        if handle is not None:
+                            await page.evaluate("(el) => el.click()", handle)
+                            return True
+            except Exception:
+                continue
+        return False
+
+    async def _complete_identity_verification_step(
+        self,
+        page: Any,
+        mailbox: Dict[str, str],
+    ) -> None:
+        if "identity_verification" not in page.url:
+            return
+
+        code_selectors = [
+            'input[name*="verification_code"]',
+            'input[id*="verification_code"]',
+            'input[name*="otp"]',
+            'input[autocomplete="one-time-code"]',
+            'input[inputmode="numeric"]',
+        ]
+
+        code_field = None
+        for selector in code_selectors:
+            code_field = await self._first_visible_locator(page, selector)
+            if code_field is not None:
+                break
+
+        if code_field is None:
+            if await self._is_phone_verification_required(page):
+                await self._wait_for_manual_phone_verification(page)
+            return
+
+        self.console.print(
+            "[yellow]GitLab requested an email verification code. "
+            "Checking inbox...[/yellow]"
+        )
+
+        verification_code = await self._wait_for_verification_code(mailbox)
+        if not await self._safe_fill(page, code_selectors, verification_code):
+            raise RuntimeError("Failed to fill GitLab verification code field")
+
+        clicked = await self._safe_click_by_button_name(
+            page,
+            [
+                "Verify email address",
+                "Verify email",
+                "Vérifier l'adresse de courriel",
+                "Vérifier l'adresse e-mail",
+                "Continuer",
+                "Continue",
+            ],
+        )
+        if not clicked:
+            clicked = await self._safe_click(
+                page,
+                [
+                    "form button[type='submit']",
+                    "button[type='submit']",
+                ],
+            )
+        if not clicked:
+            raise RuntimeError("Failed to submit GitLab email verification code")
+
+        await page.wait_for_timeout(2500)
+
+        if "identity_verification" in page.url:
+            if await self._is_phone_verification_required(page):
+                await self._wait_for_manual_phone_verification(page)
+                return
+
+            still_has_code_field = False
+            for selector in code_selectors:
+                if await self._first_visible_locator(page, selector) is not None:
+                    still_has_code_field = True
+                    break
+
+            if still_has_code_field:
+                alerts = await self._current_alert_messages(page)
+                if alerts:
+                    raise RuntimeError(
+                        "GitLab email verification code step did not complete: "
+                        f"{' | '.join(alerts)}"
+                    )
+
+    async def _create_group_via_ui(self, page: Any, group_slug: str) -> bool:
+        await page.goto(GROUP_CREATE_URL, wait_until="domcontentloaded", timeout=90000)
+        await self._dismiss_cookie_banners(page)
+
+        await self._safe_click_by_button_name(
+            page,
+            ["Create group", "Create a group", "Create blank group", "Continue"],
+        )
+
+        if not await self._safe_fill(
+            page,
+            ["#group_name", 'input[name="group[name]"]'],
+            f"Duo {group_slug}",
+        ):
+            return False
+
+        await self._safe_fill(
+            page,
+            ["#group_path", 'input[name="group[path]"]'],
+            group_slug,
+        )
+
+        clicked = await self._safe_click_by_button_name(
+            page,
+            ["Create group", "Create", "Continue"],
+        )
+        if not clicked:
+            return False
+
+        with suppress(Exception):
+            await page.wait_for_timeout(3000)
+        return "/groups/new" not in page.url
+
+    async def _list_owned_top_level_groups(
+        self, access_token: str
+    ) -> List[Dict[str, Any]]:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        params = {
+            "owned": "true",
+            "top_level_only": "true",
+            "per_page": "100",
+        }
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            response = await client.get(
+                f"{GITLAB_API_BASE}/groups",
+                headers=headers,
+                params=params,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        if not isinstance(data, list):
+            return []
+        return [group for group in data if isinstance(group, dict)]
+
+    async def _update_group_duo_settings(
+        self, access_token: str, group_id: int
+    ) -> bool:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        payloads = [
+            {
+                "duo_availability": "default_on",
+                "duo_features_enabled": "true",
+                "experiment_features_enabled": "true",
+            },
+            {
+                "duo_availability": "default_on",
+                "experiment_features_enabled": "true",
+            },
+            {
+                "duo_features_enabled": "true",
+            },
+        ]
+
+        # Trial propagation can take a few seconds – retry with backoff.
+        for attempt in range(4):
+            if attempt > 0:
+                delay = attempt * 5
+                lib_logger.debug(
+                    "Duo settings attempt %d failed, retrying in %ds…",
+                    attempt,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                for payload in payloads:
+                    try:
+                        response = await client.put(
+                            f"{GITLAB_API_BASE}/groups/{group_id}",
+                            headers=headers,
+                            data=payload,
+                        )
+                    except httpx.HTTPError as exc:
+                        lib_logger.debug(
+                            "Duo settings HTTP error: %s",
+                            exc,
+                        )
+                        continue
+
+                    lib_logger.debug(
+                        "Duo settings PUT group/%s → %d: %s",
+                        group_id,
+                        response.status_code,
+                        response.text[:500],
+                    )
+
+                    if response.status_code >= 400:
+                        continue
+
+                    body = response.json()
+                    if not isinstance(body, dict):
+                        continue
+
+                    if body.get("duo_availability") == "default_on":
+                        return True
+                    if body.get("duo_features_enabled") is True:
+                        return True
+
+        return False
+
+    async def _enable_duo_for_group(
+        self,
+        access_token: str,
+        page: Any,
+    ) -> tuple[bool, Optional[str]]:
+        # Allow trial activation to propagate before querying API.
+        await asyncio.sleep(3)
+
+        groups = await self._list_owned_top_level_groups(access_token)
+        lib_logger.debug("Owned top-level groups: %s", groups)
+
+        if not groups:
+            self.console.print(
+                "[yellow]No owned groups found, creating one via UI…[/yellow]"
+            )
+            created = await self._create_group_via_ui(
+                page, f"duo-{secrets.token_hex(4)}"
+            )
+            if created:
+                await asyncio.sleep(2)
+                groups = await self._list_owned_top_level_groups(access_token)
+
+        if not groups:
+            lib_logger.warning("Could not find or create any groups for Duo.")
+            return False, None
+
+        groups_sorted = sorted(
+            groups, key=lambda item: int(item.get("id", 0)), reverse=True
+        )
+        for group in groups_sorted:
+            group_id = group.get("id")
+            if not isinstance(group_id, int):
+                continue
+            lib_logger.debug(
+                "Attempting to enable Duo for group %s (id=%s)",
+                group.get("full_path"),
+                group_id,
+            )
+            if await self._update_group_duo_settings(access_token, group_id):
+                return True, str(group.get("full_path") or group.get("path") or "")
+
+        first = groups_sorted[0]
+        return False, str(first.get("full_path") or first.get("path") or "")
+
+    @staticmethod
+    async def _read_oauth_access_token(oauth_path: str) -> str:
+        creds = json.loads(Path(oauth_path).read_text(encoding="utf-8"))
+        token = creds.get("access_token")
+        if not token:
+            raise RuntimeError("OAuth credential file missing access_token")
+        return str(token)
+
+    async def run(
+        self,
+        oauth_runner: Callable[[Callable[[str], Awaitable[None]]], Awaitable[str]],
+    ) -> GitLabTrialAutomationResult:
+        """Run trial creation and return OAuth credential result metadata."""
+        async_playwright, apply_stealth = self._import_playwright()
+
+        # Detect which automation library is active.  Patchright's bundled
+        # Chromium is already CDP-patched for stealth so we do NOT need to
+        # use channel="chrome" (system Chrome); doing so can cause version
+        # mismatches and crashes.
+        _using_patchright = False
+        try:
+            importlib.import_module("patchright")
+            _using_patchright = True
+            self.console.print(
+                "[green]Using patchright (enhanced CDP stealth).[/green]"
+            )
+        except ImportError:
+            self.console.print(
+                "[yellow]Using vanilla playwright. For better stealth, "
+                "install patchright: pip install patchright && "
+                "patchright install chromium[/yellow]"
+            )
+
+        mailbox = await self._create_temp_mailbox()
+        identity = self._random_identity()
+        identity["email"] = mailbox["email"]
+        mail_provider_label = {
+            "temp_mail": "Temp Mail API",
+            "mail_tm": "mail.tm",
+            "guerrilla": "Guerrilla Mail",
+        }.get(mailbox.get("provider", ""), mailbox.get("provider", "unknown"))
+
+        self.console.print(
+            Panel(
+                "Creating GitLab trial account with randomized identity...\n"
+                f"Mail provider: {mail_provider_label}\n"
+                f"Email: {identity['email']}\n"
+                f"Username: {identity['username']}",
+                title="GitLab Trial Automation",
+                style="bold blue",
+            )
+        )
+
+        browser = None
+        context = None
+        page = None
+        chrome_process = None  # Subprocess when using connect_over_cdp.
+
+        try:
+            headless = self._resolve_headless_mode()
+            if (
+                self.low_risk_mode
+                and headless
+                and os.getenv("GITLAB_TRIAL_HEADLESS") is None
+                and self._has_visible_display()
+            ):
+                headless = False
+
+            self._headless_mode = headless
+
+            if headless:
+                self.console.print(
+                    "[yellow]Running GitLab trial automation in headless mode.[/yellow]"
+                )
+                if self.low_risk_mode:
+                    self.console.print(
+                        "[yellow]Low-risk mode works best with a visible browser. "
+                        "Set GITLAB_TRIAL_HEADLESS=false if possible.[/yellow]"
+                    )
+            elif self.low_risk_mode:
+                self.console.print("[green]Low-risk mode enabled.[/green]")
+
+            async with async_playwright() as playwright:
+                # =============================================================
+                # STRATEGY 1: connect_over_cdp  (most stealthy)
+                #
+                # Launch real Chrome as an independent subprocess, then attach
+                # Playwright/patchright to it via CDP.  This way Chrome has
+                # ZERO automation-framework launch artifacts — it's identical
+                # to Chrome launched from the dock.  Arkose Labs cannot
+                # distinguish it from a normal user session.
+                # =============================================================
+                cdp_ok = False
+                if not os.getenv("GITLAB_TRIAL_DISABLE_CDP"):
+                    cdp_result = await self._launch_chrome_cdp(headless)
+                    if cdp_result:
+                        chrome_process, cdp_endpoint = cdp_result
+                        try:
+                            browser = await playwright.chromium.connect_over_cdp(
+                                cdp_endpoint
+                            )
+                            context = browser.contexts[0]
+                            page = await context.new_page()
+                            await page.set_viewport_size({"width": 1440, "height": 900})
+                            cdp_ok = True
+                            self.console.print(
+                                "[green]Connected to Chrome via CDP — "
+                                "maximum stealth mode active.[/green]"
+                            )
+                        except Exception as cdp_err:
+                            self.console.print(
+                                f"[yellow]CDP attach failed ({cdp_err}), "
+                                "falling back to standard launch.[/yellow]"
+                            )
+                            browser = None
+                            with suppress(Exception):
+                                chrome_process.terminate()
+                            chrome_process = None
+
+                # =============================================================
+                # STRATEGY 2: standard Playwright/patchright launch  (fallback)
+                # =============================================================
+                if not cdp_ok:
+                    launch_args = [
+                        "--disable-blink-features=AutomationControlled",
+                    ]
+                    if (
+                        headless
+                        or os.path.exists("/.dockerenv")
+                        or os.path.exists("/run/.containerenv")
+                    ):
+                        launch_args += [
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                        ]
+
+                    try:
+                        configured_channel = os.getenv(
+                            "GITLAB_TRIAL_BROWSER_CHANNEL", ""
+                        ).strip()
+                        strict_channel = self._env_to_bool(
+                            os.getenv("GITLAB_TRIAL_BROWSER_CHANNEL_STRICT", "false")
+                        )
+
+                        if configured_channel:
+                            launch_channel_order: List[Optional[str]] = [
+                                configured_channel
+                            ]
+                            if not strict_channel:
+                                launch_channel_order.append(None)
+                        elif headless:
+                            launch_channel_order = ["chrome", "msedge", None]
+                        else:
+                            launch_channel_order = ["chrome", None]
+
+                        last_launch_error: Optional[Exception] = None
+                        for launch_channel in launch_channel_order:
+                            launch_kwargs: Dict[str, Any] = {
+                                "headless": headless,
+                                "args": launch_args,
+                            }
+                            if launch_channel:
+                                launch_kwargs["channel"] = launch_channel
+
+                            try:
+                                browser = await playwright.chromium.launch(
+                                    **launch_kwargs
+                                )
+                                if launch_channel:
+                                    self.console.print(
+                                        f"[dim]Using browser channel:[/dim] {launch_channel}"
+                                    )
+                                break
+                            except Exception as launch_error:
+                                last_launch_error = launch_error
+                                if (
+                                    launch_channel
+                                    and self._is_missing_browser_channel_error(
+                                        str(launch_error)
+                                    )
+                                ):
+                                    continue
+                                raise
+
+                        if browser is None and last_launch_error is not None:
+                            raise last_launch_error
+                    except Exception as e:
+                        message = str(e)
+                        if (
+                            "Executable doesn't exist" in message
+                            or "Please run the following command" in message
+                        ):
+                            raise RuntimeError(
+                                "Browser binary is missing. Run: "
+                                "patchright install chromium  (or: "
+                                "python -m playwright install chromium)"
+                            ) from e
+                        raise
+
+                    if browser is None:
+                        raise RuntimeError("Failed to launch Playwright browser")
+
+                    context_kwargs: Dict[str, Any] = {
+                        "viewport": {"width": 1440, "height": 900},
+                        "screen": {"width": 1440, "height": 900},
+                        "device_scale_factor": 2,
+                        "locale": "en-US",
+                        "color_scheme": "light",
+                        "user_agent": os.getenv(
+                            "GITLAB_TRIAL_USER_AGENT",
+                            (
+                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/133.0.0.0 Safari/537.36"
+                            ),
+                        ),
+                    }
+
+                    timezone_id = os.getenv("GITLAB_TRIAL_TIMEZONE", "").strip()
+                    if timezone_id:
+                        context_kwargs["timezone_id"] = timezone_id
+
+                    context = await browser.new_context(**context_kwargs)
+                    if self.clear_browser_state:
+                        with suppress(Exception):
+                            await context.clear_cookies()
+
+                    page = await context.new_page()
+                    await apply_stealth(page)
+                    if not _using_patchright:
+                        await self._apply_extra_stealth(page)
+
+                if self.clear_browser_state:
+                    with suppress(Exception):
+                        await page.goto("about:blank", wait_until="domcontentloaded")
+                    with suppress(Exception):
+                        await page.evaluate(
+                            """
+                            () => {
+                              try { localStorage.clear(); } catch (_) {}
+                              try { sessionStorage.clear(); } catch (_) {}
+                            }
+                            """
+                        )
+
+                await self._perform_low_risk_warmup(page)
+
+                try:
+                    await self._submit_trial_registration(
+                        page, identity, mailbox["email"]
+                    )
+                except RuntimeError as submit_error:
+                    if not self._is_email_rejected_error(str(submit_error)):
+                        raise
+
+                    fallback_provider: Optional[str] = None
+                    if (
+                        mailbox.get("provider") != "temp_mail"
+                        and os.getenv("TEMP_MAIL_API_KEY", "").strip()
+                    ):
+                        fallback_provider = "temp_mail"
+                    elif mailbox.get("provider") != "mail_tm":
+                        fallback_provider = "mail_tm"
+                    elif mailbox.get("provider") != "guerrilla":
+                        fallback_provider = "guerrilla"
+
+                    if not fallback_provider:
+                        raise
+
+                    self.console.print(
+                        "[yellow]Current temp email provider was rejected by GitLab. "
+                        f"Retrying with {fallback_provider}...[/yellow]"
+                    )
+                    mailbox = await self._create_temp_mailbox(
+                        provider_override=fallback_provider
+                    )
+                    identity["email"] = mailbox["email"]
+                    self.console.print(
+                        f"[cyan]Retry email:[/cyan] [bold]{identity['email']}[/bold]"
+                    )
+                    await self._submit_trial_registration(
+                        page, identity, mailbox["email"]
+                    )
+
+                if "identity_verification" in page.url:
+                    await self._complete_identity_verification_step(page, mailbox)
+                else:
+                    self.console.print(
+                        "[yellow]Waiting for confirmation email. "
+                        "If CAPTCHA appears in browser, solve it manually.[/yellow]"
+                    )
+                    confirm_link = await self._wait_for_confirmation_email(mailbox)
+                    await page.goto(
+                        confirm_link, wait_until="domcontentloaded", timeout=90000
+                    )
+
+                await self._try_sign_in_if_needed(
+                    page,
+                    identity["email"],
+                    identity["password"],
+                )
+
+                # Handle the welcome/onboarding page that GitLab shows
+                # for newly registered accounts before granting dashboard
+                # access.
+                await self._handle_welcome_onboarding(page)
+
+                async def _open_oauth_url(auth_url: str) -> None:
+                    nav_error: Optional[Exception] = None
+                    reached_page = False
+                    for wait_until in ("domcontentloaded", "commit"):
+                        try:
+                            await page.goto(
+                                auth_url,
+                                wait_until=wait_until,
+                                timeout=90000,
+                            )
+                            reached_page = True
+                            break
+                        except Exception as exc:
+                            nav_error = exc
+                            if "ERR_ABORTED" not in str(exc).upper():
+                                raise
+
+                            with suppress(Exception):
+                                await page.wait_for_timeout(1200)
+                            current_url = ""
+                            with suppress(Exception):
+                                current_url = page.url or ""
+                            if any(
+                                marker in current_url
+                                for marker in (
+                                    "oauth/authorize",
+                                    "/users/sign_in",
+                                    "127.0.0.1",
+                                    "/callback",
+                                )
+                            ):
+                                reached_page = True
+                                break
+
+                    if not reached_page and nav_error is not None:
+                        raise nav_error
+
+                    # Some runs are auto-approved and redirect straight to the
+                    # callback URL, which can report ERR_ABORTED despite being
+                    # successful. In that case nothing else is needed here.
+                    with suppress(Exception):
+                        if "127.0.0.1" in (page.url or "") or "/callback" in (
+                            page.url or ""
+                        ):
+                            self.console.print(
+                                "[green]OAuth callback reached directly.[/green]"
+                            )
+                            return
+
+                    if "sign_in" in page.url:
+                        await self._try_sign_in_if_needed(
+                            page,
+                            identity["email"],
+                            identity["password"],
+                        )
+                        if "sign_in" in page.url:
+                            await self._try_sign_in_if_needed(
+                                page,
+                                identity["username"],
+                                identity["password"],
+                            )
+
+                    # Also handle the welcome onboarding if it reappears
+                    # during the OAuth redirect.
+                    await self._handle_welcome_onboarding(page)
+
+                    # Wait for page to settle – use a generous timeout but
+                    # don't let a timeout crash the whole flow.
+                    with suppress(Exception):
+                        await page.wait_for_load_state(
+                            "networkidle",
+                            timeout=10000,
+                        )
+                    await page.wait_for_timeout(1500)
+
+                    self.console.print(f"[dim]OAuth page URL: {page.url}[/dim]")
+
+                    # Wait for the authorize button/form to actually appear
+                    # on the page before attempting to click.  GitLab's
+                    # authorize page can take time to render after the
+                    # initial load event fires.
+                    for _auth_wait in range(6):
+                        with suppress(Exception):
+                            await page.wait_for_selector(
+                                'input[type="submit"], '
+                                'button[type="submit"], '
+                                'form[action*="authorize"], '
+                                'button:has-text("Authorize"), '
+                                'button:has-text("Authorize OpenCode"), '
+                                'button:has-text("OpenCode")',
+                                timeout=3000,
+                            )
+                            break
+                        await page.wait_for_timeout(1000)
+
+                    # Strategy 1: find the authorize form via JS and submit it
+                    # directly.  This is the most reliable approach as it
+                    # doesn't depend on Playwright's locator matching.
+                    # Retry a few times in case the page is still rendering.
+                    js_clicked = False
+                    for _js_attempt in range(3):
+                        with suppress(Exception):
+                            js_clicked = await page.evaluate(
+                                """() => {
+                                    // Try submit buttons first.
+                                    const submits = document.querySelectorAll(
+                                        'input[type="submit"], button[type="submit"], button'
+                                    );
+                                    for (const btn of submits) {
+                                        const val = (
+                                            btn.value || btn.textContent || ''
+                                        ).toLowerCase();
+                                        if (
+                                            val.includes('authorize') ||
+                                            val.includes('autoriser') ||
+                                            val.includes('allow') ||
+                                            val.includes('opencode')
+                                        ) {
+                                            btn.click();
+                                            return true;
+                                        }
+                                    }
+                                    // Try any form whose action contains
+                                    // "authorize".
+                                    const form = document.querySelector(
+                                        'form[action*="authorize"]'
+                                    );
+                                    if (form) {
+                                        // Click the first submit-like element
+                                        // inside.
+                                        const inner = form.querySelector(
+                                            'input[type="submit"], '
+                                            + 'button[type="submit"], '
+                                            + 'button'
+                                        );
+                                        if (inner) { inner.click(); return true; }
+                                        form.submit();
+                                        return true;
+                                    }
+                                    // Try any visible button/link that has
+                                    // "Authorize" or "OpenCode" text.
+                                    const allBtns = document.querySelectorAll(
+                                        'button, a.btn, [role="button"], '
+                                        + 'input[type="submit"]'
+                                    );
+                                    for (const b of allBtns) {
+                                        const txt = (
+                                            b.value || b.textContent || ''
+                                        ).trim().toLowerCase();
+                                        if (
+                                            txt.includes('authorize') ||
+                                            txt.includes('autoriser') ||
+                                            txt.includes('allow') ||
+                                            txt.includes('opencode')
+                                        ) {
+                                            b.click();
+                                            return true;
+                                        }
+                                    }
+                                    return false;
+                                }"""
+                            )
+                        if js_clicked:
+                            break
+                        await page.wait_for_timeout(1500)
+
+                    if js_clicked:
+                        self.console.print("[green]Clicked Authorize via JS.[/green]")
+                        return
+
+                    # Strategy 2: Playwright locator-based clicks.
+                    self.console.print(
+                        "[yellow]JS click failed, trying Playwright locators…[/yellow]"
+                    )
+                    authorize_names = [
+                        "Authorize",
+                        "Authorize OpenCode",
+                        "Authorize application",
+                        "Allow",
+                        "Grant access",
+                        "Autoriser",
+                        "Autoriser l'application",
+                    ]
+                    
+                    # Try specific exact matches first
+                    for name in authorize_names:
+                        with suppress(Exception):
+                            loc = page.locator(f'button:has-text("{name}")').first
+                            if await loc.count() > 0 and await loc.is_visible(timeout=500):
+                                await loc.click(timeout=3000)
+                                self.console.print(f"[green]Clicked Authorize ({name}) via exact locator.[/green]")
+                                return
+                                
+                    clicked = await self._safe_click_by_button_name(
+                        page,
+                        authorize_names,
+                    )
+                    if clicked:
+                        self.console.print(
+                            "[green]Clicked Authorize via locator.[/green]"
+                        )
+                        return
+
+                    # Strategy 3: try submit inputs directly.
+                    submit_selectors = [
+                        'input[type="submit"]',
+                        'button[type="submit"]',
+                        ".btn-confirm",
+                        ".btn-success",
+                    ]
+                    clicked = await self._safe_click(page, submit_selectors)
+                    if clicked:
+                        self.console.print(
+                            "[green]Clicked Authorize via CSS selector.[/green]"
+                        )
+                        return
+
+                    # Strategy 4: Playwright text-based locator with force
+                    # click — catches elements that aren't <button> or
+                    # <input> but render as clickable authorize actions.
+                    with suppress(Exception):
+                        loc = page.locator(
+                            ':is(button, input, a, [role="button"])'
+                        ).filter(has_text=re.compile(r"authorize|autoriser", re.IGNORECASE))
+                        if await loc.count() > 0:
+                            await loc.first.click(timeout=5000, force=True)
+                            self.console.print(
+                                "[green]Clicked Authorize via text filter.[/green]"
+                            )
+                            return
+
+                    # Strategy 5: submit any form whose action contains
+                    # "authorize" directly via JS form.submit() — bypasses
+                    # any button click issues entirely.
+                    with suppress(Exception):
+                        submitted = await page.evaluate(
+                            """() => {
+                                const forms = document.querySelectorAll('form');
+                                for (const f of forms) {
+                                    const action = (f.action || '').toLowerCase();
+                                    if (action.includes('authorize') || action.includes('oauth')) {
+                                        f.submit();
+                                        return true;
+                                    }
+                                }
+                                // Last resort: submit the first form on the page
+                                if (forms.length > 0) {
+                                    forms[0].submit();
+                                    return true;
+                                }
+                                return false;
+                            }"""
+                        )
+                        if submitted:
+                            self.console.print(
+                                "[green]Submitted authorize form via JS.[/green]"
+                            )
+                            return
+
+                    # Strategy 6: dump what's on the page for debugging
+                    # and wait for user.
+                    with suppress(Exception):
+                        btn_info = await page.evaluate(
+                            """() => {
+                                const els = document.querySelectorAll(
+                                    'button, input[type="submit"], '
+                                    + 'a.btn, [role="button"]'
+                                );
+                                return Array.from(els).map(e => ({
+                                    tag: e.tagName,
+                                    type: e.type || '',
+                                    value: e.value || '',
+                                    text: (e.textContent||'').trim().slice(
+                                        0, 80
+                                    ),
+                                    visible: e.offsetParent !== null,
+                                }));
+                            }"""
+                        )
+                        self.console.print(
+                            f"[dim]Buttons found on page: {btn_info}[/dim]"
+                        )
+
+                    self.console.print(
+                        "[yellow]Could not auto-click Authorize. "
+                        "Please click it manually in the browser.[/yellow]"
+                    )
+                    for _ in range(60):
+                        await page.wait_for_timeout(2000)
+                        if "authorize" not in page.url:
+                            break
+
+                oauth_path = await oauth_runner(_open_oauth_url)
+                access_token = await self._read_oauth_access_token(oauth_path)
+
+                duo_enabled, group_path = await self._enable_duo_for_group(
+                    access_token, page
+                )
+                if not duo_enabled:
+                    self.console.print(
+                        "[yellow]Could not auto-enable GitLab Duo settings. "
+                        "The OAuth credential is still valid — you can enable "
+                        "Duo manually in GitLab group settings.[/yellow]"
+                    )
+
+                return GitLabTrialAutomationResult(
+                    oauth_path=oauth_path,
+                    email=identity["email"],
+                    username=identity["username"],
+                    group_path=group_path,
+                    duo_enabled=duo_enabled,
+                )
+        finally:
+            # Explicit closure requested by user.
+            if page is not None:
+                with suppress(Exception):
+                    await page.close()
+            if context is not None:
+                with suppress(Exception):
+                    await context.close()
+            if browser is not None:
+                with suppress(Exception):
+                    await browser.close()
+            if chrome_process is not None:
+                with suppress(Exception):
+                    chrome_process.terminate()
+                with suppress(Exception):
+                    chrome_process.wait(timeout=5)
