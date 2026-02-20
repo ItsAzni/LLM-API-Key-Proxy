@@ -1078,7 +1078,7 @@ class GitLabDuoProvider(ProviderInterface):
         payload: Dict[str, Any] = {
             "model": backend_model,
             "messages": anthropic_messages,
-            "max_tokens": kwargs.get("max_tokens", 8192),
+            "max_tokens": kwargs.get("max_tokens") or 8192,
         }
 
         if system_text:
