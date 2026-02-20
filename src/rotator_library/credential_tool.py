@@ -7,8 +7,10 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
+from typing import Any
 from dotenv import set_key, get_key
 
 # NOTE: Heavy imports (provider_factory, PROVIDER_PLUGINS) are deferred
@@ -272,7 +274,14 @@ def _get_oauth_credentials_summary() -> dict:
         Example: {"gemini_cli": [{"email": "user@example.com", "tier": "free-tier", ...}, ...]}
     """
     provider_factory, _ = _ensure_providers_loaded()
-    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "github_copilot", "gitlab_duo"]
+    oauth_providers = [
+        "gemini_cli",
+        "qwen_code",
+        "iflow",
+        "antigravity",
+        "github_copilot",
+        "gitlab_duo",
+    ]
     oauth_summary = {}
 
     for provider_name in oauth_providers:
@@ -1260,7 +1269,7 @@ async def setup_api_key():
         }
 
     # Add custom providers from PROVIDER_PLUGINS
-    for provider_key, provider_class in PROVIDER_PLUGINS.items():
+    for provider_key, provider_class in (PROVIDER_PLUGINS or {}).items():
         # Skip OAuth-only providers
         if provider_key in oauth_only_providers:
             continue
@@ -1741,9 +1750,122 @@ async def setup_new_credential(provider_name: str):
         display_name = oauth_friendly_names.get(
             provider_name, provider_name.replace("_", " ").title()
         )
+        result: Any
+
+        # Special handling for GitLab Duo - offer standard OAuth or full auto trial
+        if provider_name == "gitlab_duo":
+            console.print(
+                Panel(
+                    Text.from_markup(
+                        "[bold]Choose setup mode:[/bold]\n\n"
+                        "  [cyan]1.[/cyan] Standard OAuth\n"
+                        "     Use your existing GitLab account in browser\n\n"
+                        "  [cyan]2.[/cyan] Auto trial + OAuth [yellow](Playwright)[/yellow]\n"
+                        "     Creates randomized trial account with Temp Mail API\n"
+                        "     Confirms email, runs OAuth, and enables GitLab Duo settings\n"
+                        "     [dim]Uses mail.tm when TEMP_MAIL_API_KEY is unset[/dim]\n"
+                        "     [dim]May still require manual CAPTCHA/phone verification[/dim]"
+                    ),
+                    title="[bold blue]GitLab Duo Setup Mode[/bold blue]",
+                    border_style="blue",
+                )
+            )
+
+            auth_choice = Prompt.ask(
+                "[bold]Select mode[/bold] (or 'b' to go back)",
+                choices=["1", "2", "b"],
+                default="1",
+            )
+
+            if auth_choice.lower() == "b":
+                return
+
+            if auth_choice == "2":
+                from .providers.gitlab_duo_auth_base import CredentialSetupResult
+                from .providers.gitlab_duo_provider import (
+                    DEFAULT_OAUTH_CALLBACK_PORT,
+                    DEFAULT_OAUTH_CLIENT_ID,
+                    GitLabDuoProvider,
+                    _get_instance_url,
+                )
+                from .providers.utilities.gitlab_trial_automation import (
+                    GitLabTrialAutomator,
+                )
+
+                base_dir = _get_oauth_base_dir()
+                instance_url = _get_instance_url()
+                client_id = os.getenv("GITLAB_OAUTH_CLIENT_ID", DEFAULT_OAUTH_CLIENT_ID)
+                callback_port = int(
+                    os.getenv("GITLAB_DUO_OAUTH_PORT", str(DEFAULT_OAUTH_CALLBACK_PORT))
+                )
+
+                if not client_id:
+                    result = CredentialSetupResult(
+                        success=False,
+                        error=(
+                            "GITLAB_OAUTH_CLIENT_ID is not set. "
+                            "Configure it in .env and try again."
+                        ),
+                    )
+                else:
+                    next_num = auth_instance._get_next_credential_number(base_dir)
+                    output_path = str(base_dir / f"gitlab_duo_oauth_{next_num}.json")
+
+                    automator = GitLabTrialAutomator(console=console)
+
+                    async def oauth_runner(auth_url_handler):
+                        return await GitLabDuoProvider.oauth_setup(
+                            instance_url=instance_url,
+                            client_id=client_id,
+                            callback_port=callback_port,
+                            output_path=output_path,
+                            auth_url_handler=auth_url_handler,
+                            auto_open_browser=False,
+                        )
+
+                    try:
+                        auto_result = await automator.run(oauth_runner)
+                        saved_path = auto_result.oauth_path
+                        is_update = False
+
+                        with open(saved_path, "r") as f:
+                            new_creds = json.load(f)
+
+                        access_token = new_creds.get("access_token", "")
+                        existing = auth_instance._find_existing_credential_by_token(
+                            access_token,
+                            base_dir,
+                            exclude_path=saved_path,
+                        )
+                        if existing:
+                            shutil.copy2(saved_path, str(existing))
+                            os.remove(saved_path)
+                            saved_path = str(existing)
+                            is_update = True
+
+                        with open(saved_path, "r") as f:
+                            creds = json.load(f)
+
+                        metadata = creds.setdefault("_proxy_metadata", {})
+                        metadata["email"] = auto_result.email
+                        metadata["gitlab_duo_group"] = auto_result.group_path or ""
+                        metadata["gitlab_trial_automated"] = True
+                        await auth_instance._save_credentials(saved_path, creds)
+
+                        result = CredentialSetupResult(
+                            success=True,
+                            file_path=saved_path,
+                            email=auto_result.email,
+                            is_update=is_update,
+                            credentials=creds,
+                        )
+                    except Exception as e:
+                        result = CredentialSetupResult(success=False, error=str(e))
+            else:
+                result = await auth_instance.setup_credential(_get_oauth_base_dir())
 
         # Special handling for iFlow - offer OAuth or Cookie authentication
-        if provider_name == "iflow":
+        elif provider_name == "iflow":
             console.print(
                 Panel(
                     Text.from_markup(
@@ -1791,15 +1913,21 @@ async def setup_new_credential(provider_name: str):
             )
             return
 
+        result_file_name = (
+            Path(result.file_path).name
+            if getattr(result, "file_path", None)
+            else "unknown"
+        )
+
         # Display success message with details
         if result.is_update:
             success_text = Text.from_markup(
-                f"Successfully updated credential at [bold yellow]'{Path(result.file_path).name}'[/bold yellow] "
+                f"Successfully updated credential at [bold yellow]'{result_file_name}'[/bold yellow] "
                 f"for user [bold cyan]'{result.email}'[/bold cyan]."
             )
         else:
             success_text = Text.from_markup(
-                f"Successfully created new credential at [bold yellow]'{Path(result.file_path).name}'[/bold yellow] "
+                f"Successfully created new credential at [bold yellow]'{result_file_name}'[/bold yellow] "
                 f"for user [bold cyan]'{result.email}'[/bold cyan]."
             )
 
@@ -1814,8 +1942,17 @@ async def setup_new_credential(provider_name: str):
                 if tier_full:
                     tier_display = tier_full
             success_text.append(f"\nTier: {tier_display}")
-        if hasattr(result, "project_id") and result.project_id:
-            success_text.append(f"\nProject: {result.project_id}")
+
+        project_id = getattr(result, "project_id", None)
+        if project_id:
+            success_text.append(f"\nProject: {project_id}")
+
+        if result.credentials and isinstance(result.credentials, dict):
+            group_path = result.credentials.get("_proxy_metadata", {}).get(
+                "gitlab_duo_group"
+            )
+            if group_path:
+                success_text.append(f"\nGitLab Group: {group_path}")
 
         console.print(Panel(success_text, style="bold green", title="Success"))
 
@@ -2371,7 +2508,14 @@ async def combine_all_credentials():
     clear_screen("Combine All Credentials")
 
     # List of providers that support OAuth credentials
-    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "github_copilot", "gitlab_duo"]
+    oauth_providers = [
+        "gemini_cli",
+        "qwen_code",
+        "iflow",
+        "antigravity",
+        "github_copilot",
+        "gitlab_duo",
+    ]
 
     provider_factory, _ = _ensure_providers_loaded()
 
@@ -2740,7 +2884,7 @@ def run_credential_tool(from_launcher=False):
         _elapsed = time.time() - _start_time
         _, PROVIDER_PLUGINS = _ensure_providers_loaded()
         print(
-            f"✓ Tool ready in {_elapsed:.2f}s ({len(PROVIDER_PLUGINS)} providers available)"
+            f"✓ Tool ready in {_elapsed:.2f}s ({len(PROVIDER_PLUGINS or {})} providers available)"
         )
 
         # Small delay to let user see the ready message

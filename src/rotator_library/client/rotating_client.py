@@ -305,6 +305,66 @@ class RotatingClient:
         if hasattr(self, "http_client") and self.http_client:
             await self.http_client.aclose()
 
+    async def add_oauth_credential(self, provider: str, path: str) -> bool:
+        """Hot-load a new OAuth credential at runtime.
+
+        Initializes the token, adds it to the credential inventory,
+        and registers it with the appropriate UsageManager.
+
+        Returns True if the credential was newly added.
+        """
+        # Check if already known
+        existing = self.all_credentials.get(provider, [])
+        if path in existing:
+            lib_logger.info(f"Credential already loaded: {provider} / {path}")
+            return False
+
+        # Initialize the token via the provider plugin
+        provider_class = self._provider_plugins.get(provider)
+        if provider_class:
+            try:
+                instance = self._get_provider_instance(provider)
+                await instance.initialize_token(path)
+            except Exception as e:
+                lib_logger.error(f"Failed to initialize new credential {path}: {e}")
+                return False
+
+        # Add to credential inventory
+        self.all_credentials.setdefault(provider, []).append(path)
+        self.oauth_credentials.setdefault(provider, []).append(path)
+        self.oauth_providers.add(provider)
+
+        # Register with UsageManager
+        manager = self._usage_managers.get(provider)
+        if manager:
+            priorities, tiers = self._get_credential_metadata(provider, [path])
+            p = priorities.get(path)
+            t = tiers.get(path)
+            await manager.register_new_credential(path, priority=p, tier=t)
+        else:
+            # New provider — need to create a UsageManager
+            from ..usage.config import load_provider_usage_config
+
+            config = load_provider_usage_config(provider, PROVIDER_PLUGINS)
+            usage_file = self._usage_base_path / f"usage_{provider}.json"
+            max_concurrent = self.max_concurrent_requests_per_key.get(provider, 1)
+            manager = NewUsageManager(
+                provider=provider,
+                file_path=usage_file,
+                provider_plugins=PROVIDER_PLUGINS,
+                config=config,
+                max_concurrent_per_key=max_concurrent,
+            )
+            self._usage_managers[provider] = manager
+            priorities, tiers = self._get_credential_metadata(provider, [path])
+            await manager.initialize([path], priorities=priorities, tiers=tiers)
+
+            # Update executor with new manager
+            self._executor._usage_managers = self._usage_managers
+
+        lib_logger.info(f"Hot-loaded OAuth credential: {provider} / {Path(path).name}")
+        return True
+
     async def acompletion(
         self,
         request: Optional[Any] = None,

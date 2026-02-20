@@ -69,6 +69,8 @@ services:
     command: python -m src.proxy_app.telegram_bot
     volumes:
       - ./.env:/app/.env:ro
+      # Shared OAuth credentials — bot writes new creds, proxy reads them
+      - ./oauth_creds:/app/oauth_creds
     environment:
       - PYTHONUNBUFFERED=1
       # Point to the llm-proxy container

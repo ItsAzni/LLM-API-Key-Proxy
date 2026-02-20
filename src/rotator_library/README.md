@@ -15,6 +15,7 @@ A robust, asynchronous, and thread-safe Python library for managing a pool of AP
     -   **Antigravity**: Full OAuth 2.0 support for Gemini 3, Gemini 2.5, and Claude Sonnet 4.5 models with thought signature caching(Full support for Gemini 3 and Claude models). **First on the scene to provide full support for Gemini 3** via Antigravity with advanced features like thought signature caching and tool hallucination prevention.
     -   **Qwen Code**: Device Code flow support.
     -   **iFlow**: Authorization Code flow with local callback handling.
+    -   **GitLab Duo**: OAuth 2.0 PKCE support with optional trial-account automation mode (Playwright + temp email) in the credential tool.
 -   **Stateless Deployment Ready**: Can load complex OAuth credentials from environment variables, eliminating the need for physical credential files in containerized environments.
 -   **Intelligent Error Handling**:
     -   **Escalating Per-Model Cooldowns**: Failed keys are placed on a temporary, escalating cooldown for specific models.
@@ -342,4 +343,3 @@ The system will automatically discover and register your new provider.
 ## Detailed Documentation
 
 For a more in-depth technical explanation of the library's architecture, including the `UsageManager`'s concurrency model and the error classification system, please refer to the [Technical Documentation](../../DOCUMENTATION.md).
-
