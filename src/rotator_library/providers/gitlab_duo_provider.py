@@ -972,14 +972,16 @@ class GitLabDuoProvider(ProviderInterface):
                 asst_msg = _ensure_role("assistant")
                 blocks = asst_msg["content"]
 
-                # Thinking / reasoning
+                # Thinking / reasoning – only include if we have a valid signature.
+                # Anthropic rejects thinking blocks with missing/invalid signatures.
                 reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-                if reasoning:
+                sig = msg.get("thinking_signature", "")
+                if reasoning and sig and len(sig) >= 50:
                     blocks.append(
                         {
                             "type": "thinking",
                             "thinking": reasoning,
-                            "signature": msg.get("thinking_signature", ""),
+                            "signature": sig,
                         }
                     )
 
@@ -1206,6 +1208,7 @@ class GitLabDuoProvider(ProviderInterface):
         """Convert Anthropic Messages response to litellm.ModelResponse."""
         content_text = ""
         reasoning_content = ""
+        thinking_signature = ""
         tool_calls = []
 
         for block in data.get("content", []):
@@ -1214,6 +1217,8 @@ class GitLabDuoProvider(ProviderInterface):
                 content_text += block.get("text", "")
             elif btype == "thinking":
                 reasoning_content += block.get("thinking", "")
+                if block.get("signature"):
+                    thinking_signature = block["signature"]
             elif btype == "tool_use":
                 tool_calls.append(
                     {
@@ -1244,6 +1249,8 @@ class GitLabDuoProvider(ProviderInterface):
             message["tool_calls"] = tool_calls
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
+            if thinking_signature:
+                message["thinking_signature"] = thinking_signature
 
         response_obj = litellm.ModelResponse(
             id=data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
@@ -1454,6 +1461,30 @@ class GitLabDuoProvider(ProviderInterface):
                                         "index": 0,
                                         "delta": {
                                             "reasoning_content": thinking,
+                                            "role": "assistant",
+                                        },
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            )
+                            if is_first_chunk:
+                                chunk._response_headers = captured_headers
+                                is_first_chunk = False
+                            yield chunk
+
+                    elif delta_type == "signature_delta":
+                        sig = delta.get("signature", "")
+                        if sig:
+                            chunk = litellm.ModelResponse(
+                                id=response_id,
+                                created=created,
+                                model=f"gitlab_duo/{proxy_model}",
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "thinking_signature": sig,
                                             "role": "assistant",
                                         },
                                         "finish_reason": None,
