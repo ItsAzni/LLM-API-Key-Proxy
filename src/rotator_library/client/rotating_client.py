@@ -323,7 +323,13 @@ class RotatingClient:
         provider_class = self._provider_plugins.get(provider)
         if provider_class:
             try:
-                instance = self._get_provider_instance(provider)
+                # Can't use _get_provider_instance() here because the
+                # credential isn't in all_credentials yet (added below),
+                # and _get_provider_instance() has a guard that returns
+                # None if the provider isn't in all_credentials.
+                if provider not in self._provider_instances:
+                    self._provider_instances[provider] = provider_class()
+                instance = self._provider_instances[provider]
                 await instance.initialize_token(path)
             except Exception as e:
                 lib_logger.error(f"Failed to initialize new credential {path}: {e}")
