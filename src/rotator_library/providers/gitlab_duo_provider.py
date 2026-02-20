@@ -41,8 +41,19 @@ import secrets
 import time
 import uuid
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
@@ -74,7 +85,9 @@ TOKEN_CACHE_DURATION = 25 * 60
 # Default OAuth client ID from GitLab VS Code extension (public client).
 # This app has http://127.0.0.1:8080/callback registered as a redirect URI.
 # Override via GITLAB_OAUTH_CLIENT_ID for self-managed instances.
-DEFAULT_OAUTH_CLIENT_ID = "1d89f9fdb23ee96d4e603201f6861dab6e143c5c3c00469a018a2d94bdc03d4e"
+DEFAULT_OAUTH_CLIENT_ID = (
+    "1d89f9fdb23ee96d4e603201f6861dab6e143c5c3c00469a018a2d94bdc03d4e"
+)
 
 # OAuth scopes
 OAUTH_SCOPES = ["api"]
@@ -181,13 +194,18 @@ class GitLabDuoProvider(ProviderInterface):
 
     model_quota_groups = {
         "claude": [
-            "claude-opus-4-6", "claude-opus-4-5",
-            "claude-sonnet-4-6", "claude-sonnet-4-5",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
             "claude-haiku-4-5",
         ],
         "gpt": [
-            "gpt-5-2", "gpt-5-2-codex",
-            "gpt-5-1", "gpt-5-codex", "gpt-5-mini",
+            "gpt-5-2",
+            "gpt-5-2-codex",
+            "gpt-5-1",
+            "gpt-5-codex",
+            "gpt-5-mini",
         ],
     }
 
@@ -219,7 +237,9 @@ class GitLabDuoProvider(ProviderInterface):
             creds = self._load_oauth_credentials(creds_or_path)
             expires_at = creds.get("expires_at", 0)
             if time.time() >= (expires_at - OAUTH_REFRESH_BUFFER):
-                lib_logger.info("[GitLabDuo] OAuth token expired on startup, refreshing...")
+                lib_logger.info(
+                    "[GitLabDuo] OAuth token expired on startup, refreshing..."
+                )
                 creds = await self._refresh_oauth_token(creds_or_path, creds)
             return creds
         # PAT credentials don't need initialization
@@ -246,7 +266,10 @@ class GitLabDuoProvider(ProviderInterface):
                         )
                         if response.status_code == 200:
                             data = response.json()
-                            return {"email": data.get("email") or data.get("username", "unknown")}
+                            return {
+                                "email": data.get("email")
+                                or data.get("username", "unknown")
+                            }
                 except Exception as e:
                     lib_logger.debug("[GitLabDuo] Failed to fetch user info: %s", e)
         return {}
@@ -454,9 +477,7 @@ class GitLabDuoProvider(ProviderInterface):
             safe_write_json(cred_path, creds, lib_logger)
             lib_logger.debug("[GitLabDuo] OAuth credentials saved to %s", cred_path)
         except Exception as e:
-            lib_logger.warning(
-                "[GitLabDuo] Failed to save OAuth credentials: %s", e
-            )
+            lib_logger.warning("[GitLabDuo] Failed to save OAuth credentials: %s", e)
 
     # =========================================================================
     # OAUTH SETUP FLOW (Interactive, for credential_tool)
@@ -482,6 +503,8 @@ class GitLabDuoProvider(ProviderInterface):
         client_id: Optional[str] = None,
         callback_port: int = DEFAULT_OAUTH_CALLBACK_PORT,
         output_path: Optional[str] = None,
+        auth_url_handler: Optional[Callable[[str], Awaitable[None]]] = None,
+        auto_open_browser: bool = True,
     ) -> str:
         """
         Run the interactive OAuth 2.0 PKCE flow to obtain GitLab credentials.
@@ -494,6 +517,8 @@ class GitLabDuoProvider(ProviderInterface):
             client_id: OAuth client ID (default: from env or VS Code extension ID)
             callback_port: Local callback server port (default: 8080)
             output_path: Path to save the credential JSON file
+            auth_url_handler: Optional async callback to handle auth URL opening
+            auto_open_browser: Auto-open browser when no auth_url_handler is provided
 
         Returns:
             Path to the saved credential JSON file
@@ -544,9 +569,21 @@ class GitLabDuoProvider(ProviderInterface):
             cls._run_callback_server(callback_port, state)
         )
 
-        # Give server a moment to start, then open browser
+        # Give server a moment to start, then open auth URL
         await asyncio.sleep(0.1)
-        webbrowser.open(auth_url)
+
+        if auth_url_handler is not None:
+            try:
+                await auth_url_handler(auth_url)
+            except Exception as e:
+                auth_code_future.cancel()
+                with suppress(asyncio.CancelledError):
+                    await auth_code_future
+                raise RuntimeError(
+                    f"Failed to handle OAuth authorization URL: {e}"
+                ) from e
+        elif auto_open_browser:
+            webbrowser.open(auth_url)
 
         auth_code = await auth_code_future
 
@@ -718,9 +755,7 @@ class GitLabDuoProvider(ProviderInterface):
             kwargs.get("max_tokens"),
         )
 
-        api_key = kwargs.pop(
-            "credential_identifier", kwargs.pop("credential_path", "")
-        )
+        api_key = kwargs.pop("credential_identifier", kwargs.pop("credential_path", ""))
         kwargs.pop("extra_headers", None)
 
         # Strip provider prefix
@@ -819,7 +854,9 @@ class GitLabDuoProvider(ProviderInterface):
             # List content — check for real text (not just tool_result)
             if isinstance(content, list):
                 has_text = any(
-                    isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()
+                    isinstance(b, dict)
+                    and b.get("type") == "text"
+                    and b.get("text", "").strip()
                     for b in content
                 )
                 has_tool_result = any(
@@ -827,7 +864,9 @@ class GitLabDuoProvider(ProviderInterface):
                     for b in content
                 )
                 if has_text and not has_tool_result:
-                    content.append({"type": "text", "text": INTERLEAVED_THINKING_REMINDER})
+                    content.append(
+                        {"type": "text", "text": INTERLEAVED_THINKING_REMINDER}
+                    )
                     return messages
 
         return messages
@@ -1256,7 +1295,10 @@ class GitLabDuoProvider(ProviderInterface):
                     yield chunk
                 return  # Success — stream completed
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 402 and attempt < self._TRANSIENT_402_MAX_RETRIES - 1:
+                if (
+                    e.response.status_code == 402
+                    and attempt < self._TRANSIENT_402_MAX_RETRIES - 1
+                ):
                     lib_logger.info(
                         "[GitLabDuo] Transient 402, retrying in %ds (attempt %d/%d)",
                         self._TRANSIENT_402_DELAY,
@@ -1314,6 +1356,7 @@ class GitLabDuoProvider(ProviderInterface):
                 # Build a synthetic non-streaming response so classify_error
                 # can read status_code and body even after the stream context exits.
                 from httpx import Response as _Resp, Request as _Req
+
                 synth_resp = _Resp(
                     status_code=response.status_code,
                     headers=response.headers,
@@ -1664,6 +1707,7 @@ class GitLabDuoProvider(ProviderInterface):
                     error_text[:500],
                 )
                 from httpx import Response as _Resp
+
                 synth_resp = _Resp(
                     status_code=response.status_code,
                     headers=response.headers,
@@ -1733,9 +1777,7 @@ class GitLabDuoProvider(ProviderInterface):
                                 {
                                     "index": index,
                                     "delta": {
-                                        "reasoning_content": delta[
-                                            "reasoning_content"
-                                        ],
+                                        "reasoning_content": delta["reasoning_content"],
                                         "role": delta.get("role", "assistant"),
                                     },
                                     "finish_reason": None,
@@ -1868,9 +1910,7 @@ class GitLabDuoProvider(ProviderInterface):
         # Credit exhaustion
         if status == 403:
             body_lower = body.lower()
-            if any(
-                kw in body_lower for kw in ("credit", "exhaust", "quota", "limit")
-            ):
+            if any(kw in body_lower for kw in ("credit", "exhaust", "quota", "limit")):
                 return {
                     "retry_after": 3600,  # 1 hour cooldown
                     "reason": "QUOTA_EXHAUSTED",

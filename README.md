@@ -264,7 +264,9 @@ python -m rotator_library.credential_tool
 | Type | Providers | How to Add |
 |------|-----------|------------|
 | **API Keys** | Gemini, OpenAI, Anthropic, OpenRouter, Groq, Mistral, NVIDIA, Cohere, Chutes | Enter key in TUI or add to `.env` |
-| **OAuth** | Gemini CLI, Antigravity, Qwen Code, iFlow | Interactive browser login via credential tool |
+| **OAuth** | Gemini CLI, Antigravity, Qwen Code, iFlow, GitLab Duo | Interactive browser login via credential tool |
+
+> GitLab Duo also supports an optional **"Auto trial + OAuth"** setup mode in the credential tool, which uses Playwright + Temp Mail API (or mail.tm/Guerrilla fallback) to automate signup, email confirmation, OAuth, and Duo setting enablement. It includes low-risk browser mode and manual phone-verification pause when GitLab requires it.
 
 ### The `.env` File
 
@@ -295,7 +297,7 @@ The proxy is powered by a standalone Python library that you can use directly in
 - **Intelligent key selection** with tiered, model-aware locking
 - **Deadline-driven requests** with configurable global timeout
 - **Automatic failover** between keys on errors
-- **OAuth support** for Gemini CLI, Antigravity, Qwen, iFlow
+- **OAuth support** for Gemini CLI, Antigravity, Qwen, iFlow, GitLab Duo
 - **Stateless deployment ready** — load credentials from environment variables
 
 ### Basic Usage
@@ -896,6 +898,18 @@ docker run -d \
 # Build and run locally
 docker compose -f docker-compose.dev.yml up -d --build
 ```
+
+**Optional: Enable Playwright in Docker (GitLab Auto Trial Mode):**
+
+```bash
+# Build image with Playwright + headless Chromium installed
+docker build --build-arg INSTALL_PLAYWRIGHT=true -t llm-api-proxy:playwright .
+
+# Then run your container normally
+docker run -d --name llm-api-proxy -p 8000:8000 llm-api-proxy:playwright
+```
+
+In containers, GitLab trial automation defaults to headless mode automatically.
 
 **Volume Mounts:**
 
