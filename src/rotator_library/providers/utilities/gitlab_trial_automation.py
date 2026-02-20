@@ -3760,9 +3760,49 @@ class GitLabTrialAutomator:
         context = None
         page = None
         chrome_process = None  # Subprocess when using connect_over_cdp.
+        xvfb_process = None  # Xvfb virtual display for headed-in-container mode.
 
         try:
             headless = self._resolve_headless_mode()
+
+            # Auto-start Xvfb when the user explicitly requests headed mode
+            # but no display is available (e.g. Docker container).  This lets
+            # Chrome run in "headed" mode (bypassing Arkose CAPTCHA detection)
+            # without requiring a physical monitor.
+            if (
+                not headless
+                and not self._has_visible_display()
+                and shutil.which("Xvfb")
+            ):
+                display_num = random.randint(90, 99)
+                xvfb_process = subprocess.Popen(
+                    [
+                        "Xvfb",
+                        f":{display_num}",
+                        "-screen",
+                        "0",
+                        "1440x900x24",
+                        "-nolisten",
+                        "tcp",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # Give Xvfb a moment to start.
+                await asyncio.sleep(0.5)
+                if xvfb_process.poll() is None:
+                    os.environ["DISPLAY"] = f":{display_num}"
+                    self.console.print(
+                        f"[green]Started Xvfb virtual display :{display_num} — "
+                        "Chrome will run headed inside container.[/green]"
+                    )
+                else:
+                    self.console.print(
+                        "[yellow]Xvfb failed to start — "
+                        "falling back to headless mode.[/yellow]"
+                    )
+                    xvfb_process = None
+                    headless = True
             if (
                 self.low_risk_mode
                 and headless
@@ -5202,3 +5242,12 @@ class GitLabTrialAutomator:
                         )
                 except Exception as e:
                     self.console.print(f"[dim]chrome_process.wait() failed: {e}[/dim]")
+            if xvfb_process is not None:
+                try:
+                    xvfb_process.terminate()
+                    xvfb_process.wait(timeout=3)
+                except Exception:
+                    try:
+                        xvfb_process.kill()
+                    except Exception:
+                        pass

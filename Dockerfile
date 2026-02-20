@@ -62,8 +62,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app/src
 
 # Optional Playwright browser install for headless container automation
+# Includes Xvfb so Chrome can run in "headed" mode inside the container,
+# which avoids Arkose Labs CAPTCHA detection that triggers on --headless.
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
-      python -m playwright install --with-deps chromium; \
+      apt-get update && apt-get install -y --no-install-recommends xvfb \
+      && rm -rf /var/lib/apt/lists/* \
+      && python -m playwright install --with-deps chromium; \
     fi
 
 # Default command - runs proxy with the correct PYTHONPATH
