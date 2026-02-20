@@ -220,9 +220,13 @@ class GitLabTrialAutomator:
         # mode where DNS and network don't work properly.
         for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
             lock_path = os.path.join(user_data_dir, lock_name)
-            with suppress(Exception):
+            try:
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
+            except Exception as e:
+                self.console.print(
+                    f"[dim]Could not remove stale lock {lock_name}: {e}[/dim]"
+                )
 
         args = [
             chrome_bin,
@@ -236,6 +240,14 @@ class GitLabTrialAutomator:
         ]
         if headless:
             args.append("--headless=new")
+            args.extend(
+                [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ]
+            )
 
         process = subprocess.Popen(
             args,
@@ -257,8 +269,12 @@ class GitLabTrialAutomator:
             await asyncio.sleep(0.5)
 
         # Chrome didn't start in time.
-        with suppress(Exception):
+        try:
             process.terminate()
+        except Exception as e:
+            self.console.print(
+                f"[dim]Failed to terminate stale Chrome process: {e}[/dim]"
+            )
         return None
 
     @staticmethod
@@ -1215,9 +1231,11 @@ class GitLabTrialAutomator:
                 return None
             for idx in range(min(count, 10)):
                 candidate = locator.nth(idx)
-                with suppress(Exception):
+                try:
                     if await candidate.is_visible():
                         return candidate
+                except Exception:
+                    pass
         except Exception:
             return None
         return None
@@ -1229,14 +1247,20 @@ class GitLabTrialAutomator:
                 if locator is None:
                     continue
                 try:
-                    with suppress(Exception):
+                    try:
                         await locator.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
                     await locator.click(timeout=3500)
                     return True
                 except Exception:
-                    with suppress(Exception):
+                    try:
                         await locator.click(timeout=3500, force=True)
                         return True
+                    except Exception as e:
+                        self.console.print(
+                            f"[dim]Force click fallback failed for {selector}: {e}[/dim]"
+                        )
             await page.wait_for_timeout(250)
 
         for selector in selectors:
@@ -1274,8 +1298,10 @@ class GitLabTrialAutomator:
                 if locator is None:
                     continue
                 try:
-                    with suppress(Exception):
+                    try:
                         await locator.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
                     # Move cursor to the field before clicking — Arkose
                     # tracks mouse events and flags sessions with none.
                     await self._mouse_move_to_locator(page, locator)
@@ -1289,12 +1315,16 @@ class GitLabTrialAutomator:
                     if current.strip() == value:
                         return True
                 except Exception:
-                    with suppress(Exception):
+                    try:
                         await locator.fill("")
                         await locator.type(value, delay=random.randint(35, 95))
                         current = await locator.input_value()
                         if current.strip() == value:
                             return True
+                    except Exception as e:
+                        self.console.print(
+                            f"[dim]Fill fallback failed for {selector}: {e}[/dim]"
+                        )
             await page.wait_for_timeout(250)
         return False
 
@@ -1308,11 +1338,13 @@ class GitLabTrialAutomator:
                     count = await locator.count()
                     for idx in range(min(count, 10)):
                         button = locator.nth(idx)
-                        with suppress(Exception):
+                        try:
                             if not await button.is_visible():
                                 continue
                             await button.click(timeout=3500)
                             return True
+                        except Exception:
+                            continue
                 except Exception:
                     continue
 
@@ -1421,7 +1453,7 @@ class GitLabTrialAutomator:
         must be called again after each navigation that loads a page
         with forms that need validation suppressed.
         """
-        with suppress(Exception):
+        try:
             await page.evaluate(
                 """
                 () => {
@@ -1495,6 +1527,10 @@ class GitLabTrialAutomator:
                 }
                 """
             )
+        except Exception as e:
+            self.console.print(
+                f"[dim]Form validation bypass injection failed: {e}[/dim]"
+            )
 
     async def _apply_extra_stealth(self, page: Any) -> None:
         """Apply additional stealth patches beyond playwright-stealth.
@@ -1502,7 +1538,7 @@ class GitLabTrialAutomator:
         Registers an init script that runs on every navigation, covering
         fingerprint vectors that playwright-stealth does not patch.
         """
-        with suppress(Exception):
+        try:
             await page.add_init_script(
                 """
                 // -- webdriver flag --------------------------------------------------
@@ -1647,6 +1683,10 @@ class GitLabTrialAutomator:
                 }
                 """
             )
+        except Exception as e:
+            self.console.print(
+                f"[dim]Extra stealth init script failed (expected in CDP mode): {e}[/dim]"
+            )
 
     async def _perform_low_risk_warmup(self, page: Any) -> None:
         if not self.low_risk_mode:
@@ -1654,7 +1694,7 @@ class GitLabTrialAutomator:
 
         self.console.print("[dim]Low-risk mode: warming up browser session...[/dim]")
 
-        with suppress(Exception):
+        try:
             await page.goto(
                 "https://gitlab.com/users/sign_in?redirect_to_referer=yes",
                 wait_until="domcontentloaded",
@@ -1662,14 +1702,18 @@ class GitLabTrialAutomator:
             )
             await self._dismiss_cookie_banners(page)
             await self._human_pause(page, 900, 1800)
+        except Exception as e:
+            self.console.print(f"[dim]Low-risk warmup sign-in page failed: {e}[/dim]")
 
-        with suppress(Exception):
+        try:
             await page.goto(
                 "https://gitlab.com/explore",
                 wait_until="domcontentloaded",
                 timeout=90000,
             )
             await self._human_pause(page, 900, 1800)
+        except Exception as e:
+            self.console.print(f"[dim]Low-risk warmup explore page failed: {e}[/dim]")
 
     async def _is_phone_verification_required(self, page: Any) -> bool:
         if "identity_verification" not in page.url:
@@ -1754,9 +1798,11 @@ class GitLabTrialAutomator:
             await self._mouse_wander(page)
             await page.wait_for_timeout(random.randint(200, 500))
         # Small scroll to mimic reading the page.
-        with suppress(Exception):
+        try:
             await page.mouse.wheel(0, random.randint(50, 150))
             await page.wait_for_timeout(random.randint(300, 700))
+        except Exception as e:
+            self.console.print(f"[dim]Mouse wheel scroll failed: {e}[/dim]")
 
         if not await self._safe_fill(
             page,
@@ -1799,8 +1845,10 @@ class GitLabTrialAutomator:
         await self._human_pause(page)
 
         # Trigger frontend validation before submit.
-        with suppress(Exception):
+        try:
             await page.keyboard.press("Tab")
+        except Exception as e:
+            self.console.print(f"[dim]Tab press failed: {e}[/dim]")
         await page.wait_for_timeout(700)
 
         await self._wait_for_arkose_token(page)
@@ -1848,7 +1896,7 @@ class GitLabTrialAutomator:
                     continue
                 raise RuntimeError(f"GitLab rejected registration: {joined}")
 
-            with suppress(Exception):
+            try:
                 submitted = await page.evaluate(
                     """
                     () => {
@@ -1871,6 +1919,8 @@ class GitLabTrialAutomator:
                     await page.wait_for_timeout(1200)
                     if page.url != starting_url:
                         return
+            except Exception as e:
+                self.console.print(f"[dim]JS form submit fallback failed: {e}[/dim]")
 
         final_alerts = await self._current_alert_messages(page)
         if final_alerts:
@@ -1913,8 +1963,10 @@ class GitLabTrialAutomator:
             ["Sign in", "Log in", "Connexion", "Se connecter"],
         )
         if clicked:
-            with suppress(Exception):
+            try:
                 await page.wait_for_timeout(1500)
+            except Exception as e:
+                self.console.print(f"[dim]Post-sign-in wait failed: {e}[/dim]")
         return clicked
 
     async def _handle_welcome_onboarding(self, page: Any) -> bool:
@@ -2695,8 +2747,10 @@ class GitLabTrialAutomator:
             page,
             ["Continue", "Continuer", "Start your free trial", "Submit", "Commencer"],
         )
-        with suppress(Exception):
+        try:
             await page.wait_for_timeout(2500)
+        except Exception as e:
+            self.console.print(f"[dim]Company step wait failed: {e}[/dim]")
         self.console.print("[green]Company step done.[/green]")
         return True
 
@@ -2777,8 +2831,10 @@ class GitLabTrialAutomator:
                 ["Skip", "Passer", "Skip this step"],
             )
 
-        with suppress(Exception):
+        try:
             await page.wait_for_timeout(3000)
+        except Exception as e:
+            self.console.print(f"[dim]Project step wait failed: {e}[/dim]")
         self.console.print("[green]Project step done.[/green]")
         return True
 
@@ -2840,7 +2896,7 @@ class GitLabTrialAutomator:
             return False
 
         # Prefer JS assignment first to avoid opening dropdown popovers.
-        with suppress(Exception):
+        try:
             applied = await select.evaluate(
                 """(el, idx) => {
                     if (!(el instanceof HTMLSelectElement)) return false;
@@ -2864,10 +2920,16 @@ class GitLabTrialAutomator:
             )
             if applied:
                 return True
+        except Exception as e:
+            self.console.print(f"[dim]JS select assignment failed: {e}[/dim]")
 
-        with suppress(Exception):
+        try:
             await select.select_option(index=chosen_index, timeout=2500)
             return True
+        except Exception as e:
+            self.console.print(
+                f"[dim]Playwright select_option fallback failed: {e}[/dim]"
+            )
 
         return False
 
@@ -2891,7 +2953,7 @@ class GitLabTrialAutomator:
         selectors: List[str],
         option_hints: List[str],
     ) -> bool:
-        with suppress(Exception):
+        try:
             result = await page.evaluate(
                 """({ selectors, hints }) => {
                     const isPlaceholder = (text, value) => {
@@ -2971,7 +3033,8 @@ class GitLabTrialAutomator:
                 },
             )
             return bool(result)
-
+        except Exception as e:
+            self.console.print(f"[dim]JS ensure_select_has_value failed: {e}[/dim]")
         # Fallback through locator APIs if JS path fails.
         return await self._pick_native_select(page, selectors, option_hints)
 
@@ -3001,13 +3064,15 @@ class GitLabTrialAutomator:
                 sel_id = await sel.get_attribute("id") or ""
                 sel_name = await sel.get_attribute("name") or ""
                 label_text = ""
-                with suppress(Exception):
+                try:
                     if sel_id:
                         lbl = page.locator(f'label[for="{sel_id}"]')
                         if await lbl.count() > 0:
                             label_text = await lbl.text_content(timeout=1000) or ""
+                except Exception:
+                    pass
                 nearby_text = ""
-                with suppress(Exception):
+                try:
                     nearby_text = (
                         await page.evaluate(
                             """(el) => {
@@ -3021,6 +3086,8 @@ class GitLabTrialAutomator:
                         )
                         or ""
                     )
+                except Exception:
+                    pass
 
                 combo = f"{sel_id} {sel_name} {label_text} {nearby_text}".lower()
                 if not any(h in combo for h in label_hints):
@@ -3056,7 +3123,7 @@ class GitLabTrialAutomator:
                         continue
 
                     nearby_text = ""
-                    with suppress(Exception):
+                    try:
                         nearby_text = (
                             await page.evaluate(
                                 """(el) => {
@@ -3070,15 +3137,19 @@ class GitLabTrialAutomator:
                             )
                             or ""
                         )
+                    except Exception:
+                        pass
                     if not any(h in nearby_text.lower() for h in label_hints):
                         continue
 
-                    with suppress(Exception):
+                    try:
                         # Close any other open dropdowns first to prevent overlap issues
                         await page.evaluate("() => { document.body.click(); }")
                         await page.wait_for_timeout(200)
+                    except Exception:
+                        pass
 
-                    with suppress(Exception):
+                    try:
                         await page.evaluate(
                             """() => {
                                 const overlays = document.querySelectorAll(
@@ -3089,21 +3160,27 @@ class GitLabTrialAutomator:
                                 });
                             }"""
                         )
+                    except Exception:
+                        pass
 
                     opened = False
-                    with suppress(Exception):
+                    try:
                         # Scroll into view and click
                         handle = await trigger.element_handle()
                         if handle:
                             await handle.scroll_into_view_if_needed()
                         await trigger.click(timeout=3000)
                         opened = True
+                    except Exception:
+                        pass
                     if not opened:
-                        with suppress(Exception):
+                        try:
                             await trigger.click(timeout=2500, force=True)
                             opened = True
+                        except Exception:
+                            pass
                     if not opened:
-                        with suppress(Exception):
+                        try:
                             handle = await trigger.element_handle()
                             if handle is not None:
                                 await page.evaluate(
@@ -3111,6 +3188,8 @@ class GitLabTrialAutomator:
                                     handle,
                                 )
                                 opened = True
+                        except Exception:
+                            pass
                     if not opened:
                         continue
 
@@ -3120,13 +3199,15 @@ class GitLabTrialAutomator:
                     await page.wait_for_timeout(1500)
 
                     # Wait for any option elements to appear in the DOM
-                    with suppress(Exception):
+                    try:
                         await page.wait_for_selector(
                             '[role="option"], .dropdown-item, '
                             ".gl-dropdown-item, .gl-listbox-item, "
                             '[role="menuitem"]',
                             timeout=3000,
                         )
+                    except Exception:
+                        pass
 
                     if await self._pick_option_from_open_listbox(
                         page,
@@ -3134,8 +3215,10 @@ class GitLabTrialAutomator:
                     ):
                         return True
 
-                    with suppress(Exception):
+                    try:
                         await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -3168,7 +3251,7 @@ class GitLabTrialAutomator:
                         continue
 
                     parent_text = ""
-                    with suppress(Exception):
+                    try:
                         parent_text = (
                             await page.evaluate(
                                 """(el) => {
@@ -3182,6 +3265,8 @@ class GitLabTrialAutomator:
                             )
                             or ""
                         )
+                    except Exception:
+                        pass
                     if not any(h in parent_text.lower() for h in label_hints):
                         continue
 
@@ -3194,8 +3279,10 @@ class GitLabTrialAutomator:
                     ):
                         return True
 
-                    with suppress(Exception):
+                    try:
                         await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
                 except Exception:
                     continue
         except Exception:
@@ -3306,17 +3393,23 @@ class GitLabTrialAutomator:
             try:
                 loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
-                    with suppress(Exception):
+                    try:
                         await loc.click(timeout=3000)
                         return True
-                    with suppress(Exception):
+                    except Exception:
+                        pass
+                    try:
                         await loc.click(timeout=2500, force=True)
                         return True
-                    with suppress(Exception):
+                    except Exception:
+                        pass
+                    try:
                         handle = await loc.element_handle()
                         if handle is not None:
                             await page.evaluate("(el) => el.click()", handle)
                             return True
+                    except Exception:
+                        pass
             except Exception:
                 continue
         return False
@@ -3429,8 +3522,10 @@ class GitLabTrialAutomator:
         if not clicked:
             return False
 
-        with suppress(Exception):
+        try:
             await page.wait_for_timeout(3000)
+        except Exception as e:
+            self.console.print(f"[dim]Group creation wait failed: {e}[/dim]")
         return "/groups/new" not in page.url
 
     async def _list_owned_top_level_groups(
@@ -3680,8 +3775,12 @@ class GitLabTrialAutomator:
                                 "falling back to standard launch.[/yellow]"
                             )
                             browser = None
-                            with suppress(Exception):
+                            try:
                                 chrome_process.terminate()
+                            except Exception as e:
+                                self.console.print(
+                                    f"[dim]Chrome cleanup on CDP failure: {e}[/dim]"
+                                )
                             chrome_process = None
 
                 # =============================================================
@@ -3791,8 +3890,10 @@ class GitLabTrialAutomator:
 
                     context = await browser.new_context(**context_kwargs)
                     if self.clear_browser_state:
-                        with suppress(Exception):
+                        try:
                             await context.clear_cookies()
+                        except Exception as e:
+                            self.console.print(f"[dim]Clear cookies failed: {e}[/dim]")
 
                     page = await context.new_page()
                     await apply_stealth(page)
@@ -3800,9 +3901,13 @@ class GitLabTrialAutomator:
                         await self._apply_extra_stealth(page)
 
                 if self.clear_browser_state:
-                    with suppress(Exception):
+                    try:
                         await page.goto("about:blank", wait_until="domcontentloaded")
-                    with suppress(Exception):
+                    except Exception as e:
+                        self.console.print(
+                            f"[dim]Navigate to about:blank failed: {e}[/dim]"
+                        )
+                    try:
                         await page.evaluate(
                             """
                             () => {
@@ -3811,6 +3916,8 @@ class GitLabTrialAutomator:
                             }
                             """
                         )
+                    except Exception as e:
+                        self.console.print(f"[dim]Clear storage failed: {e}[/dim]")
 
                 await self._perform_low_risk_warmup(page)
 
@@ -5013,18 +5120,42 @@ class GitLabTrialAutomator:
                     duo_enabled=duo_enabled,
                 )
         finally:
-            # Explicit closure requested by user.
+            # Explicit closure — ensure Chrome is fully cleaned up.
             if page is not None:
-                with suppress(Exception):
+                try:
                     await page.close()
+                except Exception as e:
+                    self.console.print(f"[dim]page.close() failed: {e}[/dim]")
             if context is not None:
-                with suppress(Exception):
+                try:
                     await context.close()
+                except Exception as e:
+                    self.console.print(f"[dim]context.close() failed: {e}[/dim]")
             if browser is not None:
-                with suppress(Exception):
+                try:
                     await browser.close()
+                except Exception as e:
+                    self.console.print(f"[dim]browser.close() failed: {e}[/dim]")
             if chrome_process is not None:
-                with suppress(Exception):
+                try:
                     chrome_process.terminate()
-                with suppress(Exception):
+                except Exception as e:
+                    self.console.print(
+                        f"[dim]chrome_process.terminate() failed: {e}[/dim]"
+                    )
+                try:
                     chrome_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.console.print(
+                        "[yellow]Chrome did not exit after terminate — "
+                        "force-killing (SIGKILL).[/yellow]"
+                    )
+                    try:
+                        chrome_process.kill()
+                        chrome_process.wait(timeout=3)
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]Failed to force-kill Chrome: {e}[/red]"
+                        )
+                except Exception as e:
+                    self.console.print(f"[dim]chrome_process.wait() failed: {e}[/dim]")
