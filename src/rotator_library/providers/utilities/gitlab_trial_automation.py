@@ -5301,6 +5301,16 @@ class GitLabTrialAutomator:
                 except Exception as e:
                     self.console.print(f"[dim]chrome_process.wait() failed: {e}[/dim]")
             if xvfb_process is not None:
+                # Unset DISPLAY so the next run() call knows Xvfb is gone
+                # and will auto-start a fresh one.  Without this, the
+                # second run sees DISPLAY=:93 from the first run, skips
+                # Xvfb startup, and Chrome crashes because the X server
+                # is already dead.
+                try:
+                    display_val = os.environ.get("DISPLAY", "")
+                    os.environ.pop("DISPLAY", None)
+                except Exception:
+                    pass
                 try:
                     xvfb_process.terminate()
                     xvfb_process.wait(timeout=3)
