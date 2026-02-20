@@ -2078,20 +2078,28 @@ class GitLabTrialAutomator:
                 await self._inject_form_validation_bypass(page)
 
             if await self._onboard_step_welcome(page, url):
+                lib_logger.info("Onboarding: welcome step handled (step %d)", step)
                 handled_any = True
                 continue
 
             if await self._onboard_step_company(page, url):
+                lib_logger.info("Onboarding: company step handled (step %d)", step)
                 handled_any = True
                 continue
 
             if await self._onboard_step_project(page, url):
+                lib_logger.info("Onboarding: project step handled (step %d)", step)
                 handled_any = True
                 continue
 
             # No known onboarding page detected – we're done.
+            lib_logger.info(
+                "Onboarding: no step detected on step %d (url=%s), done",
+                step, url,
+            )
             break
 
+        lib_logger.info("Onboarding complete. handled_any=%s", handled_any)
         return handled_any
 
     # ------------------------------------------------------------------
@@ -2110,8 +2118,10 @@ class GitLabTrialAutomator:
                 pass
 
         if not is_welcome:
+            lib_logger.info("Onboarding: welcome step NOT detected (url=%s)", url)
             return False
 
+        lib_logger.info("Onboarding: welcome step detected, filling form…")
         self.console.print("[cyan]Onboarding step 1/3 – Welcome…[/cyan]")
         await self._human_pause(page, 400, 800)
 
@@ -2771,8 +2781,10 @@ class GitLabTrialAutomator:
                 pass
 
         if not is_company:
+            lib_logger.info("Onboarding: company step NOT detected (url=%s)", url)
             return False
 
+        lib_logger.info("Onboarding: company step detected, filling form…")
         self.console.print("[cyan]Onboarding step 2/3 – Company info…[/cyan]")
         await self._human_pause(page, 400, 800)
 
@@ -2829,6 +2841,7 @@ class GitLabTrialAutomator:
             await page.wait_for_timeout(2500)
         except Exception as e:
             self.console.print(f"[dim]Company step wait failed: {e}[/dim]")
+        lib_logger.info("Onboarding: company step completed")
         self.console.print("[green]Company step done.[/green]")
         return True
 
@@ -3595,6 +3608,11 @@ class GitLabTrialAutomator:
                 if response.status_code in (200, 201):
                     return response.json()
                 else:
+                    lib_logger.warning(
+                        "API group creation returned %d: %s",
+                        response.status_code,
+                        response.text[:200],
+                    )
                     self.console.print(
                         f"[yellow]API group creation returned {response.status_code}: "
                         f"{response.text[:200]}[/yellow]"
@@ -3726,6 +3744,111 @@ class GitLabTrialAutomator:
 
         return False
 
+    async def _check_trial_active(self, access_token: str) -> bool:
+        """Return True if the user's namespace has an active trial."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                r = await client.get(
+                    f"{GITLAB_API_BASE}/namespaces",
+                    headers=headers,
+                    params={"owned_only": "true"},
+                )
+                if r.status_code != 200:
+                    lib_logger.warning("Trial check: namespaces returned %d", r.status_code)
+                    return False
+                for ns in r.json():
+                    if ns.get("trial") is True or "trial" in str(ns.get("plan", "")):
+                        lib_logger.info("Trial active on namespace: %s (plan=%s)", ns.get("path"), ns.get("plan"))
+                        return True
+            lib_logger.warning("Trial check: no namespace has an active trial")
+            return False
+        except Exception as e:
+            lib_logger.warning("Trial check failed: %s", e)
+            return False
+
+    async def _activate_trial_via_browser(self, page: Any) -> bool:
+        """Navigate to GitLab's trial activation page and submit the form.
+
+        This is a fallback for when the onboarding flow didn't activate
+        the trial properly.  Navigates to /-/trials/new and fills the
+        required company information.
+        """
+        TRIAL_ACTIVATE_URL = "https://gitlab.com/-/trials/new"
+        lib_logger.info("Attempting trial activation via browser at %s", TRIAL_ACTIVATE_URL)
+        try:
+            await page.goto(TRIAL_ACTIVATE_URL, wait_until="domcontentloaded", timeout=60000)
+            await self._dismiss_cookie_banners(page)
+            await page.wait_for_timeout(2000)
+
+            current_url = page.url
+            lib_logger.info("Trial activation page URL: %s", current_url)
+
+            # If we got redirected to the dashboard or somewhere else,
+            # the trial might already be active or the page doesn't exist.
+            if "trials" not in current_url and "trial" not in current_url:
+                lib_logger.info(
+                    "Redirected away from trial page (%s), trial may already be active",
+                    current_url,
+                )
+                return True
+
+            # Fill company name
+            await self._safe_fill(
+                page,
+                [
+                    '#company_name',
+                    'input[name="company_name"]',
+                    'input[name="trial_company_name"]',
+                    '[data-testid="company-name-input"]',
+                    'input[placeholder*="Company" i]',
+                ],
+                f"DevTeam {secrets.token_hex(3)}",
+            )
+            await self._human_pause(page, 300, 500)
+
+            # Number of employees
+            await self._pick_gl_dropdown(
+                page,
+                label_hints=["employees", "size", "taille", "employ"],
+                option_hints=["1-99", "1 - 99", "small"],
+            )
+            await self._human_pause(page, 300, 500)
+
+            # Country
+            await self._pick_gl_dropdown(
+                page,
+                label_hints=["country", "pays", "region"],
+                option_hints=["france", "united states", "canada"],
+            )
+            await self._human_pause(page, 300, 500)
+
+            # State/province (may not be present)
+            await self._pick_gl_dropdown(
+                page,
+                label_hints=["state", "province", "etat"],
+                option_hints=["california", "texas", "new york"],
+            )
+            await self._human_pause(page, 250, 450)
+
+            # Phone number (optional, skip)
+
+            # Submit
+            await self._safe_click_by_button_name(
+                page,
+                ["Start your free trial", "Continue", "Start free trial",
+                 "Submit", "Commencer", "Continuer"],
+            )
+            await page.wait_for_timeout(5000)
+
+            final_url = page.url
+            lib_logger.info("Trial activation form submitted, now at: %s", final_url)
+            return True
+
+        except Exception as e:
+            lib_logger.warning("Trial activation via browser failed: %s", e)
+            return False
+
     async def _enable_duo_for_group(
         self,
         access_token: str,
@@ -3736,6 +3859,36 @@ class GitLabTrialAutomator:
         # via API returns 403 and the groups list may be empty.
         # We retry with increasing delays to give the trial time.
         await self._notify("9/9 Waiting for trial activation to propagate...")
+
+        # ── Phase 0: Verify trial is active; activate if not ──
+        trial_verified = False
+        for trial_check in range(3):
+            await asyncio.sleep(3 if trial_check == 0 else 10)
+            if await self._check_trial_active(access_token):
+                trial_verified = True
+                break
+            lib_logger.warning(
+                "Trial not active (check %d/3), attempting browser activation…",
+                trial_check + 1,
+            )
+            await self._notify(
+                f"9/9 Trial not yet active, activating via browser "
+                f"(attempt {trial_check + 1}/3)..."
+            )
+            if page is not None:
+                await self._activate_trial_via_browser(page)
+                # Give GitLab time to propagate after browser activation
+                await asyncio.sleep(5)
+
+        if not trial_verified:
+            # One final check after all activation attempts
+            trial_verified = await self._check_trial_active(access_token)
+
+        if not trial_verified:
+            lib_logger.warning(
+                "Trial activation failed after all attempts. "
+                "Group creation will likely fail with 403."
+            )
 
         # ── Phase 1: Try to find or create a group with retries ──
         groups: List[Dict[str, Any]] = []
