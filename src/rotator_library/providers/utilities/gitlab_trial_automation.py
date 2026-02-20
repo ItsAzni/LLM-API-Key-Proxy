@@ -81,6 +81,7 @@ class GitLabTrialAutomator:
             os.getenv("GITLAB_TRIAL_PHONE_WAIT_TIMEOUT", "900")
         )
         self._headless_mode = False
+        self._cdp_user_data_dir: Optional[str] = None  # Temp dir for CDP Chrome profile
 
     async def _notify(self, message: str) -> None:
         """Send a progress notification via the callback, if one is set."""
@@ -210,36 +211,27 @@ class GitLabTrialAutomator:
         return None
 
     async def _launch_chrome_cdp(self, headless: bool) -> Optional[tuple]:
-        """Launch real Chrome with remote debugging + persistent profile.
+        """Launch real Chrome with remote debugging + fresh profile.
 
         Returns ``(Popen, ws_endpoint_url)`` on success, or ``None``
         if Chrome is not installed or fails to start.
+
+        Each call uses a unique temporary profile directory so that
+        cookies and sessions from previous accounts don't contaminate
+        the new run.  The profile is cleaned up in the caller's
+        ``finally`` block (see ``self._cdp_user_data_dir``).
         """
         chrome_bin = self._find_chrome_binary()
         if not chrome_bin:
             return None
 
         port = random.randint(9200, 9399)
-        user_data_dir = os.path.join(
-            os.path.expanduser("~"),
-            ".cache",
-            "gitlab-trial-automation",
-            "chrome-profile",
-        )
-        os.makedirs(user_data_dir, exist_ok=True)
+        # Use a unique profile per run to avoid session contamination
+        # between different GitLab accounts.
+        import tempfile
 
-        # Clean up stale lock files from crashed previous runs.
-        # A locked profile can cause Chrome to start in a degraded
-        # mode where DNS and network don't work properly.
-        for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-            lock_path = os.path.join(user_data_dir, lock_name)
-            try:
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-            except Exception as e:
-                self.console.print(
-                    f"[dim]Could not remove stale lock {lock_name}: {e}[/dim]"
-                )
+        user_data_dir = tempfile.mkdtemp(prefix="gitlab-trial-chrome-")
+        self._cdp_user_data_dir = user_data_dir  # For cleanup in finally
 
         args = [
             chrome_bin,
@@ -5333,6 +5325,19 @@ class GitLabTrialAutomator:
                         )
                 except Exception as e:
                     self.console.print(f"[dim]chrome_process.wait() failed: {e}[/dim]")
+            # Clean up the temporary Chrome profile directory so each
+            # run starts completely fresh — no leaked cookies or sessions
+            # from previous accounts.
+            if self._cdp_user_data_dir is not None:
+                try:
+                    import shutil as _shutil
+
+                    _shutil.rmtree(self._cdp_user_data_dir, ignore_errors=True)
+                except Exception as e:
+                    self.console.print(
+                        f"[dim]Failed to clean up Chrome profile dir: {e}[/dim]"
+                    )
+                self._cdp_user_data_dir = None
             if xvfb_process is not None:
                 # Unset DISPLAY so the next run() call knows Xvfb is gone
                 # and will auto-start a fresh one.  Without this, the
