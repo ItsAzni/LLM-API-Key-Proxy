@@ -23,8 +23,9 @@ COPY src/rotator_library ./src/rotator_library
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Optional Playwright support for GitLab trial automation
+# Patchright is preferred over vanilla playwright for better anti-detection stealth.
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
-      pip install --no-cache-dir --user playwright playwright-stealth; \
+      pip install --no-cache-dir --user patchright playwright-stealth; \
     fi
 
 # Production stage
@@ -67,7 +68,7 @@ ENV PYTHONPATH=/app/src
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends xvfb \
       && rm -rf /var/lib/apt/lists/* \
-      && python -m playwright install --with-deps chromium; \
+      && python -m patchright install --with-deps chromium; \
     fi
 
 # Default command - runs proxy with the correct PYTHONPATH
