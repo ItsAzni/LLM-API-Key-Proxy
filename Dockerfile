@@ -3,7 +3,7 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-ARG INSTALL_PLAYWRIGHT=false
+ARG INSTALL_PLAYWRIGHT=true
 
 # Install build dependencies
 # curl_cffi requires: gcc, libcurl4-openssl-dev, libssl-dev
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-ARG INSTALL_PLAYWRIGHT=false
+ARG INSTALL_PLAYWRIGHT=true
 
 # Copy installed packages from builder
 COPY --from=builder /root/.local /root/.local
