@@ -116,6 +116,54 @@ class GitLabTrialAutomator:
             return True
         return bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
 
+    @staticmethod
+    def _cleanup_chrome_artifacts() -> None:
+        """Kill orphaned Chrome processes and remove leftover state.
+
+        Chrome child processes (GPU, crashpad, renderers) can survive
+        after the main Chrome process is terminated, especially in
+        Docker containers without an init process.  Leftover crash
+        reports and IPC directories can also cause the next Chrome
+        launch to enter recovery mode or behave unexpectedly.
+        """
+        import glob as _glob
+        import signal as _signal
+
+        # Kill any lingering chrome/crashpad processes (skip PID 1 and self).
+        if os.name != "nt":
+            try:
+                for entry in os.listdir("/proc"):
+                    if not entry.isdigit():
+                        continue
+                    pid = int(entry)
+                    if pid <= 1 or pid == os.getpid():
+                        continue
+                    try:
+                        cmdline = Path(f"/proc/{pid}/comm").read_text().strip()
+                    except (OSError, PermissionError):
+                        continue
+                    if cmdline in ("chrome", "chrome_crashpad", "google-chrome", "chromium"):
+                        try:
+                            os.kill(pid, _signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+            except Exception:
+                pass
+
+        # Remove Chrome's default crash-reports directory so the next
+        # launch doesn't enter crash-recovery mode.
+        chrome_cfg = os.path.join(os.path.expanduser("~"), ".config", "google-chrome")
+        if os.path.isdir(chrome_cfg):
+            shutil.rmtree(chrome_cfg, ignore_errors=True)
+
+        # Remove leftover IPC / temp directories from previous runs.
+        import tempfile as _tmpmod
+
+        tmpdir = _tmpmod.gettempdir()
+        for pattern in ("com.google.Chrome.*", "playwright-artifacts-*"):
+            for p in _glob.glob(os.path.join(tmpdir, pattern)):
+                shutil.rmtree(p, ignore_errors=True)
+
     async def _human_pause(
         self,
         page: Any,
@@ -267,6 +315,7 @@ class GitLabTrialAutomator:
             args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
 
         endpoint = f"http://localhost:{port}"
@@ -3778,6 +3827,10 @@ class GitLabTrialAutomator:
         oauth_runner: Callable[[Callable[[str], Awaitable[None]]], Awaitable[str]],
     ) -> GitLabTrialAutomationResult:
         """Run trial creation and return OAuth credential result metadata."""
+        # Kill orphaned Chrome processes and clear crash/IPC state from
+        # any previous run so this launch starts completely clean.
+        self._cleanup_chrome_artifacts()
+
         async_playwright, apply_stealth = self._import_playwright()
 
         await self._notify("1/9 Detecting automation library...")
@@ -5303,12 +5356,22 @@ class GitLabTrialAutomator:
                 except Exception as e:
                     self.console.print(f"[dim]browser.close() failed: {e}[/dim]")
             if chrome_process is not None:
+                # Kill the entire process group (Chrome + GPU + crashpad +
+                # renderer children) so nothing lingers.  Chrome was launched
+                # with start_new_session=True for this purpose.
                 try:
-                    chrome_process.terminate()
+                    pgid = os.getpgid(chrome_process.pid)
+                    os.killpg(pgid, 15)  # SIGTERM to the group
+                except (ProcessLookupError, PermissionError):
+                    pass
                 except Exception as e:
                     self.console.print(
-                        f"[dim]chrome_process.terminate() failed: {e}[/dim]"
+                        f"[dim]chrome process group SIGTERM failed: {e}[/dim]"
                     )
+                    try:
+                        chrome_process.terminate()
+                    except Exception:
+                        pass
                 try:
                     chrome_process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -5317,7 +5380,16 @@ class GitLabTrialAutomator:
                         "force-killing (SIGKILL).[/yellow]"
                     )
                     try:
-                        chrome_process.kill()
+                        pgid = os.getpgid(chrome_process.pid)
+                        os.killpg(pgid, 9)  # SIGKILL to the group
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    except Exception:
+                        try:
+                            chrome_process.kill()
+                        except Exception:
+                            pass
+                    try:
                         chrome_process.wait(timeout=3)
                     except Exception as e:
                         self.console.print(
@@ -5357,3 +5429,6 @@ class GitLabTrialAutomator:
                         xvfb_process.kill()
                     except Exception:
                         pass
+            # Final sweep: remove any Chrome/Playwright temp artifacts
+            # that accumulated during this run so the next one starts clean.
+            self._cleanup_chrome_artifacts()

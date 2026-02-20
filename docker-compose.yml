@@ -66,6 +66,7 @@ services:
       dockerfile: Dockerfile
     container_name: llm-telegram-bot
     restart: unless-stopped
+    init: true
     command: python -m src.proxy_app.telegram_bot
     volumes:
       - ./.env:/app/.env:ro
