@@ -285,6 +285,8 @@ AVAILABLE_MODELS = [
     "gemini-2.5-flash-lite",  # Thinking budget configurable, no name change
     "gemini-3-pro-preview",  # Internally mapped to -low/-high variant based on thinkingLevel
     "gemini-3-flash",  # New Gemini 3 Flash model (supports thinking with minBudget=32)
+    # Gemini 3.1 Pro — M36 (Low), M37 (High). Discovered from live quota API (0156bfd)
+    "gemini-3.1-pro",  # Default: High (M37), mapped to -low/-high based on thinkingLevel
     # "gemini-3-pro-image",  # Image generation model
     # "gemini-2.5-computer-use-preview-10-2025",
     # Claude models
@@ -339,8 +341,9 @@ MODEL_RATE_LIMIT_BACKOFF_SCHEDULE = [5, 15, 30, 60, 120]
 WARMUP_ENABLED = env_bool("ANTIGRAVITY_WARMUP_ENABLED", True)
 WARMUP_TIMEOUT = env_int("ANTIGRAVITY_WARMUP_TIMEOUT", 5)
 HEARTBEAT_ENABLED = env_bool("ANTIGRAVITY_HEARTBEAT_ENABLED", True)
-HEARTBEAT_INTERVAL_SECONDS = env_int("ANTIGRAVITY_HEARTBEAT_INTERVAL", 30)
-HEARTBEAT_JITTER_MS = env_int("ANTIGRAVITY_HEARTBEAT_JITTER_MS", 500)
+# Real AG extension uses setInterval(1000) — 1s interval, not 30s (1576b66 stealth overhaul)
+HEARTBEAT_INTERVAL_SECONDS = env_int("ANTIGRAVITY_HEARTBEAT_INTERVAL", 1)
+HEARTBEAT_JITTER_MS = env_int("ANTIGRAVITY_HEARTBEAT_JITTER_MS", 50)
 
 # Stealth/TLS fingerprinting configuration
 STEALTH_ENABLED = env_bool("ANTIGRAVITY_STEALTH_ENABLED", True)
@@ -616,9 +619,10 @@ async def start_heartbeat(
     http_client: httpx.AsyncClient, base_url: str
 ) -> asyncio.Task:
     """
-    Spawn a background task that sends Heartbeat every ~30s ± jitter.
+    Spawn a background task that sends Heartbeat every ~1s ± jitter.
 
-    Matches real Antigravity webview's setInterval(30000) behavior.
+    Matches real Antigravity webview's setInterval(1000) behavior (1576b66 stealth overhaul).
+    The 30s interval used previously was wrong — real AG heartbeats every second.
     """
     global _heartbeat_task
 
@@ -716,6 +720,9 @@ MODEL_ALIAS_MAP = {
     "gemini-3-pro-image": "gemini-3-pro-image-preview",
     "gemini-3-pro-low": "gemini-3-pro-preview",
     "gemini-3-pro-high": "gemini-3-pro-preview",
+    # Gemini 3.1 Pro variants (M36 low, M37 high) — 0156bfd
+    "gemini-3.1-pro-low": "gemini-3.1-pro",
+    "gemini-3.1-pro-high": "gemini-3.1-pro",
     # Claude: API/internal names → public user-facing names
     "claude-sonnet-4-5": "claude-sonnet-4.5",
     "claude-opus-4-5": "claude-opus-4.5",
@@ -1610,6 +1617,12 @@ class AntigravityProvider(
             "gemini-3-pro-low",
             "gemini-3-pro-preview",
         ],
+        # Gemini 3.1 Pro variants (M36 low, M37 high) — 0156bfd
+        "g3.1-pro": [
+            "gemini-3.1-pro",
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+        ],
         # Gemini 3 Flash (standalone)
         "g3-flash": [
             "gemini-3-flash",
@@ -2211,9 +2224,14 @@ class AntigravityProvider(
         return MODEL_ALIAS_MAP.get(internal, internal)
 
     def _is_gemini_3(self, model: str) -> bool:
-        """Check if model is Gemini 3 (requires special handling)."""
+        """Check if model is Gemini 3.x (requires special handling)."""
         internal = self._alias_to_internal(model)
-        return internal.startswith("gemini-3-") or model.startswith("gemini-3-")
+        return (
+            internal.startswith("gemini-3-")
+            or internal.startswith("gemini-3.1-")
+            or model.startswith("gemini-3-")
+            or model.startswith("gemini-3.1-")
+        )
 
     def _is_claude(self, model: str) -> bool:
         """Check if model is Claude."""
@@ -3176,7 +3194,12 @@ class AntigravityProvider(
         """
         internal = self._alias_to_internal(model)
         is_gemini_25 = "gemini-2.5" in model
-        is_gemini_3 = internal.startswith("gemini-3-")
+        # Gemini 3.x (3.0 and 3.1+) all use thinkingLevel-based config
+        is_gemini_3 = (
+            internal.startswith("gemini-3-")
+            or internal.startswith("gemini-3.1-")
+            or model.startswith("gemini-3.1-")
+        )
         is_gemini_3_flash = "gemini-3-flash" in model or "gemini-3-flash" in internal
         is_claude = self._is_claude(model)
 
@@ -4598,6 +4621,18 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 internal_model = "gemini-3-pro-low"
             else:
                 internal_model = "gemini-3-pro-high"
+
+        # Map gemini-3.1-pro to -low/-high variant based on thinking config (0156bfd)
+        # M36 = low, M37 = high. Follows same pattern as gemini-3-pro-preview.
+        if model in ("gemini-3.1-pro",) or internal_model in ("gemini-3.1-pro",):
+            thinking_config = gemini_payload.get("generationConfig", {}).get(
+                "thinkingConfig", {}
+            )
+            thinking_level = thinking_config.get("thinkingLevel", "high")
+            if thinking_level == "low":
+                internal_model = "gemini-3.1-pro-low"
+            else:
+                internal_model = "gemini-3.1-pro-high"
 
         # Wrap in Antigravity envelope
         # Per CLIProxyAPI commit 67985d8: added requestType: "agent"
