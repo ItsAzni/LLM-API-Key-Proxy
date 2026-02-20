@@ -3493,6 +3493,38 @@ class GitLabTrialAutomator:
                         f"{' | '.join(alerts)}"
                     )
 
+    async def _create_group_via_api(
+        self, access_token: str, group_slug: str
+    ) -> Optional[str]:
+        """Create a group via the GitLab REST API.
+
+        Returns the group's ``full_path`` on success, or ``None`` on failure.
+        """
+        headers = {"Authorization": f"Bearer {access_token}"}
+        payload = {
+            "name": f"Duo {group_slug}",
+            "path": group_slug,
+            "visibility": "private",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                response = await client.post(
+                    f"{GITLAB_API_BASE}/groups",
+                    headers=headers,
+                    json=payload,
+                )
+                if response.status_code in (200, 201):
+                    data = response.json()
+                    return str(data.get("full_path") or data.get("path") or group_slug)
+                else:
+                    self.console.print(
+                        f"[yellow]API group creation returned {response.status_code}: "
+                        f"{response.text[:200]}[/yellow]"
+                    )
+        except Exception as e:
+            self.console.print(f"[yellow]API group creation failed: {e}[/yellow]")
+        return None
+
     async def _create_group_via_ui(self, page: Any, group_slug: str) -> bool:
         await page.goto(GROUP_CREATE_URL, wait_until="domcontentloaded", timeout=90000)
         await self._dismiss_cookie_banners(page)
@@ -3628,15 +3660,26 @@ class GitLabTrialAutomator:
         lib_logger.debug("Owned top-level groups: %s", groups)
 
         if not groups:
-            self.console.print(
-                "[yellow]No owned groups found, creating one via UI…[/yellow]"
-            )
-            created = await self._create_group_via_ui(
-                page, f"duo-{secrets.token_hex(4)}"
-            )
-            if created:
+            self.console.print("[yellow]No owned groups found, creating one…[/yellow]")
+            # Try API first (most reliable — doesn't depend on browser state).
+            group_slug = f"duo-{secrets.token_hex(4)}"
+            api_path = await self._create_group_via_api(access_token, group_slug)
+            if api_path:
+                self.console.print(f"[green]Created group via API: {api_path}[/green]")
                 await asyncio.sleep(2)
                 groups = await self._list_owned_top_level_groups(access_token)
+            else:
+                # Fall back to UI-based group creation.
+                self.console.print(
+                    "[yellow]API group creation failed, trying via browser UI…[/yellow]"
+                )
+                try:
+                    created = await self._create_group_via_ui(page, group_slug)
+                    if created:
+                        await asyncio.sleep(2)
+                        groups = await self._list_owned_top_level_groups(access_token)
+                except Exception as e:
+                    self.console.print(f"[red]UI group creation failed: {e}[/red]")
 
         if not groups:
             lib_logger.warning("Could not find or create any groups for Duo.")
