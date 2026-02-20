@@ -58,8 +58,13 @@ class GitLabTrialAutomationResult:
 class GitLabTrialAutomator:
     """Automates GitLab trial signup, confirmation, and Duo enablement."""
 
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(
+        self,
+        console: Optional[Console] = None,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    ):
         self.console = console or Console()
+        self._progress_callback = progress_callback
         self.email_poll_interval_seconds = int(
             os.getenv("GITLAB_TRIAL_EMAIL_POLL_INTERVAL", "4")
         )
@@ -76,6 +81,14 @@ class GitLabTrialAutomator:
             os.getenv("GITLAB_TRIAL_PHONE_WAIT_TIMEOUT", "900")
         )
         self._headless_mode = False
+
+    async def _notify(self, message: str) -> None:
+        """Send a progress notification via the callback, if one is set."""
+        if self._progress_callback is not None:
+            try:
+                await self._progress_callback(message)
+            except Exception as e:
+                lib_logger.warning(f"Progress callback failed: {e}")
 
     @staticmethod
     def _env_to_bool(value: str) -> bool:
@@ -240,6 +253,15 @@ class GitLabTrialAutomator:
         ]
         if headless:
             args.append("--headless=new")
+
+        # In Docker / container environments Chrome runs as root and needs
+        # --no-sandbox.  Add container flags regardless of headless mode so
+        # that CDP works with Xvfb (headed-in-container).
+        if (
+            headless
+            or os.path.exists("/.dockerenv")
+            or os.path.exists("/run/.containerenv")
+        ):
             args.extend(
                 [
                     "--no-sandbox",
@@ -252,7 +274,7 @@ class GitLabTrialAutomator:
         process = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         endpoint = f"http://localhost:{port}"
@@ -266,6 +288,21 @@ class GitLabTrialAutomator:
                         return process, ws_url or endpoint
             except Exception:
                 pass
+            # Check if Chrome exited prematurely
+            if process.poll() is not None:
+                stderr_output = ""
+                try:
+                    stderr_output = process.stderr.read().decode(
+                        "utf-8", errors="ignore"
+                    )[:500]
+                except Exception:
+                    pass
+                self.console.print(
+                    f"[red]Chrome exited with code {process.returncode}[/red]"
+                )
+                if stderr_output:
+                    self.console.print(f"[dim]Chrome stderr: {stderr_output}[/dim]")
+                return None
             await asyncio.sleep(0.5)
 
         # Chrome didn't start in time.
@@ -3718,6 +3755,8 @@ class GitLabTrialAutomator:
         """Run trial creation and return OAuth credential result metadata."""
         async_playwright, apply_stealth = self._import_playwright()
 
+        await self._notify("1/9 Detecting automation library...")
+
         # Detect which automation library is active.  Patchright's bundled
         # Chromium is already CDP-patched for stealth so we do NOT need to
         # use channel="chrome" (system Chrome); doing so can cause version
@@ -3736,6 +3775,7 @@ class GitLabTrialAutomator:
                 "patchright install chromium[/yellow]"
             )
 
+        await self._notify("2/9 Creating temp email inbox...")
         mailbox = await self._create_temp_mailbox()
         identity = self._random_identity()
         identity["email"] = mailbox["email"]
@@ -3744,6 +3784,8 @@ class GitLabTrialAutomator:
             "mail_tm": "mail.tm",
             "guerrilla": "Guerrilla Mail",
         }.get(mailbox.get("provider", ""), mailbox.get("provider", "unknown"))
+
+        await self._notify(f"2/9 Temp email ready: {identity['email']}")
 
         self.console.print(
             Panel(
@@ -3755,6 +3797,8 @@ class GitLabTrialAutomator:
                 style="bold blue",
             )
         )
+
+        await self._notify("3/9 Launching browser...")
 
         browser = None
         context = None
@@ -3848,6 +3892,9 @@ class GitLabTrialAutomator:
                             page = await context.new_page()
                             await page.set_viewport_size({"width": 1440, "height": 900})
                             cdp_ok = True
+                            await self._notify(
+                                "3/9 Browser connected via CDP (stealth mode)"
+                            )
                             self.console.print(
                                 "[green]Connected to Chrome via CDP — "
                                 "maximum stealth mode active.[/green]"
@@ -4004,6 +4051,7 @@ class GitLabTrialAutomator:
 
                 await self._perform_low_risk_warmup(page)
 
+                await self._notify("4/9 Submitting registration form...")
                 try:
                     await self._submit_trial_registration(
                         page, identity, mailbox["email"]
@@ -4030,6 +4078,9 @@ class GitLabTrialAutomator:
                         "[yellow]Current temp email provider was rejected by GitLab. "
                         f"Retrying with {fallback_provider}...[/yellow]"
                     )
+                    await self._notify(
+                        f"4/9 Email rejected, retrying with {fallback_provider}..."
+                    )
                     mailbox = await self._create_temp_mailbox(
                         provider_override=fallback_provider
                     )
@@ -4042,8 +4093,10 @@ class GitLabTrialAutomator:
                     )
 
                 if "identity_verification" in page.url:
+                    await self._notify("5/9 Verifying identity (email code)...")
                     await self._complete_identity_verification_step(page, mailbox)
                 else:
+                    await self._notify("5/9 Waiting for confirmation email...")
                     self.console.print(
                         "[yellow]Waiting for confirmation email. "
                         "If CAPTCHA appears in browser, solve it manually.[/yellow]"
@@ -4053,6 +4106,7 @@ class GitLabTrialAutomator:
                         confirm_link, wait_until="domcontentloaded", timeout=90000
                     )
 
+                await self._notify("6/9 Signing in and completing onboarding...")
                 await self._try_sign_in_if_needed(
                     page,
                     identity["email"],
@@ -4063,6 +4117,8 @@ class GitLabTrialAutomator:
                 # for newly registered accounts before granting dashboard
                 # access.
                 await self._handle_welcome_onboarding(page)
+
+                await self._notify("7/9 Starting OAuth authorization flow...")
 
                 async def _deliver_callback(callback_url: str) -> bool:
                     """Deliver a callback URL to the local OAuth server via
@@ -5183,8 +5239,10 @@ class GitLabTrialAutomator:
                             break
 
                 oauth_path = await oauth_runner(_open_oauth_url)
+                await self._notify("8/9 OAuth tokens received. Reading credentials...")
                 access_token = await self._read_oauth_access_token(oauth_path)
 
+                await self._notify("9/9 Creating group and enabling Duo...")
                 duo_enabled, group_path = await self._enable_duo_for_group(
                     access_token, page
                 )

@@ -1563,7 +1563,17 @@ async def newaccount_command(
         from rich.console import Console as RichConsole
 
         _quiet_console = RichConsole(file=StringIO(), quiet=True)
-        automator = GitLabTrialAutomator(console=_quiet_console)
+
+        async def _on_progress(stage_msg: str) -> None:
+            """Forward automator stage notifications to Telegram."""
+            await update_status(
+                f"🔧 *Creating new GitLab Duo account...*\n\n{stage_msg}"
+            )
+
+        automator = GitLabTrialAutomator(
+            console=_quiet_console,
+            progress_callback=_on_progress,
+        )
 
         async def oauth_runner(auth_url_handler):
             """Run the GitLab OAuth PKCE flow."""
