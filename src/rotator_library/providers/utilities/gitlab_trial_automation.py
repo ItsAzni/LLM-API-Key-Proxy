@@ -215,6 +215,15 @@ class GitLabTrialAutomator:
         )
         os.makedirs(user_data_dir, exist_ok=True)
 
+        # Clean up stale lock files from crashed previous runs.
+        # A locked profile can cause Chrome to start in a degraded
+        # mode where DNS and network don't work properly.
+        for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock_path = os.path.join(user_data_dir, lock_name)
+            with suppress(Exception):
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+
         args = [
             chrome_bin,
             f"--remote-debugging-port={port}",
@@ -1403,6 +1412,90 @@ class GitLabTrialAutomator:
             ],
         )
 
+    async def _inject_form_validation_bypass(self, page: Any) -> None:
+        """Inject a script that disables browser form validation on the
+        current page.
+
+        Unlike ``add_init_script``, this uses ``page.evaluate`` which is
+        safe on all connection types (CDP, patchright, standard).  It
+        must be called again after each navigation that loads a page
+        with forms that need validation suppressed.
+        """
+        with suppress(Exception):
+            await page.evaluate(
+                """
+                () => {
+                    if (window.__glFormValidationBypassed) return;
+                    window.__glFormValidationBypassed = true;
+
+                    // 1. Intercept 'invalid' events at capture phase.
+                    document.addEventListener('invalid', function(e) {
+                        e.preventDefault();
+                        e.stopImmediatePropagation();
+                    }, true);
+
+                    // 2. Override reportValidity to prevent tooltips.
+                    try {
+                        HTMLFormElement.prototype.reportValidity = function() { return true; };
+                        HTMLSelectElement.prototype.reportValidity = function() { return true; };
+                        HTMLInputElement.prototype.reportValidity = function() { return true; };
+                    } catch(_) {}
+
+                    // 3. MutationObserver to enforce rules continuously.
+                    function enforceRules(root) {
+                        if (!root || !root.querySelectorAll) return;
+                        try {
+                            root.querySelectorAll('[required]').forEach(function(el) {
+                                el.removeAttribute('required');
+                                el.removeAttribute('aria-required');
+                            });
+                            root.querySelectorAll('form').forEach(function(f) {
+                                if (!f.hasAttribute('novalidate')) {
+                                    f.setAttribute('novalidate', 'true');
+                                }
+                                f.noValidate = true;
+                            });
+                        } catch(_) {}
+                    }
+
+                    enforceRules(document);
+
+                    try {
+                        var mo = new MutationObserver(function(mutations) {
+                            for (var i = 0; i < mutations.length; i++) {
+                                var m = mutations[i];
+                                if (m.type === 'attributes') {
+                                    var t = m.target;
+                                    if (m.attributeName === 'required' && t.hasAttribute && t.hasAttribute('required')) {
+                                        t.removeAttribute('required');
+                                        t.removeAttribute('aria-required');
+                                    }
+                                    if (m.attributeName === 'novalidate' && t.tagName === 'FORM' && !t.hasAttribute('novalidate')) {
+                                        t.setAttribute('novalidate', 'true');
+                                        t.noValidate = true;
+                                    }
+                                }
+                                if (m.type === 'childList' && m.addedNodes.length) {
+                                    for (var j = 0; j < m.addedNodes.length; j++) {
+                                        var node = m.addedNodes[j];
+                                        if (node.nodeType === 1) enforceRules(node);
+                                    }
+                                }
+                            }
+                        });
+                        if (document.documentElement) {
+                            mo.observe(document.documentElement, {
+                                attributes: true,
+                                attributeFilter: ['required', 'aria-required', 'novalidate'],
+                                childList: true,
+                                subtree: true
+                            });
+                        }
+                    } catch(_) {}
+                }
+                """
+            )
+
     async def _apply_extra_stealth(self, page: Any) -> None:
         """Apply additional stealth patches beyond playwright-stealth.
 
@@ -1838,6 +1931,22 @@ class GitLabTrialAutomator:
             await page.wait_for_timeout(1500)
             url = page.url
 
+            # Inject form validation bypass on every onboarding page.
+            # Uses page.evaluate (not add_init_script) so it's safe on
+            # all connection types including CDP.
+            if any(
+                f in url
+                for f in (
+                    "sign_up/welcome",
+                    "registrations/welcome",
+                    "sign_up/company",
+                    "registrations/company",
+                    "projects/new",
+                    "groups/new",
+                )
+            ):
+                await self._inject_form_validation_bypass(page)
+
             if await self._onboard_step_welcome(page, url):
                 handled_any = True
                 continue
@@ -1880,9 +1989,86 @@ class GitLabTrialAutomator:
         # valid (non-placeholder) value via raw JS BEFORE trying anything
         # else.  This handles cases where selectors have changed or the
         # element is hidden behind a custom component overlay.
-        with suppress(Exception):
+        try:
             await page.evaluate(
                 """() => {
+                    // Intercept browser validation tooltips globally.
+                    if (!window.__glInvalidIntercepted) {
+                        window.__glInvalidIntercepted = true;
+                        document.addEventListener('invalid', (e) => {
+                            e.preventDefault();
+                            e.stopImmediatePropagation();
+                        }, true);
+                    }
+                    // Disable HTML5 validation on all forms immediately.
+                    document.querySelectorAll('form').forEach((f) => {
+                        f.setAttribute('novalidate', 'true');
+                        f.noValidate = true;
+                    });
+
+                    // Helper: set a select to a valid non-placeholder value.
+                    function forceSelectValue(sel) {
+                        if (!(sel instanceof HTMLSelectElement)) return;
+                        const cur = sel.options[sel.selectedIndex];
+                        const curText = (cur ? cur.textContent : '').trim().toLowerCase();
+                        const curVal  = (sel.value || '').trim();
+
+                        const isPlaceholder = (
+                            !curVal ||
+                            curVal === '' ||
+                            curText === '' ||
+                            curText.includes('select') ||
+                            curText.includes('please') ||
+                            curText.includes('choose') ||
+                            curText.includes('choisir') ||
+                            curText.includes('sélectionner') ||
+                            curText.includes('role') ||
+                            curText.startsWith('--')
+                        );
+                        if (!isPlaceholder) {
+                            sel.removeAttribute('required');
+                            sel.removeAttribute('aria-required');
+                            return;
+                        }
+
+                        for (let i = 1; i < sel.options.length; i++) {
+                            const opt = sel.options[i];
+                            const t = (opt.textContent || '').trim();
+                            const v = (opt.value || '').trim();
+                            if (t && v && v !== '') {
+                                const nativeSetter = Object.getOwnPropertyDescriptor(
+                                    HTMLSelectElement.prototype, 'value'
+                                );
+                                if (nativeSetter && nativeSetter.set) {
+                                    nativeSetter.set.call(sel, v);
+                                }
+                                sel.selectedIndex = i;
+                                sel.dispatchEvent(new Event('input', { bubbles: true }));
+                                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                break;
+                            }
+                        }
+                        sel.removeAttribute('required');
+                        sel.removeAttribute('aria-required');
+                    }
+
+                    // Priority: target the known role/reason selects
+                    // by data-testid first.
+                    const roleSel = document.querySelector(
+                        '[data-testid="role-dropdown"]'
+                    );
+                    if (roleSel) forceSelectValue(roleSel);
+
+                    const reasonSel = document.querySelector(
+                        '#user_onboarding_status_registration_objective, '
+                        + 'select[name*="registration_objective"], '
+                        + 'select[name*="jobs_to_be_done"]'
+                    );
+                    if (reasonSel) forceSelectValue(reasonSel);
+
+                    // Then force ALL remaining selects.
+                    document.querySelectorAll('select').forEach(forceSelectValue);
+
                     document.querySelectorAll('select').forEach((sel) => {
                         // Skip truly invisible selects (display:none on an
                         // ancestor), but do NOT skip selects that merely have
@@ -1915,6 +2101,14 @@ class GitLabTrialAutomator:
                             const t = (opt.textContent || '').trim();
                             const v = (opt.value || '').trim();
                             if (t && v && v !== '') {
+                                // Use the native property setter to trigger
+                                // Vue / React reactivity watchers.
+                                const nativeSetter = Object.getOwnPropertyDescriptor(
+                                    HTMLSelectElement.prototype, 'value'
+                                );
+                                if (nativeSetter && nativeSetter.set) {
+                                    nativeSetter.set.call(sel, v);
+                                }
                                 sel.selectedIndex = i;
                                 sel.dispatchEvent(new Event('input', { bubbles: true }));
                                 sel.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1924,6 +2118,7 @@ class GitLabTrialAutomator:
 
                         // Strip required so browser validation can't block
                         sel.removeAttribute('required');
+                        sel.removeAttribute('aria-required');
                     });
 
                     // Also strip required from any other form elements
@@ -1931,10 +2126,13 @@ class GitLabTrialAutomator:
                         if (el.tagName === 'SELECT') return; // already handled
                         if (!el.value || el.value.trim() === '') {
                             el.removeAttribute('required');
+                            el.removeAttribute('aria-required');
                         }
                     });
                 }"""
             )
+        except Exception as e:
+            self.console.print(f"[red]Nuclear JS (welcome selects) failed: {e}[/red]")
         await self._human_pause(page, 200, 400)
 
         # Role dropdown - prefer direct native select first to avoid hover
@@ -1948,22 +2146,26 @@ class GitLabTrialAutomator:
             'select[title*="role" i]',
         ]
         role_picked = False
-        with suppress(Exception):
+        try:
             role_picked = await self._pick_native_select(
                 page,
                 role_selectors,
                 ["software developer", "developer"],
             )
+        except Exception as e:
+            self.console.print(f"[red]Role native select failed: {e}[/red]")
         # Always try GL dropdown fallback if native select didn't work,
         # even if the native <select> element exists in the DOM (it may
         # be hidden behind a custom Vue component overlay).
         if not role_picked:
-            with suppress(Exception):
+            try:
                 role_picked = await self._pick_gl_dropdown(
                     page,
                     label_hints=["role", "r\u00f4le"],
                     option_hints=["software developer", "d\u00e9veloppeur"],
                 )
+            except Exception as e:
+                self.console.print(f"[red]Role GL dropdown failed: {e}[/red]")
         await self._human_pause(page, 300, 500)
 
         # Reason dropdown - same approach as role.
@@ -1977,14 +2179,16 @@ class GitLabTrialAutomator:
             'select[title*="objective" i]',
         ]
         reason_picked = False
-        with suppress(Exception):
+        try:
             reason_picked = await self._pick_native_select(
                 page,
                 reason_selectors,
                 ["store my code", "code", "learn"],
             )
+        except Exception as e:
+            self.console.print(f"[red]Reason native select failed: {e}[/red]")
         if not reason_picked:
-            with suppress(Exception):
+            try:
                 reason_picked = await self._pick_gl_dropdown(
                     page,
                     label_hints=[
@@ -2000,6 +2204,8 @@ class GitLabTrialAutomator:
                     ],
                     option_hints=["learn", "store my code", "code", "apprendre"],
                 )
+            except Exception as e:
+                self.console.print(f"[red]Reason GL dropdown failed: {e}[/red]")
         await self._human_pause(page, 300, 500)
 
         # Ensure required selects are valid before submitting; Chrome shows
@@ -2017,33 +2223,147 @@ class GitLabTrialAutomator:
 
         # Final nuclear pass: force all selects again + strip required from
         # every element to absolutely prevent browser validation popups.
-        with suppress(Exception):
+        # This enhanced version also triggers Vue reactivity via the native
+        # property setter and intercepts the 'invalid' event globally so
+        # the browser tooltip never appears.
+        try:
             await page.evaluate(
                 """() => {
                     document.querySelectorAll('select').forEach((sel) => {
-                        // If still on placeholder (index 0 with empty value), pick index 1
-                        if (sel.selectedIndex <= 0 && sel.options.length > 1) {
-                            const cur = sel.options[0];
-                            const t = (cur ? cur.textContent : '').trim().toLowerCase();
-                            const v = (sel.value || '').trim();
-                            if (!v || t.includes('select') || t.includes('choose') || t === '' || t.startsWith('--')) {
-                                sel.selectedIndex = 1;
-                                sel.dispatchEvent(new Event('input', { bubbles: true }));
-                                sel.dispatchEvent(new Event('change', { bubbles: true }));
-                            }
+                        const cur = sel.options[sel.selectedIndex] || null;
+                        const curText = (cur ? cur.textContent : '').trim().toLowerCase();
+                        const curVal  = (sel.value || '').trim();
+
+                        const isPlaceholder = (
+                            !curVal ||
+                            curText === '' ||
+                            curText.includes('select') ||
+                            curText.includes('please') ||
+                            curText.includes('choose') ||
+                            curText.includes('choisir') ||
+                            curText.includes('sélectionner') ||
+                            curText.startsWith('--')
+                        );
+                        if (!isPlaceholder) {
+                            sel.removeAttribute('required');
+                            return;
                         }
+
+                        // Pick best non-placeholder option
+                        let target = -1;
+                        for (let i = 1; i < sel.options.length; i++) {
+                            const v = (sel.options[i].value || '').trim();
+                            const t = (sel.options[i].textContent || '').trim();
+                            if (v && t) { target = i; break; }
+                        }
+                        if (target < 0) { sel.removeAttribute('required'); return; }
+
+                        // Use the native HTMLSelectElement.value setter to
+                        // trigger Vue / React reactivity watchers.
+                        const nativeSetter = Object.getOwnPropertyDescriptor(
+                            HTMLSelectElement.prototype, 'value'
+                        );
+                        if (nativeSetter && nativeSetter.set) {
+                            nativeSetter.set.call(sel, sel.options[target].value);
+                        }
+                        sel.selectedIndex = target;
+                        sel.dispatchEvent(new Event('input',  { bubbles: true }));
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
                         sel.removeAttribute('required');
                     });
+
                     // Remove required from everything
                     document.querySelectorAll('[required]').forEach((el) => {
                         el.removeAttribute('required');
+                        el.removeAttribute('aria-required');
                     });
-                    // Also disable HTML5 validation on forms
+
+                    // Disable HTML5 validation on ALL forms
                     document.querySelectorAll('form').forEach((f) => {
                         f.setAttribute('novalidate', 'true');
+                        f.noValidate = true;
                     });
+
+                    // Intercept the 'invalid' event at capture phase so the
+                    // browser never shows the "Please select an item" tooltip.
+                    if (!window.__glInvalidIntercepted) {
+                        window.__glInvalidIntercepted = true;
+                        document.addEventListener('invalid', (e) => {
+                            e.preventDefault();
+                            e.stopImmediatePropagation();
+                        }, true);
+                    }
                 }"""
             )
+        except Exception as e:
+            self.console.print(
+                f"[red]Final nuclear pass (welcome selects) failed: {e}[/red]"
+            )
+
+        # If native selects still couldn't be set via JS, try Playwright's
+        # built-in select_option() API which can bypass some Vue wrappers.
+        if not role_picked:
+            for sel_css in role_selectors:
+                try:
+                    sel_loc = page.locator(sel_css).first
+                    if await sel_loc.count() > 0:
+                        for hint in [
+                            "software_developer",
+                            "software developer",
+                            "developer",
+                        ]:
+                            try:
+                                await sel_loc.select_option(
+                                    label=re.compile(hint, re.IGNORECASE),
+                                    timeout=2000,
+                                )
+                                role_picked = True
+                                break
+                            except Exception:
+                                try:
+                                    await sel_loc.select_option(
+                                        value=hint, timeout=2000
+                                    )
+                                    role_picked = True
+                                    break
+                                except Exception:
+                                    pass
+                    if role_picked:
+                        break
+                except Exception as e:
+                    self.console.print(
+                        f"[dim]Playwright select_option role ({sel_css}): {e}[/dim]"
+                    )
+        if not reason_picked:
+            for sel_css in reason_selectors:
+                try:
+                    sel_loc = page.locator(sel_css).first
+                    if await sel_loc.count() > 0:
+                        for hint in ["store_code", "store my code", "code", "learn"]:
+                            try:
+                                await sel_loc.select_option(
+                                    label=re.compile(hint, re.IGNORECASE),
+                                    timeout=2000,
+                                )
+                                reason_picked = True
+                                break
+                            except Exception:
+                                try:
+                                    await sel_loc.select_option(
+                                        value=hint, timeout=2000
+                                    )
+                                    reason_picked = True
+                                    break
+                                except Exception:
+                                    pass
+                    if reason_picked:
+                        break
+                except Exception as e:
+                    self.console.print(
+                        f"[dim]Playwright select_option reason ({sel_css}): {e}[/dim]"
+                    )
+
+        await self._human_pause(page, 200, 400)
 
         # "Just me" radio
         await self._click_first_visible(
@@ -2054,18 +2374,233 @@ class GitLabTrialAutomator:
                 'input[value="just_me"]',
                 'input[value="myself"]',
                 '[data-testid="radio-just-me"]',
-                'input[type="radio"]'
+                'input[type="radio"]',
             ],
         )
         await self._human_pause(page, 300, 500)
 
-        # Continue
-        await self._safe_click_by_button_name(
-            page,
-            ["Continue", "Continuer", "Get started", "Commencer"],
-        )
-        with suppress(Exception):
-            await page.wait_for_timeout(2500)
+        # PRIMARY submission strategy: use form.submit() via JS.
+        # Unlike clicking a submit button, form.submit() completely
+        # bypasses the browser's constraint validation API — no tooltip,
+        # no "please select an item" message, ever.
+        #
+        # Target the specific welcome form using data-testid or class
+        # rather than blindly submitting the first form (which may be a
+        # logout or CSRF form in the header).
+        url_before = page.url
+        submitted = False
+        try:
+            submitted = await page.evaluate(
+                """() => {
+                    // Final sweep: force selects to valid values.
+                    document.querySelectorAll('select').forEach((sel) => {
+                        const v = (sel.value || '').trim();
+                        const cur = sel.options[sel.selectedIndex];
+                        const t = (cur ? cur.textContent : '').trim().toLowerCase();
+                        const bad = !v || t.includes('select') || t.includes('choose')
+                                    || t.startsWith('--') || t === ''
+                                    || t.includes('sélect') || t.includes('choisir')
+                                    || t.includes('role');
+                        if (bad && sel.options.length > 1) {
+                            for (let i = 1; i < sel.options.length; i++) {
+                                if ((sel.options[i].value||'').trim()) {
+                                    const ns = Object.getOwnPropertyDescriptor(
+                                        HTMLSelectElement.prototype, 'value');
+                                    if (ns && ns.set) ns.set.call(sel, sel.options[i].value);
+                                    sel.selectedIndex = i;
+                                    sel.dispatchEvent(new Event('input', {bubbles:true}));
+                                    sel.dispatchEvent(new Event('change', {bubbles:true}));
+                                    break;
+                                }
+                            }
+                        }
+                        sel.removeAttribute('required');
+                        sel.removeAttribute('aria-required');
+                    });
+                    document.querySelectorAll('[required]').forEach(
+                        el => { el.removeAttribute('required'); el.removeAttribute('aria-required'); }
+                    );
+
+                    // Find the welcome form specifically — prefer
+                    // data-testid, then class, then fallback to any
+                    // form containing a role select.
+                    let form = document.querySelector(
+                        '[data-testid="welcome-form"]'
+                    );
+                    if (!form) {
+                        form = document.querySelector(
+                            'form.js-users-signup-welcome'
+                        );
+                    }
+                    if (!form) {
+                        // Fallback: find the form containing a role
+                        // select or registration_objective select.
+                        const roleSelect = document.querySelector(
+                            '[data-testid="role-dropdown"], '
+                            + 'select[name*="role"], '
+                            + '#user_onboarding_status_role'
+                        );
+                        if (roleSelect) form = roleSelect.closest('form');
+                    }
+                    if (!form) {
+                        // Last resort: first form on the page that is
+                        // NOT a logout/sign-out form.
+                        const allForms = document.querySelectorAll('form');
+                        for (const f of allForms) {
+                            const action = (f.action || '').toLowerCase();
+                            if (action.includes('sign_out') ||
+                                action.includes('logout') ||
+                                action.includes('destroy')) continue;
+                            form = f;
+                            break;
+                        }
+                    }
+
+                    if (!form) return false;
+
+                    form.noValidate = true;
+                    form.setAttribute('novalidate', 'true');
+
+                    // Remove any submit event listeners that might
+                    // intercept and re-validate.
+                    const cleanForm = form.cloneNode(false);
+                    // Don't actually replace — just set novalidate props.
+
+                    // Use the native HTMLFormElement.prototype.submit
+                    // to bypass any JS overrides on the form's submit
+                    // method (e.g., Vue interceptors).
+                    try {
+                        HTMLFormElement.prototype.submit.call(form);
+                        return true;
+                    } catch(_) {}
+
+                    // Standard fallback.
+                    try { form.submit(); return true; }
+                    catch(_) {}
+
+                    return false;
+                }"""
+            )
+        except Exception as e:
+            err_msg = str(e).lower()
+            # Navigation errors mean the submit actually worked
+            if any(
+                k in err_msg
+                for k in ("context", "destroy", "navigat", "target closed", "frame")
+            ):
+                submitted = True
+                self.console.print(
+                    "[green]Welcome form.submit() triggered navigation.[/green]"
+                )
+            else:
+                self.console.print(f"[red]Welcome form.submit() failed: {e}[/red]")
+
+        if submitted:
+            self.console.print(
+                "[green]Welcome step submitted via JS form.submit().[/green]"
+            )
+            try:
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                self.console.print(f"[dim]wait_for_timeout after submit: {e}[/dim]")
+        else:
+            # Fallback: try clicking the Continue button directly.
+            self.console.print(
+                "[yellow]JS submit failed, trying Continue button click…[/yellow]"
+            )
+            try:
+                await page.evaluate(
+                    """() => {
+                        document.querySelectorAll('[required]').forEach(
+                            el => { el.removeAttribute('required'); el.removeAttribute('aria-required'); }
+                        );
+                        document.querySelectorAll('form').forEach(f => {
+                            f.noValidate = true;
+                            f.setAttribute('novalidate', 'true');
+                        });
+                    }"""
+                )
+            except Exception as e:
+                self.console.print(f"[red]Fallback validation strip failed: {e}[/red]")
+
+            # Try data-testid button first (most reliable).
+            btn_clicked = False
+            try:
+                get_started = page.locator('[data-testid="get-started-button"]')
+                if await get_started.count() > 0:
+                    await get_started.first.click(timeout=5000)
+                    btn_clicked = True
+            except Exception as e:
+                self.console.print(f"[red]get-started-button click failed: {e}[/red]")
+
+            if not btn_clicked:
+                await self._safe_click_by_button_name(
+                    page,
+                    ["Continue", "Continuer", "Get started", "Commencer"],
+                )
+            try:
+                await page.wait_for_timeout(2500)
+            except Exception as e:
+                self.console.print(f"[dim]wait_for_timeout after btn click: {e}[/dim]")
+
+            # If still stuck, one last attempt with form.submit()
+            try:
+                if page.url == url_before:
+                    await page.evaluate(
+                        """() => {
+                            // Target the welcome form specifically.
+                            let form = document.querySelector(
+                                '[data-testid="welcome-form"]'
+                            ) || document.querySelector(
+                                'form.js-users-signup-welcome'
+                            );
+                            if (!form) {
+                                const sel = document.querySelector(
+                                    '[data-testid="role-dropdown"], '
+                                    + '#user_onboarding_status_role'
+                                );
+                                if (sel) form = sel.closest('form');
+                            }
+                            if (!form) {
+                                const forms = document.querySelectorAll('form');
+                                for (const f of forms) {
+                                    const action = (f.action || '').toLowerCase();
+                                    if (!action.includes('sign_out') &&
+                                        !action.includes('logout')) {
+                                        form = f; break;
+                                    }
+                                }
+                            }
+                            if (!form) return false;
+                            form.noValidate = true;
+                            form.setAttribute('novalidate', 'true');
+                            // Strip required from everything inside.
+                            form.querySelectorAll('[required]').forEach(
+                                el => { el.removeAttribute('required'); el.removeAttribute('aria-required'); }
+                            );
+                            try {
+                                HTMLFormElement.prototype.submit.call(form);
+                                return true;
+                            } catch(_) {}
+                            try { form.submit(); return true; }
+                            catch(_) {}
+                            return false;
+                        }"""
+                    )
+                    await page.wait_for_timeout(2500)
+            except Exception as e:
+                err_msg = str(e).lower()
+                if any(
+                    k in err_msg
+                    for k in ("context", "destroy", "navigat", "target closed", "frame")
+                ):
+                    self.console.print(
+                        "[green]Last-resort form.submit() triggered navigation.[/green]"
+                    )
+                else:
+                    self.console.print(
+                        f"[red]Last-resort form.submit() failed: {e}[/red]"
+                    )
         self.console.print("[green]Welcome step done.[/green]")
         return True
 
@@ -2310,9 +2845,19 @@ class GitLabTrialAutomator:
                 """(el, idx) => {
                     if (!(el instanceof HTMLSelectElement)) return false;
                     if (idx < 0 || idx >= el.options.length) return false;
+                    // Use the native property setter to trigger Vue/React
+                    // reactivity watchers on the underlying element.
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        HTMLSelectElement.prototype, 'value'
+                    );
+                    if (nativeSetter && nativeSetter.set) {
+                        nativeSetter.set.call(el, el.options[idx].value);
+                    }
                     el.selectedIndex = idx;
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.removeAttribute('required');
+                    el.removeAttribute('aria-required');
                     return el.selectedIndex === idx;
                 }""",
                 chosen_index,
@@ -2405,9 +2950,19 @@ class GitLabTrialAutomator:
 
                     if (target < 0) return false;
 
+                    // Use the native property setter to trigger Vue/React
+                    // reactivity watchers on the underlying element.
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        HTMLSelectElement.prototype, 'value'
+                    );
+                    if (nativeSetter && nativeSetter.set) {
+                        nativeSetter.set.call(select, select.options[target].value);
+                    }
                     select.selectedIndex = target;
                     select.dispatchEvent(new Event('input', { bubbles: true }));
                     select.dispatchEvent(new Event('change', { bubbles: true }));
+                    select.removeAttribute('required');
+                    select.removeAttribute('aria-required');
                     return true;
                 }""",
                 {
@@ -2486,8 +3041,8 @@ class GitLabTrialAutomator:
                 '[role="combobox"]',
                 'button[aria-haspopup="listbox"]',
                 'button[aria-haspopup="true"]',
-                '.gl-dropdown > button',
-                '.dropdown > button',
+                ".gl-dropdown > button",
+                ".dropdown > button",
             ]
             for tsel in trigger_sels:
                 triggers = page.locator(tsel)
@@ -2551,12 +3106,27 @@ class GitLabTrialAutomator:
                         with suppress(Exception):
                             handle = await trigger.element_handle()
                             if handle is not None:
-                                await page.evaluate("(el) => { el.scrollIntoView({block: 'center'}); el.click(); }", handle)
+                                await page.evaluate(
+                                    "(el) => { el.scrollIntoView({block: 'center'}); el.click(); }",
+                                    handle,
+                                )
                                 opened = True
                     if not opened:
                         continue
 
-                    await page.wait_for_timeout(1000) # Wait a bit longer for animation
+                    # Wait for dropdown animation to complete – Vue
+                    # transitions can take up to ~400ms plus network
+                    # fetching for lazy-loaded option lists.
+                    await page.wait_for_timeout(1500)
+
+                    # Wait for any option elements to appear in the DOM
+                    with suppress(Exception):
+                        await page.wait_for_selector(
+                            '[role="option"], .dropdown-item, '
+                            ".gl-dropdown-item, .gl-listbox-item, "
+                            '[role="menuitem"]',
+                            timeout=3000,
+                        )
 
                     if await self._pick_option_from_open_listbox(
                         page,
@@ -2571,7 +3141,9 @@ class GitLabTrialAutomator:
 
         # --- Strategy 3: brute-force buttons with "Select" placeholder --
         try:
-            all_btns = page.locator("button, .gl-dropdown-toggle, [data-testid*='dropdown'], [class*='dropdown']")
+            all_btns = page.locator(
+                "button, .gl-dropdown-toggle, [data-testid*='dropdown'], [class*='dropdown']"
+            )
             btn_count = await all_btns.count()
             for bi in range(btn_count):
                 btn = all_btns.nth(bi)
@@ -2580,7 +3152,7 @@ class GitLabTrialAutomator:
                     pass
                 except Exception:
                     continue
-                
+
                 try:
                     txt = (await btn.text_content(timeout=500) or "").strip().lower()
                     if not any(
@@ -2644,7 +3216,7 @@ class GitLabTrialAutomator:
             "li[data-value]",
             '[role="menuitem"]',
             '[data-testid*="dropdown-item"]',
-            '.gl-listbox-item'
+            ".gl-listbox-item",
         ]
         for osel in option_selectors:
             opts = page.locator(osel)
@@ -2663,7 +3235,7 @@ class GitLabTrialAutomator:
                             return True
                     except Exception:
                         pass
-                    
+
                     try:
                         handle = await opt.element_handle()
                         if handle:
@@ -2671,7 +3243,7 @@ class GitLabTrialAutomator:
                             return True
                     except Exception:
                         continue
-                        
+
                 # Alternative Strategy: if element can't be clicked directly, try JS click
                 for oi in range(count):
                     opt = opts.nth(oi)
@@ -2705,13 +3277,13 @@ class GitLabTrialAutomator:
                         )
                     ):
                         continue
-                        
+
                     try:
                         await opt.click(timeout=3000)
                         return True
                     except Exception:
                         pass
-                        
+
                     try:
                         handle = await opt.element_handle()
                         if handle:
@@ -3302,7 +3874,105 @@ class GitLabTrialAutomator:
                 # access.
                 await self._handle_welcome_onboarding(page)
 
+                async def _deliver_callback(callback_url: str) -> bool:
+                    """Deliver a callback URL to the local OAuth server via
+                    raw asyncio TCP — this avoids httpx/aiohttp dependencies
+                    and is guaranteed to work on the same event loop."""
+                    from urllib.parse import urlparse as _urlparse
+
+                    parsed = _urlparse(callback_url)
+                    host = parsed.hostname or "127.0.0.1"
+                    port = parsed.port or 8080
+                    path = parsed.path or "/callback"
+                    query = parsed.query or ""
+                    request_path = f"{path}?{query}" if query else path
+
+                    self.console.print(
+                        f"[dim]Delivering callback → {host}:{port} "
+                        f"path={request_path[:80]}[/dim]"
+                    )
+
+                    if not query or "code=" not in query:
+                        self.console.print(
+                            "[yellow]Callback URL has no 'code' query param — "
+                            "server likely already received it from the "
+                            "browser.[/yellow]"
+                        )
+                        # Give the event loop a chance to process the
+                        # browser's original request to the callback server.
+                        await asyncio.sleep(3)
+                        return True  # optimistic — the browser probably delivered it
+
+                    try:
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection(host, port),
+                            timeout=5.0,
+                        )
+                        request = (
+                            f"GET {request_path} HTTP/1.1\r\n"
+                            f"Host: {host}:{port}\r\n"
+                            f"Connection: close\r\n"
+                            f"\r\n"
+                        )
+                        writer.write(request.encode())
+                        await writer.drain()
+                        response = await asyncio.wait_for(
+                            reader.read(4096), timeout=10.0
+                        )
+                        writer.close()
+                        resp_text = response.decode("utf-8", errors="ignore")
+                        status = resp_text.split("\r\n", 1)[0] if resp_text else ""
+                        self.console.print(
+                            f"[green]Callback server responded: {status}[/green]"
+                        )
+                        return True
+                    except ConnectionRefusedError:
+                        self.console.print(
+                            "[green]Callback port closed — server already "
+                            "received the code from the browser.[/green]"
+                        )
+                        return True  # Server already processed & shut down
+                    except Exception as exc:
+                        self.console.print(
+                            f"[yellow]Callback delivery failed: {exc}[/yellow]"
+                        )
+                        return False
+
+                async def _check_and_deliver_callback() -> bool:
+                    """Check if page.url is a callback URL and deliver it.
+
+                    IMPORTANT: We must check the URL's HOST, not just
+                    search for '127.0.0.1' or '/callback' in the string,
+                    because the authorize URL contains these as part of
+                    the redirect_uri query parameter.
+                    """
+                    try:
+                        cur = page.url or ""
+                    except Exception:
+                        return False
+                    from urllib.parse import urlparse as _urlparse_check
+
+                    try:
+                        _p = _urlparse_check(cur)
+                    except Exception:
+                        return False
+                    # The callback URL has host=127.0.0.1 and
+                    # path=/callback.  Anything else (e.g. gitlab.com
+                    # with /callback in a query param) is NOT a callback.
+                    is_callback = _p.hostname in (
+                        "127.0.0.1",
+                        "localhost",
+                    ) and "/callback" in (_p.path or "")
+                    if not is_callback:
+                        return False
+                    self.console.print(
+                        f"[green]OAuth callback URL detected: {cur[:120]}[/green]"
+                    )
+                    await _deliver_callback(cur)
+                    return True
+
                 async def _open_oauth_url(auth_url: str) -> None:
+                    # ── Step 1: Navigate to the OAuth authorize URL ──
                     nav_error: Optional[Exception] = None
                     reached_page = False
                     for wait_until in ("domcontentloaded", "commit"):
@@ -3318,12 +3988,337 @@ class GitLabTrialAutomator:
                             nav_error = exc
                             if "ERR_ABORTED" not in str(exc).upper():
                                 raise
-
-                            with suppress(Exception):
-                                await page.wait_for_timeout(1200)
-                            current_url = ""
-                            with suppress(Exception):
+                            # ERR_ABORTED often means a redirect happened.
+                            # Give the event loop time to process.
+                            await asyncio.sleep(1.5)
+                            try:
                                 current_url = page.url or ""
+                            except Exception:
+                                current_url = ""
+                            self.console.print(
+                                f"[dim]ERR_ABORTED during goto — current "
+                                f"URL: {current_url[:100]}[/dim]"
+                            )
+                            # Check if we landed on a useful page.
+                            # Use urlparse to avoid false positives from
+                            # '127.0.0.1' or '/callback' appearing in
+                            # the query string of the authorize URL.
+                            from urllib.parse import urlparse as _up_nav
+
+                            _pn = _up_nav(current_url)
+                            _is_callback_nav = _pn.hostname in (
+                                "127.0.0.1",
+                                "localhost",
+                            ) and "/callback" in (_pn.path or "")
+                            if (
+                                "oauth/authorize" in current_url
+                                or "/users/sign_in" in current_url
+                                or "/sign_up/welcome" in current_url
+                                or _is_callback_nav
+                            ):
+                                reached_page = True
+                                break
+
+                    if not reached_page and nav_error is not None:
+                        raise nav_error
+
+                    # ── Step 2: Check for auto-approved callback ──
+                    if await _check_and_deliver_callback():
+                        return
+
+                    # ── Step 3: Handle sign-in if redirected ──
+                    try:
+                        cur_url = page.url or ""
+                    except Exception:
+                        cur_url = ""
+                    if "sign_in" in cur_url:
+                        await self._try_sign_in_if_needed(
+                            page,
+                            identity["email"],
+                            identity["password"],
+                        )
+                        if "sign_in" in (page.url or ""):
+                            await self._try_sign_in_if_needed(
+                                page,
+                                identity["username"],
+                                identity["password"],
+                            )
+
+                    # ── Step 4: Handle welcome onboarding ──
+                    await self._handle_welcome_onboarding(page)
+
+                    # Check for callback after onboarding
+                    if await _check_and_deliver_callback():
+                        return
+
+                    # ── Step 5: Re-navigate if redirected to dashboard ──
+                    try:
+                        post_url = page.url or ""
+                        if (
+                            "oauth/authorize" not in post_url
+                            and "127.0.0.1" not in post_url
+                            and "/callback" not in post_url
+                        ):
+                            self.console.print(
+                                "[dim]Re-navigating to OAuth authorize URL "
+                                "after onboarding…[/dim]"
+                            )
+                            for _wu in ("domcontentloaded", "commit"):
+                                try:
+                                    await page.goto(
+                                        auth_url,
+                                        wait_until=_wu,
+                                        timeout=60000,
+                                    )
+                                    break
+                                except Exception as _exc:
+                                    if "ERR_ABORTED" not in str(_exc).upper():
+                                        break
+                            if "sign_in" in (page.url or ""):
+                                await self._try_sign_in_if_needed(
+                                    page,
+                                    identity["email"],
+                                    identity["password"],
+                                )
+                            await self._handle_welcome_onboarding(page)
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]Re-navigation after onboarding failed: {e}[/red]"
+                        )
+
+                    # Check for callback after re-navigation
+                    if await _check_and_deliver_callback():
+                        return
+
+                    # ── Step 6: Wait for page to settle ──
+                    try:
+                        await page.wait_for_load_state(
+                            "networkidle",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.5)
+
+                    self.console.print(f"[dim]OAuth page URL: {page.url}[/dim]")
+
+                    # ── Step 7: Click the Authorize button ──
+                    # GitLab has TWO forms: POST (authorize) and DELETE
+                    # (cancel, uses hidden _method=delete).  The #container
+                    # div has gl-pointer-events-none which silently blocks
+                    # Playwright's .click().  We use JS form.submit(),
+                    # dispatch_event, and JS .click() which all bypass CSS
+                    # pointer-events.
+
+                    auth_done = False
+
+                    # Wait for forms/buttons to appear
+                    for _w in range(6):
+                        try:
+                            await page.wait_for_selector(
+                                'form[action*="authorize"], '
+                                '[data-testid="authorization-button"], '
+                                'button[type="submit"]',
+                                timeout=3000,
+                            )
+                            break
+                        except Exception:
+                            await asyncio.sleep(0.8)
+
+                    # Strategy A: JS form.submit() — bypasses button,
+                    # pointer-events, validation.  Targets the POST form
+                    # (not the DELETE/cancel form).
+                    if not auth_done:
+                        for _att in range(3):
+                            try:
+                                result = await page.evaluate(
+                                    """() => {
+                                        const c = document.getElementById('container');
+                                        if (c) {
+                                            c.classList.remove('gl-pointer-events-none');
+                                            c.style.pointerEvents = 'auto';
+                                        }
+                                        const forms = document.querySelectorAll('form');
+                                        for (const f of forms) {
+                                            const action = (f.action || '').toLowerCase();
+                                            if (!action.includes('authorize') && !action.includes('oauth')) continue;
+                                            const mi = f.querySelector('input[name="_method"]');
+                                            if (mi && mi.value === 'delete') continue;
+                                            HTMLFormElement.prototype.submit.call(f);
+                                            return 'submitted';
+                                        }
+                                        const btns = document.querySelectorAll('button, input[type="submit"]');
+                                        for (const b of btns) {
+                                            const t = (b.value || b.textContent || '').toLowerCase();
+                                            if (t.includes('authorize') || t.includes('autoriser') || t.includes('opencode')) {
+                                                b.click();
+                                                return 'clicked: ' + t.trim().slice(0, 40);
+                                            }
+                                        }
+                                        for (const f of forms) {
+                                            const mi = f.querySelector('input[name="_method"]');
+                                            if (mi && mi.value === 'delete') continue;
+                                            HTMLFormElement.prototype.submit.call(f);
+                                            return 'submitted-fallback';
+                                        }
+                                        return null;
+                                    }"""
+                                )
+                                if result:
+                                    auth_done = True
+                                    self.console.print(
+                                        f"[green]Authorize: {result}[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                if any(
+                                    k in str(e).lower()
+                                    for k in (
+                                        "context",
+                                        "destroy",
+                                        "navigat",
+                                        "target closed",
+                                        "detach",
+                                        "frame",
+                                    )
+                                ):
+                                    auth_done = True
+                                    self.console.print(
+                                        "[green]Authorize form submitted "
+                                        "(navigation detected).[/green]"
+                                    )
+                                    break
+                                self.console.print(
+                                    f"[yellow]Authorize attempt {_att + 1}: "
+                                    f"{e}[/yellow]"
+                                )
+                            await asyncio.sleep(1.5)
+
+                    # Strategy B: dispatch_event('click') — bypasses
+                    # CSS pointer-events entirely.
+                    if not auth_done:
+                        self.console.print("[dim]Trying dispatch_event…[/dim]")
+                        for sel in [
+                            '[data-testid="authorization-button"]',
+                            'form[action*="authorize"] button[type="submit"]',
+                            'button[type="submit"]',
+                        ]:
+                            try:
+                                loc = page.locator(sel)
+                                if await loc.count() > 0:
+                                    await loc.first.dispatch_event("click")
+                                    auth_done = True
+                                    self.console.print(
+                                        f"[green]Authorize via "
+                                        f"dispatch_event({sel}).[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                if any(
+                                    k in str(e).lower()
+                                    for k in ("context", "destroy", "navigat")
+                                ):
+                                    auth_done = True
+                                    self.console.print(
+                                        "[green]dispatch_event triggered "
+                                        "navigation.[/green]"
+                                    )
+                                    break
+                                self.console.print(
+                                    f"[dim]dispatch_event({sel}): {e}[/dim]"
+                                )
+
+                    # Strategy C: Playwright force=True click
+                    if not auth_done:
+                        self.console.print("[dim]Trying force click…[/dim]")
+                        for name_re in [
+                            re.compile(r"authorize", re.IGNORECASE),
+                            re.compile(r"opencode", re.IGNORECASE),
+                        ]:
+                            try:
+                                btn = page.get_by_role("button", name=name_re)
+                                if await btn.count() > 0:
+                                    await btn.first.click(
+                                        force=True,
+                                        timeout=5000,
+                                    )
+                                    auth_done = True
+                                    self.console.print(
+                                        "[green]Authorize via force click.[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                if any(
+                                    k in str(e).lower()
+                                    for k in ("context", "destroy", "navigat")
+                                ):
+                                    auth_done = True
+                                    break
+                                self.console.print(f"[dim]force click: {e}[/dim]")
+
+                    if auth_done:
+                        # After authorize, the browser redirects to the
+                        # callback URL.  Give it time to complete, then
+                        # ensure the callback server received it.
+                        await asyncio.sleep(3)
+                        await _check_and_deliver_callback()
+                        return
+
+                    # ── All strategies failed — debug dump ──
+                    try:
+                        info = await page.evaluate(
+                            """() => ({
+                                url: location.href,
+                                forms: Array.from(document.querySelectorAll('form')).map(f => ({
+                                    action: f.action, method: f.method,
+                                    hasMethodDelete: !!f.querySelector('input[name="_method"][value="delete"]'),
+                                })),
+                                buttons: Array.from(document.querySelectorAll('button, input[type="submit"]')).map(b => ({
+                                    text: (b.textContent||'').trim().slice(0,50),
+                                    type: b.type,
+                                    testid: b.dataset?.testid || '',
+                                    pe: getComputedStyle(b).pointerEvents,
+                                })),
+                                containerPE: (() => {
+                                    const c = document.getElementById('container');
+                                    return c ? getComputedStyle(c).pointerEvents : 'no-container';
+                                })(),
+                            })"""
+                        )
+                        self.console.print(
+                            "[red]All authorize strategies failed.[/red]"
+                        )
+                        self.console.print(f"[dim]Page debug: {info}[/dim]")
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]All strategies failed AND debug failed: {e}[/red]"
+                        )
+
+                    self.console.print(
+                        "[yellow]Could not auto-click Authorize. "
+                        "Please click it manually.[/yellow]"
+                    )
+                    for _ in range(60):
+                        await asyncio.sleep(2)
+                        try:
+                            if "authorize" not in page.url:
+                                break
+                        except Exception:
+                            break
+                        except Exception as exc:
+                            nav_error = exc
+                            if "ERR_ABORTED" not in str(exc).upper():
+                                raise
+
+                            try:
+                                await page.wait_for_timeout(1200)
+                            except Exception:
+                                pass
+                            current_url = ""
+                            try:
+                                current_url = page.url or ""
+                            except Exception:
+                                pass
                             if any(
                                 marker in current_url
                                 for marker in (
@@ -3341,15 +4336,48 @@ class GitLabTrialAutomator:
 
                     # Some runs are auto-approved and redirect straight to the
                     # callback URL, which can report ERR_ABORTED despite being
-                    # successful. In that case nothing else is needed here.
-                    with suppress(Exception):
-                        if "127.0.0.1" in (page.url or "") or "/callback" in (
-                            page.url or ""
-                        ):
+                    # successful.  Playwright may have intercepted the
+                    # navigation before the HTTP request actually reached the
+                    # local callback server.  Use a direct HTTP GET to deliver
+                    # the authorization code to the local server, bypassing
+                    # the browser entirely.
+                    try:
+                        _cur = page.url or ""
+                        if "127.0.0.1" in _cur or "/callback" in _cur:
                             self.console.print(
-                                "[green]OAuth callback reached directly.[/green]"
+                                "[green]OAuth callback URL detected — "
+                                "delivering code to callback server…[/green]"
                             )
+                            try:
+                                import httpx as _httpx
+
+                                async with _httpx.AsyncClient() as _hc:
+                                    _resp = await _hc.get(_cur, timeout=10.0)
+                                    self.console.print(
+                                        f"[green]Callback server responded: "
+                                        f"{_resp.status_code}[/green]"
+                                    )
+                            except Exception as _cb_err:
+                                self.console.print(
+                                    f"[yellow]Direct callback delivery "
+                                    f"failed: {_cb_err}[/yellow]"
+                                )
+                                # Fallback: try page.goto as last resort
+                                try:
+                                    await page.goto(
+                                        _cur,
+                                        wait_until="commit",
+                                        timeout=10000,
+                                    )
+                                except Exception:
+                                    pass
+                            try:
+                                await page.wait_for_timeout(1000)
+                            except Exception:
+                                pass
                             return
+                    except Exception as e:
+                        self.console.print(f"[dim]Callback URL check failed: {e}[/dim]")
 
                     if "sign_in" in page.url:
                         await self._try_sign_in_if_needed(
@@ -3368,221 +4396,591 @@ class GitLabTrialAutomator:
                     # during the OAuth redirect.
                     await self._handle_welcome_onboarding(page)
 
+                    # After onboarding, GitLab may have redirected us to the
+                    # dashboard instead of back to the OAuth authorize page.
+                    # Re-navigate to the auth URL if that happened.
+                    try:
+                        _post_onboard_url = page.url or ""
+                        if (
+                            "oauth/authorize" not in _post_onboard_url
+                            and "127.0.0.1" not in _post_onboard_url
+                            and "/callback" not in _post_onboard_url
+                        ):
+                            self.console.print(
+                                "[dim]Re-navigating to OAuth authorize URL "
+                                "after onboarding…[/dim]"
+                            )
+                            for _re_nav_wait in ("domcontentloaded", "commit"):
+                                try:
+                                    await page.goto(
+                                        auth_url,
+                                        wait_until=_re_nav_wait,
+                                        timeout=60000,
+                                    )
+                                    break
+                                except Exception as _re_nav_exc:
+                                    if "ERR_ABORTED" not in str(_re_nav_exc).upper():
+                                        break
+                            # Handle sign-in redirect after re-navigation
+                            if "sign_in" in (page.url or ""):
+                                await self._try_sign_in_if_needed(
+                                    page,
+                                    identity["email"],
+                                    identity["password"],
+                                )
+                            # Handle onboarding one more time if it appears
+                            await self._handle_welcome_onboarding(page)
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]Re-navigation after onboarding failed: {e}[/red]"
+                        )
+
+                    # Check again: auto-approved flows may have already
+                    # redirected to the callback URL.
+                    try:
+                        _cur2 = page.url or ""
+                        if "127.0.0.1" in _cur2 or "/callback" in _cur2:
+                            self.console.print(
+                                "[green]OAuth callback URL detected after "
+                                "re-navigation — delivering to server…[/green]"
+                            )
+                            try:
+                                import httpx as _httpx2
+
+                                async with _httpx2.AsyncClient() as _hc2:
+                                    _resp2 = await _hc2.get(_cur2, timeout=10.0)
+                                    self.console.print(
+                                        f"[green]Callback server responded: "
+                                        f"{_resp2.status_code}[/green]"
+                                    )
+                            except Exception as _cb_err2:
+                                self.console.print(
+                                    f"[yellow]Direct callback delivery "
+                                    f"failed: {_cb_err2}[/yellow]"
+                                )
+                                try:
+                                    await page.goto(
+                                        _cur2,
+                                        wait_until="commit",
+                                        timeout=10000,
+                                    )
+                                except Exception:
+                                    pass
+                            try:
+                                await page.wait_for_timeout(1000)
+                            except Exception:
+                                pass
+                            return
+                    except Exception as e:
+                        self.console.print(
+                            f"[dim]Post-re-nav callback check failed: {e}[/dim]"
+                        )
+
                     # Wait for page to settle – use a generous timeout but
                     # don't let a timeout crash the whole flow.
-                    with suppress(Exception):
+                    try:
                         await page.wait_for_load_state(
                             "networkidle",
                             timeout=10000,
+                        )
+                    except Exception as e:
+                        self.console.print(
+                            f"[dim]wait_for_load_state(networkidle) timed out: {e}[/dim]"
                         )
                     await page.wait_for_timeout(1500)
 
                     self.console.print(f"[dim]OAuth page URL: {page.url}[/dim]")
 
-                    # Wait for the authorize button/form to actually appear
-                    # on the page before attempting to click.  GitLab's
-                    # authorize page can take time to render after the
-                    # initial load event fires.
-                    for _auth_wait in range(6):
-                        with suppress(Exception):
+                    # ── AUTHORIZE: submit the POST form directly ──
+                    # GitLab has TWO forms: POST (authorize) and DELETE
+                    # (cancel, uses hidden _method=delete). We submit the
+                    # POST form directly via JS — no button click needed,
+                    # no pointer-events issue, no CSS hit-testing.
+                    auth_done = False
+
+                    # Wait for any form to appear
+                    for _wait in range(10):
+                        try:
                             await page.wait_for_selector(
-                                'input[type="submit"], '
+                                'form[action*="authorize"], form',
+                                timeout=2000,
+                            )
+                            break
+                        except Exception as e:
+                            self.console.print(
+                                f"[dim]Waiting for authorize form ({_wait + 1}/10): {e}[/dim]"
+                            )
+                        await page.wait_for_timeout(500)
+
+                    # Strategy A: JS form.submit() — most reliable
+                    for _attempt in range(3):
+                        try:
+                            result = await page.evaluate(
+                                """() => {
+                                    // Remove pointer-events blocker
+                                    const c = document.getElementById('container');
+                                    if (c) {
+                                        c.classList.remove('gl-pointer-events-none');
+                                        c.style.pointerEvents = 'auto';
+                                    }
+
+                                    // Find the authorize form (POST, not DELETE)
+                                    const forms = document.querySelectorAll('form');
+                                    for (const f of forms) {
+                                        const action = (f.action || '').toLowerCase();
+                                        if (!action.includes('authorize') && !action.includes('oauth')) continue;
+                                        // Skip the cancel/delete form
+                                        const methodInput = f.querySelector('input[name="_method"]');
+                                        if (methodInput && methodInput.value === 'delete') continue;
+                                        // This is the authorize form — submit it
+                                        HTMLFormElement.prototype.submit.call(f);
+                                        return 'submitted';
+                                    }
+
+                                    // Fallback: click any button with "authorize" text
+                                    const btns = document.querySelectorAll('button, input[type="submit"]');
+                                    for (const b of btns) {
+                                        const txt = (b.value || b.textContent || '').toLowerCase();
+                                        if (txt.includes('authorize') || txt.includes('autoriser') || txt.includes('opencode')) {
+                                            b.click();
+                                            return 'clicked: ' + txt.trim().slice(0, 40);
+                                        }
+                                    }
+
+                                    // Last resort: submit first non-delete form
+                                    for (const f of forms) {
+                                        const mi = f.querySelector('input[name="_method"]');
+                                        if (mi && mi.value === 'delete') continue;
+                                        HTMLFormElement.prototype.submit.call(f);
+                                        return 'submitted-fallback';
+                                    }
+
+                                    return null;
+                                }"""
+                            )
+                            if result:
+                                auth_done = True
+                                self.console.print(
+                                    f"[green]Authorize: {result}[/green]"
+                                )
+                                break
+                        except Exception as e:
+                            err = str(e).lower()
+                            # Navigation errors mean the submit worked
+                            if any(
+                                k in err
+                                for k in (
+                                    "context",
+                                    "destroy",
+                                    "navigat",
+                                    "target closed",
+                                    "detach",
+                                    "frame",
+                                )
+                            ):
+                                auth_done = True
+                                self.console.print(
+                                    "[green]Authorize form submitted "
+                                    "(navigation detected).[/green]"
+                                )
+                                break
+                            self.console.print(
+                                f"[yellow]Authorize attempt {_attempt + 1} "
+                                f"error: {e}[/yellow]"
+                            )
+                        await page.wait_for_timeout(1500)
+
+                    # Strategy B: dispatch_event (bypasses CSS pointer-events)
+                    if not auth_done:
+                        self.console.print("[dim]Trying dispatch_event...[/dim]")
+                        for sel in [
+                            '[data-testid="authorization-button"]',
+                            'form[action*="authorize"] button[type="submit"]',
+                            'button[type="submit"]',
+                        ]:
+                            try:
+                                loc = page.locator(sel)
+                                if await loc.count() > 0:
+                                    await loc.first.dispatch_event("click")
+                                    auth_done = True
+                                    self.console.print(
+                                        f"[green]Authorize via dispatch_event "
+                                        f"({sel}).[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                err = str(e).lower()
+                                if any(
+                                    k in err for k in ("context", "destroy", "navigat")
+                                ):
+                                    auth_done = True
+                                    self.console.print(
+                                        "[green]dispatch_event triggered navigation.[/green]"
+                                    )
+                                    break
+                                self.console.print(
+                                    f"[dim]dispatch_event ({sel}): {e}[/dim]"
+                                )
+
+                    # Strategy C: Playwright force click
+                    if not auth_done:
+                        self.console.print("[dim]Trying force click...[/dim]")
+                        for name_re in [
+                            re.compile(r"authorize", re.IGNORECASE),
+                            re.compile(r"opencode", re.IGNORECASE),
+                        ]:
+                            try:
+                                btn = page.get_by_role("button", name=name_re)
+                                if await btn.count() > 0:
+                                    await btn.first.click(force=True, timeout=5000)
+                                    auth_done = True
+                                    self.console.print(
+                                        "[green]Authorize via force click.[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                err = str(e).lower()
+                                if any(
+                                    k in err for k in ("context", "destroy", "navigat")
+                                ):
+                                    auth_done = True
+                                    break
+                                self.console.print(f"[dim]force click: {e}[/dim]")
+
+                    if auth_done:
+                        try:
+                            await page.wait_for_timeout(3000)
+                        except Exception as e:
+                            self.console.print(f"[dim]wait after auth_done: {e}[/dim]")
+                        return
+
+                    # Debug: show what's on the page
+                    try:
+                        info = await page.evaluate(
+                            """() => {
+                                const forms = document.querySelectorAll('form');
+                                const btns = document.querySelectorAll('button, input[type="submit"]');
+                                return {
+                                    url: location.href,
+                                    formCount: forms.length,
+                                    forms: Array.from(forms).map(f => ({
+                                        action: f.action, method: f.method,
+                                        hasMethodDelete: !!f.querySelector('input[name="_method"][value="delete"]'),
+                                    })),
+                                    buttons: Array.from(btns).map(b => ({
+                                        text: (b.textContent||'').trim().slice(0,50),
+                                        type: b.type,
+                                        testid: b.dataset?.testid || '',
+                                        pe: getComputedStyle(b).pointerEvents,
+                                    })),
+                                    containerPE: (() => {
+                                        const c = document.getElementById('container');
+                                        return c ? getComputedStyle(c).pointerEvents : 'no-container';
+                                    })(),
+                                };
+                            }"""
+                        )
+                        self.console.print(
+                            f"[red]All authorize strategies failed.[/red]"
+                        )
+                        self.console.print(f"[dim]Page debug: {info}[/dim]")
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]All strategies failed AND "
+                            f"page.evaluate debug failed: {e}[/red]"
+                        )
+
+                    self.console.print(
+                        "[yellow]Could not auto-click Authorize. "
+                        "Please click it manually.[/yellow]"
+                    )
+                    for _ in range(60):
+                        await page.wait_for_timeout(2000)
+                        if "authorize" not in page.url:
+                            break
+                        await page.wait_for_timeout(500)
+
+                    await page.wait_for_timeout(800)
+
+                    # Step 2: Wait for button to exist in DOM.
+                    for _auth_wait in range(6):
+                        try:
+                            await page.wait_for_selector(
+                                '[data-testid="authorization-button"], '
                                 'button[type="submit"], '
-                                'form[action*="authorize"], '
-                                'button:has-text("Authorize"), '
-                                'button:has-text("Authorize OpenCode"), '
-                                'button:has-text("OpenCode")',
+                                'form[action*="authorize"]',
                                 timeout=3000,
                             )
                             break
-                        await page.wait_for_timeout(1000)
+                        except Exception as e:
+                            self.console.print(
+                                f"[dim]Waiting for auth button ({_auth_wait + 1}/6): {e}[/dim]"
+                            )
+                        await page.wait_for_timeout(800)
 
-                    # Strategy 1: find the authorize form via JS and submit it
-                    # directly.  This is the most reliable approach as it
-                    # doesn't depend on Playwright's locator matching.
-                    # Retry a few times in case the page is still rendering.
-                    js_clicked = False
-                    for _js_attempt in range(3):
-                        with suppress(Exception):
-                            js_clicked = await page.evaluate(
+                    # Step 3: Click using the most reliable methods.
+                    # dispatch_event and JS .click() bypass CSS
+                    # pointer-events entirely — unlike Playwright's
+                    # .click() which waits for pointer events and
+                    # silently times out.
+
+                    auth_clicked = False
+
+                    # 3a: dispatch_event on data-testid button
+                    if not auth_clicked:
+                        try:
+                            loc = page.locator('[data-testid="authorization-button"]')
+                            if await loc.count() > 0:
+                                self.console.print(
+                                    "[dim]Trying dispatch_event on data-testid...[/dim]"
+                                )
+                                await loc.first.dispatch_event("click")
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Clicked Authorize via dispatch_event (data-testid).[/green]"
+                                )
+                        except Exception as e:
+                            err_msg = str(e).lower()
+                            if any(
+                                k in err_msg
+                                for k in (
+                                    "context",
+                                    "destroy",
+                                    "navigat",
+                                    "target closed",
+                                )
+                            ):
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]dispatch_event (data-testid) triggered navigation.[/green]"
+                                )
+                            else:
+                                self.console.print(
+                                    f"[red]dispatch_event (data-testid) failed: {e}[/red]"
+                                )
+
+                    # 3b: JS .click() on data-testid button
+                    if not auth_clicked:
+                        try:
+                            result = await page.evaluate(
                                 """() => {
-                                    // Try submit buttons first.
-                                    const submits = document.querySelectorAll(
-                                        'input[type="submit"], button[type="submit"], button'
-                                    );
-                                    for (const btn of submits) {
-                                        const val = (
-                                            btn.value || btn.textContent || ''
-                                        ).toLowerCase();
-                                        if (
-                                            val.includes('authorize') ||
-                                            val.includes('autoriser') ||
-                                            val.includes('allow') ||
-                                            val.includes('opencode')
-                                        ) {
+                                    const btn = document.querySelector('[data-testid="authorization-button"]');
+                                    if (btn) { btn.click(); return true; }
+                                    return false;
+                                }"""
+                            )
+                            if result:
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Clicked Authorize via JS .click() (data-testid).[/green]"
+                                )
+                        except Exception as _e:
+                            _msg = str(_e).lower()
+                            if any(
+                                k in _msg
+                                for k in (
+                                    "context",
+                                    "destroy",
+                                    "navigat",
+                                    "target closed",
+                                )
+                            ):
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Authorize click triggered navigation.[/green]"
+                                )
+
+                    # 3c: JS .click() on any authorize/submit button
+                    if not auth_clicked:
+                        try:
+                            result = await page.evaluate(
+                                """() => {
+                                    // Remove pointer-events one more time
+                                    const c = document.getElementById('container');
+                                    if (c) { c.classList.remove('gl-pointer-events-none'); c.style.pointerEvents = 'auto'; }
+
+                                    const btns = document.querySelectorAll('button[type="submit"], input[type="submit"], button');
+                                    for (const btn of btns) {
+                                        const txt = (btn.value || btn.textContent || '').toLowerCase();
+                                        if (txt.includes('authorize') || txt.includes('autoriser') ||
+                                            txt.includes('opencode') || txt.includes('allow')) {
                                             btn.click();
-                                            return true;
+                                            return 'clicked: ' + txt.trim().slice(0, 40);
                                         }
                                     }
-                                    // Try any form whose action contains
-                                    // "authorize".
-                                    const form = document.querySelector(
-                                        'form[action*="authorize"]'
-                                    );
+                                    return false;
+                                }"""
+                            )
+                            if result:
+                                auth_clicked = True
+                                self.console.print(
+                                    f"[green]Clicked Authorize via JS text match: {result}[/green]"
+                                )
+                        except Exception as _e:
+                            _msg = str(_e).lower()
+                            if any(
+                                k in _msg
+                                for k in (
+                                    "context",
+                                    "destroy",
+                                    "navigat",
+                                    "target closed",
+                                )
+                            ):
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Authorize click triggered navigation.[/green]"
+                                )
+
+                    # 3d: JS form.submit() — bypasses button entirely
+                    if not auth_clicked:
+                        try:
+                            result = await page.evaluate(
+                                """() => {
+                                    const form = document.querySelector('form[action*="authorize"][method="post"]')
+                                                 || document.querySelector('form[action*="authorize"]');
                                     if (form) {
-                                        // Click the first submit-like element
-                                        // inside.
-                                        const inner = form.querySelector(
-                                            'input[type="submit"], '
-                                            + 'button[type="submit"], '
-                                            + 'button'
-                                        );
-                                        if (inner) { inner.click(); return true; }
-                                        form.submit();
+                                        HTMLFormElement.prototype.submit.call(form);
                                         return true;
                                     }
-                                    // Try any visible button/link that has
-                                    // "Authorize" or "OpenCode" text.
-                                    const allBtns = document.querySelectorAll(
-                                        'button, a.btn, [role="button"], '
-                                        + 'input[type="submit"]'
-                                    );
-                                    for (const b of allBtns) {
-                                        const txt = (
-                                            b.value || b.textContent || ''
-                                        ).trim().toLowerCase();
-                                        if (
-                                            txt.includes('authorize') ||
-                                            txt.includes('autoriser') ||
-                                            txt.includes('allow') ||
-                                            txt.includes('opencode')
-                                        ) {
-                                            b.click();
+                                    // Try first form with a submit button
+                                    const forms = document.querySelectorAll('form');
+                                    for (const f of forms) {
+                                        if (f.querySelector('[type="submit"]')) {
+                                            HTMLFormElement.prototype.submit.call(f);
                                             return true;
                                         }
                                     }
                                     return false;
                                 }"""
                             )
-                        if js_clicked:
-                            break
-                        await page.wait_for_timeout(1500)
+                            if result:
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Submitted authorize form via JS form.submit().[/green]"
+                                )
+                        except Exception as _e:
+                            _msg = str(_e).lower()
+                            if any(
+                                k in _msg
+                                for k in (
+                                    "context",
+                                    "destroy",
+                                    "navigat",
+                                    "target closed",
+                                )
+                            ):
+                                auth_clicked = True
+                                self.console.print(
+                                    "[green]Form submit triggered navigation.[/green]"
+                                )
 
-                    if js_clicked:
-                        self.console.print("[green]Clicked Authorize via JS.[/green]")
+                    # 3e: dispatch_event on any submit button
+                    if not auth_clicked:
+                        for _sel in [
+                            'button[type="submit"]',
+                            'input[type="submit"]',
+                            'form[action*="authorize"] button',
+                        ]:
+                            try:
+                                loc = page.locator(_sel)
+                                if await loc.count() > 0:
+                                    await loc.first.dispatch_event("click")
+                                    auth_clicked = True
+                                    self.console.print(
+                                        f"[green]Clicked via dispatch_event ({_sel}).[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                err_msg = str(e).lower()
+                                if any(
+                                    k in err_msg
+                                    for k in (
+                                        "context",
+                                        "destroy",
+                                        "navigat",
+                                        "target closed",
+                                    )
+                                ):
+                                    auth_clicked = True
+                                    self.console.print(
+                                        f"[green]dispatch_event ({_sel}) triggered navigation.[/green]"
+                                    )
+                                    break
+                                self.console.print(
+                                    f"[dim]dispatch_event ({_sel}): {e}[/dim]"
+                                )
+
+                    # 3f: Playwright force click (last resort)
+                    if not auth_clicked:
+                        for _pw_name in [
+                            re.compile(r"authorize", re.IGNORECASE),
+                            re.compile(r"opencode", re.IGNORECASE),
+                        ]:
+                            try:
+                                btn = page.get_by_role("button", name=_pw_name)
+                                if await btn.count() > 0:
+                                    await btn.first.click(timeout=5000, force=True)
+                                    auth_clicked = True
+                                    self.console.print(
+                                        "[green]Clicked Authorize via force click.[/green]"
+                                    )
+                                    break
+                            except Exception as e:
+                                err_msg = str(e).lower()
+                                if any(
+                                    k in err_msg
+                                    for k in (
+                                        "context",
+                                        "destroy",
+                                        "navigat",
+                                        "target closed",
+                                    )
+                                ):
+                                    auth_clicked = True
+                                    self.console.print(
+                                        "[green]Force click triggered navigation.[/green]"
+                                    )
+                                    break
+                                self.console.print(
+                                    f"[dim]force click ({_pw_name.pattern}): {e}[/dim]"
+                                )
+
+                    if auth_clicked:
+                        # Wait for navigation to complete
+                        try:
+                            await page.wait_for_timeout(3000)
+                        except Exception as e:
+                            self.console.print(f"[dim]wait after auth click: {e}[/dim]")
                         return
 
-                    # Strategy 2: Playwright locator-based clicks.
-                    self.console.print(
-                        "[yellow]JS click failed, trying Playwright locators…[/yellow]"
-                    )
-                    authorize_names = [
-                        "Authorize",
-                        "Authorize OpenCode",
-                        "Authorize application",
-                        "Allow",
-                        "Grant access",
-                        "Autoriser",
-                        "Autoriser l'application",
-                    ]
-                    
-                    # Try specific exact matches first
-                    for name in authorize_names:
-                        with suppress(Exception):
-                            loc = page.locator(f'button:has-text("{name}")').first
-                            if await loc.count() > 0 and await loc.is_visible(timeout=500):
-                                await loc.click(timeout=3000)
-                                self.console.print(f"[green]Clicked Authorize ({name}) via exact locator.[/green]")
-                                return
-                                
-                    clicked = await self._safe_click_by_button_name(
-                        page,
-                        authorize_names,
-                    )
-                    if clicked:
-                        self.console.print(
-                            "[green]Clicked Authorize via locator.[/green]"
-                        )
-                        return
-
-                    # Strategy 3: try submit inputs directly.
-                    submit_selectors = [
-                        'input[type="submit"]',
-                        'button[type="submit"]',
-                        ".btn-confirm",
-                        ".btn-success",
-                    ]
-                    clicked = await self._safe_click(page, submit_selectors)
-                    if clicked:
-                        self.console.print(
-                            "[green]Clicked Authorize via CSS selector.[/green]"
-                        )
-                        return
-
-                    # Strategy 4: Playwright text-based locator with force
-                    # click — catches elements that aren't <button> or
-                    # <input> but render as clickable authorize actions.
-                    with suppress(Exception):
-                        loc = page.locator(
-                            ':is(button, input, a, [role="button"])'
-                        ).filter(has_text=re.compile(r"authorize|autoriser", re.IGNORECASE))
-                        if await loc.count() > 0:
-                            await loc.first.click(timeout=5000, force=True)
-                            self.console.print(
-                                "[green]Clicked Authorize via text filter.[/green]"
-                            )
-                            return
-
-                    # Strategy 5: submit any form whose action contains
-                    # "authorize" directly via JS form.submit() — bypasses
-                    # any button click issues entirely.
-                    with suppress(Exception):
-                        submitted = await page.evaluate(
-                            """() => {
-                                const forms = document.querySelectorAll('form');
-                                for (const f of forms) {
-                                    const action = (f.action || '').toLowerCase();
-                                    if (action.includes('authorize') || action.includes('oauth')) {
-                                        f.submit();
-                                        return true;
-                                    }
-                                }
-                                // Last resort: submit the first form on the page
-                                if (forms.length > 0) {
-                                    forms[0].submit();
-                                    return true;
-                                }
-                                return false;
-                            }"""
-                        )
-                        if submitted:
-                            self.console.print(
-                                "[green]Submitted authorize form via JS.[/green]"
-                            )
-                            return
-
-                    # Strategy 6: dump what's on the page for debugging
-                    # and wait for user.
-                    with suppress(Exception):
+                    # All strategies failed — debug dump + manual wait
+                    try:
                         btn_info = await page.evaluate(
                             """() => {
                                 const els = document.querySelectorAll(
-                                    'button, input[type="submit"], '
-                                    + 'a.btn, [role="button"]'
+                                    'button, input[type="submit"], form'
                                 );
                                 return Array.from(els).map(e => ({
                                     tag: e.tagName,
                                     type: e.type || '',
-                                    value: e.value || '',
-                                    text: (e.textContent||'').trim().slice(
-                                        0, 80
-                                    ),
-                                    visible: e.offsetParent !== null,
+                                    action: e.action || '',
+                                    testid: e.dataset ? e.dataset.testid : '',
+                                    text: (e.textContent||'').trim().slice(0, 60),
+                                    pe: window.getComputedStyle(e).pointerEvents,
+                                    vis: e.offsetParent !== null,
                                 }));
                             }"""
                         )
                         self.console.print(
-                            f"[dim]Buttons found on page: {btn_info}[/dim]"
+                            "[red]All authorize strategies failed. Elements on page:[/red]"
+                        )
+                        for info in btn_info or []:
+                            self.console.print(f"  [dim]{info}[/dim]")
+                    except Exception as e:
+                        self.console.print(
+                            f"[red]All authorize strategies failed AND "
+                            f"debug dump failed: {e}[/red]"
                         )
 
                     self.console.print(
