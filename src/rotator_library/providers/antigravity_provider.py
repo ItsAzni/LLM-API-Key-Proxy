@@ -4786,7 +4786,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             func_config["mode"] = "AUTO"
 
         # Handle Gemini 3 thinking logic
-        if not internal_model.startswith("gemini-3-"):
+        if not (internal_model.startswith("gemini-3-") or internal_model.startswith("gemini-3.1-")):
             thinking_config = gen_config.get("thinkingConfig", {})
             if "thinkingLevel" in thinking_config:
                 del thinking_config["thinkingLevel"]
@@ -4794,7 +4794,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         # Ensure first function call in each model message has a thoughtSignature for Gemini 3
         # Per Gemini docs: Only the FIRST parallel function call gets a signature
-        if internal_model.startswith("gemini-3-"):
+        if internal_model.startswith("gemini-3-") or internal_model.startswith("gemini-3.1-"):
             for content in antigravity_payload["request"].get("contents", []):
                 if content.get("role") == "model":
                     first_func_seen = False
