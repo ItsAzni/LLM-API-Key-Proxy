@@ -62,11 +62,18 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app/src
 
-# Optional Playwright browser install for headless container automation
-# Includes Xvfb so Chrome can run in "headed" mode inside the container,
-# which avoids Arkose Labs CAPTCHA detection that triggers on --headless.
+# Optional browser install for GitLab trial automation.
+# - Google Chrome (real browser) for CDP stealth mode — Arkose Labs cannot
+#   distinguish a CDP-attached Chrome from a user-launched one.
+# - Patchright's bundled Chromium as fallback.
+# - Xvfb so Chrome can run "headed" inside the container (no physical display)
+#   which avoids Arkose Labs CAPTCHA detection that triggers on --headless.
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends xvfb \
+      apt-get update \
+      && apt-get install -y --no-install-recommends xvfb wget gnupg ca-certificates \
+      && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+      && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+      && rm -f /tmp/chrome.deb \
       && rm -rf /var/lib/apt/lists/* \
       && python -m patchright install --with-deps chromium; \
     fi
