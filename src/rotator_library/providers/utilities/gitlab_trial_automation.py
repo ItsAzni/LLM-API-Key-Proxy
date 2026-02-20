@@ -3690,33 +3690,66 @@ class GitLabTrialAutomator:
         access_token: str,
         page: Any,
     ) -> tuple[bool, Optional[str]]:
-        # Allow trial activation to propagate before querying API.
-        await asyncio.sleep(3)
+        # GitLab trial activation can take 10-60 seconds to propagate
+        # through their backend.  During this window, group creation
+        # via API returns 403 and the groups list may be empty.
+        # We retry with increasing delays to give the trial time.
+        await self._notify("9/9 Waiting for trial activation to propagate...")
 
-        groups = await self._list_owned_top_level_groups(access_token)
-        lib_logger.debug("Owned top-level groups: %s", groups)
+        group_slug = f"duo-{secrets.token_hex(4)}"
 
-        if not groups:
-            self.console.print("[yellow]No owned groups found, creating one…[/yellow]")
-            # Try API first (most reliable — doesn't depend on browser state).
-            group_slug = f"duo-{secrets.token_hex(4)}"
+        # ── Phase 1: Try to find or create a group with retries ──
+        groups: List[Dict[str, Any]] = []
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            delay = [3, 8, 15, 20, 25, 30][min(attempt, 5)]
+            if attempt > 0:
+                await self._notify(
+                    f"9/9 Trial not ready yet, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_attempts})..."
+                )
+            await asyncio.sleep(delay)
+
+            groups = await self._list_owned_top_level_groups(access_token)
+            if groups:
+                self.console.print(
+                    f"[green]Found {len(groups)} owned group(s).[/green]"
+                )
+                break
+
+            # No existing groups — try to create one
+            self.console.print(
+                f"[yellow]No owned groups found (attempt {attempt + 1}/"
+                f"{max_attempts}), creating one…[/yellow]"
+            )
             api_path = await self._create_group_via_api(access_token, group_slug)
             if api_path:
                 self.console.print(f"[green]Created group via API: {api_path}[/green]")
                 await asyncio.sleep(2)
                 groups = await self._list_owned_top_level_groups(access_token)
-            else:
-                # Fall back to UI-based group creation.
-                self.console.print(
-                    "[yellow]API group creation failed, trying via browser UI…[/yellow]"
+                if groups:
+                    break
+
+        # ── Phase 2: UI fallback if API never worked ──
+        if not groups and page is not None:
+            self.console.print(
+                "[yellow]API group creation failed after retries, "
+                "trying via browser UI…[/yellow]"
+            )
+            try:
+                # Navigate back to GitLab — after OAuth the browser is on
+                # the dead http://127.0.0.1:8080/callback URL.
+                await page.goto(
+                    GROUP_CREATE_URL,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
                 )
-                try:
-                    created = await self._create_group_via_ui(page, group_slug)
-                    if created:
-                        await asyncio.sleep(2)
-                        groups = await self._list_owned_top_level_groups(access_token)
-                except Exception as e:
-                    self.console.print(f"[red]UI group creation failed: {e}[/red]")
+                created = await self._create_group_via_ui(page, group_slug)
+                if created:
+                    await asyncio.sleep(2)
+                    groups = await self._list_owned_top_level_groups(access_token)
+            except Exception as e:
+                self.console.print(f"[red]UI group creation failed: {e}[/red]")
 
         if not groups:
             lib_logger.warning("Could not find or create any groups for Duo.")
