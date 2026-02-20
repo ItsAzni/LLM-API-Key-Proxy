@@ -1102,6 +1102,11 @@ async def chat_completions(
             request_data.pop("effort", None)
             request_data.pop("reasoning", None)
 
+        # Normalize thinking_budget into request_data so providers can use the exact
+        # token budget (e.g. GitLab Duo passes it directly to the Anthropic API).
+        if thinking_budget is not None:
+            request_data["thinking_budget"] = int(thinking_budget)
+
         logging.getLogger("rotator_library").debug(
             f"Handling reasoning parameters: model={model}, reasoning_effort={reasoning_effort}"
         )
