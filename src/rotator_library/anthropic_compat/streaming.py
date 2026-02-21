@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import AsyncGenerator, Callable, Optional, Awaitable, Any, TYPE_CHECKING
+from typing import AsyncGenerator, Callable, Optional, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..transaction_logger import TransactionLogger
@@ -66,6 +66,7 @@ async def anthropic_streaming_wrapper(
     cached_tokens = 0  # Track cached tokens for proper Anthropic format
     accumulated_text = ""  # Track accumulated text for logging
     accumulated_thinking = ""  # Track accumulated thinking for logging
+    accumulated_thinking_signature = ""  # Track thinking signature for Anthropic format
     stop_reason_final = "end_turn"  # Track final stop reason for logging
     stream_closed = False
 
@@ -167,12 +168,13 @@ async def anthropic_streaming_wrapper(
                     # Build content blocks for logging
                     content_blocks = []
                     if accumulated_thinking:
-                        content_blocks.append(
-                            {
-                                "type": "thinking",
-                                "thinking": accumulated_thinking,
-                            }
-                        )
+                        thinking_block = {
+                            "type": "thinking",
+                            "thinking": accumulated_thinking,
+                        }
+                        if accumulated_thinking_signature:
+                            thinking_block["signature"] = accumulated_thinking_signature
+                        content_blocks.append(thinking_block)
                     if accumulated_text:
                         content_blocks.append(
                             {
@@ -281,6 +283,13 @@ async def anthropic_streaming_wrapper(
             reasoning_content = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning_content:
                 if not thinking_block_started:
+                    # Close any open text block first (interleaved thinking:
+                    # text → thinking transitions require closing the text block)
+                    if content_block_started:
+                        yield f'event: content_block_stop\ndata: {{"type": "content_block_stop", "index": {current_block_index}}}\n\n'
+                        current_block_index += 1
+                        content_block_started = False
+
                     # Start a thinking content block
                     block_start = {
                         "type": "content_block_start",
@@ -299,6 +308,22 @@ async def anthropic_streaming_wrapper(
                 yield f"event: content_block_delta\ndata: {json.dumps(block_delta)}\n\n"
                 # Accumulate thinking for logging
                 accumulated_thinking += reasoning_content
+
+            # Handle thinking signature (required for interleaved thinking).
+            # Providers like GitLab Duo stream the signature as a separate
+            # delta field "thinking_signature". We must emit it as a
+            # signature_delta event in the Anthropic stream so the SDK client
+            # can reconstruct valid thinking blocks with signatures.
+            thinking_signature = delta.get("thinking_signature")
+            if thinking_signature:
+                accumulated_thinking_signature += thinking_signature
+                if thinking_block_started:
+                    sig_delta = {
+                        "type": "content_block_delta",
+                        "index": current_block_index,
+                        "delta": {"type": "signature_delta", "signature": thinking_signature},
+                    }
+                    yield f"event: content_block_delta\ndata: {json.dumps(sig_delta)}\n\n"
 
             # Handle text content
             content = delta.get("content")
