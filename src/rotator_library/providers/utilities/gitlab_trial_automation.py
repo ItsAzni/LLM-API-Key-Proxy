@@ -142,7 +142,12 @@ class GitLabTrialAutomator:
                         cmdline = Path(f"/proc/{pid}/comm").read_text().strip()
                     except (OSError, PermissionError):
                         continue
-                    if cmdline in ("chrome", "chrome_crashpad", "google-chrome", "chromium"):
+                    if cmdline in (
+                        "chrome",
+                        "chrome_crashpad",
+                        "google-chrome",
+                        "chromium",
+                    ):
                         try:
                             os.kill(pid, _signal.SIGKILL)
                         except (ProcessLookupError, PermissionError):
@@ -2077,9 +2082,17 @@ class GitLabTrialAutomator:
             ):
                 await self._inject_form_validation_bypass(page)
 
-            if await self._onboard_step_welcome(page, url):
-                lib_logger.info("Onboarding: welcome step handled (step %d)", step)
-                handled_any = True
+            # If we're still on the welcome page, always retry this step,
+            # even when a previous submission attempt did not navigate.
+            if await self._is_welcome_onboarding_page(page, url):
+                if await self._onboard_step_welcome(page, url):
+                    lib_logger.info("Onboarding: welcome step handled (step %d)", step)
+                    handled_any = True
+                else:
+                    lib_logger.warning(
+                        "Onboarding: welcome step still pending after attempt %d",
+                        step + 1,
+                    )
                 continue
 
             if await self._onboard_step_company(page, url):
@@ -2095,27 +2108,111 @@ class GitLabTrialAutomator:
             # No known onboarding page detected – we're done.
             lib_logger.info(
                 "Onboarding: no step detected on step %d (url=%s), done",
-                step, url,
+                step,
+                url,
             )
             break
 
+        # Do not silently continue OAuth/group setup if onboarding is still
+        # blocked on the welcome page.
+        if await self._is_welcome_onboarding_page(page):
+            raise RuntimeError(
+                "GitLab onboarding is still on the Welcome page after several "
+                "attempts. Role/reason selection likely did not apply."
+            )
+
         lib_logger.info("Onboarding complete. handled_any=%s", handled_any)
         return handled_any
+
+    async def _is_welcome_onboarding_page(
+        self,
+        page: Any,
+        url: Optional[str] = None,
+    ) -> bool:
+        if url is None:
+            try:
+                url = page.url
+            except Exception:
+                url = ""
+
+        if any(f in (url or "") for f in ("sign_up/welcome", "registrations/welcome")):
+            return True
+
+        try:
+            heading = await page.text_content("h2, h1", timeout=2000)
+            if heading and any(w in heading.lower() for w in ("welcome", "bienvenue")):
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _wait_for_welcome_form_ready(
+        self,
+        page: Any,
+        timeout_ms: int = 20000,
+    ) -> bool:
+        """Wait until welcome controls are rendered before interacting.
+
+        The welcome page is Vue-driven and controls often mount a little after
+        initial navigation, which makes early selector attempts flaky.
+        """
+        role_related = [
+            "#user_onboarding_status_role",
+            'select[name*="role" i]',
+            '[data-testid="role-dropdown"]',
+            'input[name*="onboarding_status_role" i]',
+            'button[aria-haspopup="listbox"]',
+        ]
+
+        submit_related = [
+            '[data-testid="get-started-button"]',
+            'form.js-users-signup-welcome button[type="submit"]',
+            'form[action*="welcome"] button[type="submit"]',
+        ]
+
+        # Initial quick wait for any form wrapper.
+        try:
+            await page.wait_for_selector(
+                '[data-testid="welcome-form"], form.js-users-signup-welcome, '
+                'form[action*="welcome"]',
+                state="attached",
+                timeout=min(timeout_ms, 10000),
+            )
+        except Exception:
+            pass
+
+        deadline = timeout_ms
+        step_ms = 500
+        waited = 0
+        while waited <= deadline:
+            try:
+                ready = await page.evaluate(
+                    """({ roleSelectors, submitSelectors }) => {
+                        const hasRole = roleSelectors.some((s) => document.querySelector(s));
+                        const hasSubmit = submitSelectors.some((s) => document.querySelector(s));
+                        return hasRole || hasSubmit;
+                    }""",
+                    {
+                        "roleSelectors": role_related,
+                        "submitSelectors": submit_related,
+                    },
+                )
+                if ready:
+                    return True
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(step_ms)
+            waited += step_ms
+
+        return False
 
     # ------------------------------------------------------------------
     # Onboarding step 1 – "Welcome to GitLab"
     # ------------------------------------------------------------------
     async def _onboard_step_welcome(self, page: Any, url: str) -> bool:
-        is_welcome = any(f in url for f in ("sign_up/welcome", "registrations/welcome"))
-        if not is_welcome:
-            try:
-                heading = await page.text_content("h2, h1", timeout=2000)
-                if heading and any(
-                    w in heading.lower() for w in ("welcome", "bienvenue")
-                ):
-                    is_welcome = True
-            except Exception:
-                pass
+        is_welcome = await self._is_welcome_onboarding_page(page, url)
 
         if not is_welcome:
             lib_logger.info("Onboarding: welcome step NOT detected (url=%s)", url)
@@ -2123,6 +2220,9 @@ class GitLabTrialAutomator:
 
         lib_logger.info("Onboarding: welcome step detected, filling form…")
         self.console.print("[cyan]Onboarding step 1/3 – Welcome…[/cyan]")
+        if not await self._wait_for_welcome_form_ready(page):
+            lib_logger.warning("Onboarding: welcome controls not ready yet; retrying")
+            return False
         await self._human_pause(page, 400, 800)
 
         # ================================================================
@@ -2265,9 +2365,7 @@ class GitLabTrialAutomator:
                 "Onboarding welcome: scorched-earth field report: %s",
                 field_report,
             )
-            self.console.print(
-                f"[cyan]Field report: {field_report}[/cyan]"
-            )
+            self.console.print(f"[cyan]Field report: {field_report}[/cyan]")
         except Exception as e:
             lib_logger.error("Scorched earth field-by-name failed: %s", e)
             self.console.print(f"[red]Scorched earth failed: {e}[/red]")
@@ -2766,6 +2864,142 @@ class GitLabTrialAutomator:
         )
         await self._human_pause(page, 300, 500)
 
+        # Extra deterministic fallback for the exact visible Welcome form.
+        # This does not rely on GitLab's internal field names; it works from
+        # visible selects/radios so it survives backend schema shifts.
+        try:
+            visible_report = await page.evaluate(
+                """() => {
+                    const out = { role: false, reason: false, radio: false };
+                    const isPlaceholder = (txt, val) => {
+                        const t = (txt || '').trim().toLowerCase();
+                        const v = (val || '').trim().toLowerCase();
+                        if (!v) return true;
+                        return (
+                            t.includes('select') ||
+                            t.includes('please') ||
+                            t.includes('choose') ||
+                            t.includes('--')
+                        );
+                    };
+
+                    const setSelect = (sel, preferred) => {
+                        if (!(sel instanceof HTMLSelectElement)) return false;
+                        const opts = Array.from(sel.options || []);
+                        let target = -1;
+                        for (let i = 0; i < opts.length; i++) {
+                            const txt = (opts[i].textContent || '').trim().toLowerCase();
+                            const val = (opts[i].value || '').trim().toLowerCase();
+                            if (isPlaceholder(txt, val)) continue;
+                            if (preferred.some((p) => txt.includes(p) || val.includes(p))) {
+                                target = i;
+                                break;
+                            }
+                            if (target < 0) target = i;
+                        }
+                        if (target < 0) return false;
+                        const nativeSetter = Object.getOwnPropertyDescriptor(
+                            HTMLSelectElement.prototype,
+                            'value'
+                        );
+                        if (nativeSetter && nativeSetter.set) {
+                            nativeSetter.set.call(sel, opts[target].value);
+                        }
+                        sel.selectedIndex = target;
+                        sel.dispatchEvent(new Event('input', { bubbles: true }));
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        sel.removeAttribute('required');
+                        sel.removeAttribute('aria-required');
+                        return true;
+                    };
+
+                    const forms = Array.from(document.querySelectorAll('form'));
+                    const form = forms.find((f) => {
+                        const t = (f.textContent || '').toLowerCase();
+                        return t.includes('role') && t.includes('gitlab trial');
+                    }) || forms.find((f) => (f.textContent || '').toLowerCase().includes('welcome'));
+                    if (!form) return out;
+
+                    const selects = Array.from(form.querySelectorAll('select'));
+                    for (const sel of selects) {
+                        const context = (
+                            `${sel.name || ''} ${sel.id || ''} ${
+                                sel.closest('label, fieldset, .form-group')?.textContent || ''
+                            }`
+                        ).toLowerCase();
+                        if (!out.role && context.includes('role')) {
+                            out.role = setSelect(sel, ['developer', 'software']);
+                            continue;
+                        }
+                        if (!out.reason && (
+                            context.includes('signing up') ||
+                            context.includes('objective') ||
+                            context.includes('reason') ||
+                            context.includes('because')
+                        )) {
+                            out.reason = setSelect(sel, ['store', 'code', 'learn']);
+                            continue;
+                        }
+                    }
+
+                    // Fallback by order if context-based matching failed.
+                    if (!out.role && selects.length > 0) {
+                        out.role = setSelect(selects[0], ['developer', 'software']);
+                    }
+                    if (!out.reason && selects.length > 1) {
+                        out.reason = setSelect(selects[1], ['store', 'code', 'learn']);
+                    }
+
+                    const groups = new Map();
+                    form.querySelectorAll('input[type="radio"]').forEach((r) => {
+                        const key = r.getAttribute('name') || '__anon__';
+                        if (!groups.has(key)) groups.set(key, []);
+                        groups.get(key).push(r);
+                    });
+                    groups.forEach((grp) => {
+                        if (!grp || grp.length === 0) return;
+                        if (grp.some((r) => r.checked)) {
+                            out.radio = true;
+                            return;
+                        }
+                        let pick = null;
+                        for (const r of grp) {
+                            const id = r.getAttribute('id') || '';
+                            let lblText = '';
+                            if (id) {
+                                const lbl = form.querySelector(`label[for="${CSS.escape(id)}"]`);
+                                lblText = lbl ? (lbl.textContent || '') : '';
+                            }
+                            const full = `${r.value || ''} ${lblText}`.toLowerCase();
+                            if (full.includes('just me') || full.includes('myself') || full.includes('false')) {
+                                pick = r;
+                                break;
+                            }
+                        }
+                        if (!pick) pick = grp[0];
+                        pick.checked = true;
+                        pick.dispatchEvent(new Event('input', { bubbles: true }));
+                        pick.dispatchEvent(new Event('change', { bubbles: true }));
+                        out.radio = true;
+                    });
+
+                    form.querySelectorAll('[required]').forEach((el) => {
+                        el.removeAttribute('required');
+                        el.removeAttribute('aria-required');
+                    });
+                    form.noValidate = true;
+                    form.setAttribute('novalidate', 'true');
+
+                    return out;
+                }"""
+            )
+            lib_logger.info(
+                "Onboarding welcome visible-control fallback report: %s",
+                visible_report,
+            )
+        except Exception as e:
+            self.console.print(f"[dim]Visible welcome fallback failed: {e}[/dim]")
+
         # PRIMARY submission strategy: use form.submit() via JS.
         # Unlike clicking a submit button, form.submit() completely
         # bypasses the browser's constraint validation API — no tooltip,
@@ -3055,6 +3289,31 @@ class GitLabTrialAutomator:
                     self.console.print(
                         f"[red]Last-resort form.submit() failed: {e}[/red]"
                     )
+        # Confirm we actually navigated away from the welcome page.
+        # GitLab occasionally keeps this page loaded when a listbox value
+        # did not bind, even though the submit click path ran.
+        moved_on = False
+        for _ in range(6):
+            if not await self._is_welcome_onboarding_page(page):
+                moved_on = True
+                break
+            await page.wait_for_timeout(1200)
+
+        if not moved_on:
+            current_url = ""
+            try:
+                current_url = page.url or ""
+            except Exception:
+                pass
+            lib_logger.warning(
+                "Onboarding: welcome step submit did not advance (url=%s)",
+                current_url,
+            )
+            self.console.print(
+                "[yellow]Welcome step is still present after submit; will retry.[/yellow]"
+            )
+            return False
+
         self.console.print("[green]Welcome step done.[/green]")
         return True
 
@@ -3485,8 +3744,9 @@ class GitLabTrialAutomator:
                 # Check if this trigger is near a field we care about
                 nearby_text = ""
                 try:
-                    nearby_text = await page.evaluate(
-                        """(el) => {
+                    nearby_text = (
+                        await page.evaluate(
+                            """(el) => {
                             let p = el.closest(
                                 '.form-group, .gl-form-group, fieldset, '
                                 + '[class*="field"], [class*="dropdown"], '
@@ -3494,8 +3754,10 @@ class GitLabTrialAutomator:
                             );
                             return p ? p.textContent : '';
                         }""",
-                        await trigger.element_handle(),
-                    ) or ""
+                            await trigger.element_handle(),
+                        )
+                        or ""
+                    )
                 except Exception:
                     pass
 
@@ -3543,8 +3805,10 @@ class GitLabTrialAutomator:
                         opt = options.nth(oi)
                         try:
                             opt_text = (
-                                await opt.text_content(timeout=500) or ""
-                            ).strip().lower()
+                                (await opt.text_content(timeout=500) or "")
+                                .strip()
+                                .lower()
+                            )
                         except Exception:
                             continue
                         if any(h in opt_text for h in option_hints):
@@ -3567,11 +3831,17 @@ class GitLabTrialAutomator:
                         opt = options.nth(oi)
                         try:
                             opt_text = (
-                                await opt.text_content(timeout=500) or ""
-                            ).strip().lower()
+                                (await opt.text_content(timeout=500) or "")
+                                .strip()
+                                .lower()
+                            )
                         except Exception:
                             continue
-                        if opt_text and "select" not in opt_text and "choose" not in opt_text:
+                        if (
+                            opt_text
+                            and "select" not in opt_text
+                            and "choose" not in opt_text
+                        ):
                             try:
                                 await opt.click(timeout=3000)
                                 lib_logger.info(
@@ -3862,15 +4132,32 @@ class GitLabTrialAutomator:
             if count == 0:
                 continue
 
+            normalized_hints = [h.strip().lower() for h in option_hints if h.strip()]
+
             # Try to match a preferred option.
-            for hint in option_hints:
+            for hint in normalized_hints:
                 for oi in range(count):
                     opt = opts.nth(oi)
                     try:
-                        opt_text = (await opt.text_content(timeout=500) or "").lower()
-                        if hint in opt_text:
-                            await opt.click(timeout=3000)
-                            return True
+                        if not await opt.is_visible(timeout=500):
+                            continue
+                        disabled = (
+                            await opt.get_attribute("aria-disabled") or ""
+                        ).lower()
+                        if disabled == "true":
+                            continue
+                        opt_text = (
+                            (await opt.text_content(timeout=500) or "").strip().lower()
+                        )
+                    except Exception:
+                        continue
+
+                    if hint not in opt_text:
+                        continue
+
+                    try:
+                        await opt.click(timeout=3000)
+                        return True
                     except Exception:
                         pass
 
@@ -3880,26 +4167,18 @@ class GitLabTrialAutomator:
                             await page.evaluate("(el) => el.click()", handle)
                             return True
                     except Exception:
-                        continue
-
-                # Alternative Strategy: if element can't be clicked directly, try JS click
-                for oi in range(count):
-                    opt = opts.nth(oi)
-                    try:
-                        opt_text = (await opt.text_content(timeout=500) or "").lower()
-                        if hint in opt_text:
-                            handle = await opt.element_handle()
-                            if handle:
-                                await page.evaluate("(el) => el.click()", handle)
-                                return True
-                    except Exception:
-                        continue
+                        pass
 
             # No hint matched -- pick the first visible non-placeholder
             # option.
             for oi in range(count):
                 opt = opts.nth(oi)
                 try:
+                    if not await opt.is_visible(timeout=500):
+                        continue
+                    disabled = (await opt.get_attribute("aria-disabled") or "").lower()
+                    if disabled == "true":
+                        continue
                     opt_text = (await opt.text_content(timeout=500) or "").strip()
                     if not opt_text:
                         continue
@@ -4232,11 +4511,17 @@ class GitLabTrialAutomator:
                     params={"owned_only": "true"},
                 )
                 if r.status_code != 200:
-                    lib_logger.warning("Trial check: namespaces returned %d", r.status_code)
+                    lib_logger.warning(
+                        "Trial check: namespaces returned %d", r.status_code
+                    )
                     return False
                 for ns in r.json():
                     if ns.get("trial") is True or "trial" in str(ns.get("plan", "")):
-                        lib_logger.info("Trial active on namespace: %s (plan=%s)", ns.get("path"), ns.get("plan"))
+                        lib_logger.info(
+                            "Trial active on namespace: %s (plan=%s)",
+                            ns.get("path"),
+                            ns.get("plan"),
+                        )
                         return True
             lib_logger.warning("Trial check: no namespace has an active trial")
             return False
@@ -4252,9 +4537,13 @@ class GitLabTrialAutomator:
         required company information.
         """
         TRIAL_ACTIVATE_URL = "https://gitlab.com/-/trials/new"
-        lib_logger.info("Attempting trial activation via browser at %s", TRIAL_ACTIVATE_URL)
+        lib_logger.info(
+            "Attempting trial activation via browser at %s", TRIAL_ACTIVATE_URL
+        )
         try:
-            await page.goto(TRIAL_ACTIVATE_URL, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(
+                TRIAL_ACTIVATE_URL, wait_until="domcontentloaded", timeout=60000
+            )
             await self._dismiss_cookie_banners(page)
             await page.wait_for_timeout(2000)
 
@@ -4274,7 +4563,7 @@ class GitLabTrialAutomator:
             await self._safe_fill(
                 page,
                 [
-                    '#company_name',
+                    "#company_name",
                     'input[name="company_name"]',
                     'input[name="trial_company_name"]',
                     '[data-testid="company-name-input"]',
@@ -4314,8 +4603,14 @@ class GitLabTrialAutomator:
             pre_url = page.url
             await self._safe_click_by_button_name(
                 page,
-                ["Start your free trial", "Continue", "Start free trial",
-                 "Submit", "Commencer", "Continuer"],
+                [
+                    "Start your free trial",
+                    "Continue",
+                    "Start free trial",
+                    "Submit",
+                    "Commencer",
+                    "Continuer",
+                ],
             )
             # Wait for the backend to process the trial activation form.
             try:
@@ -4414,9 +4709,7 @@ class GitLabTrialAutomator:
             if api_group and isinstance(api_group, dict) and api_group.get("id"):
                 group_id = int(api_group["id"])
                 group_path = str(
-                    api_group.get("full_path")
-                    or api_group.get("path")
-                    or group_slug
+                    api_group.get("full_path") or api_group.get("path") or group_slug
                 )
                 self.console.print(
                     f"[green]Created group via API: {group_path} (id={group_id})[/green]"
@@ -4457,9 +4750,7 @@ class GitLabTrialAutomator:
         if created_group is not None:
             group_id = int(created_group["id"])
             group_path = str(
-                created_group.get("full_path")
-                or created_group.get("path")
-                or ""
+                created_group.get("full_path") or created_group.get("path") or ""
             )
             if await self._update_group_duo_settings(access_token, group_id):
                 return True, group_path
