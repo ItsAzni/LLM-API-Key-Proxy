@@ -275,6 +275,17 @@ async def anthropic_streaming_wrapper(
                 yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
                 message_started = True
 
+            # Detect proxy error responses (e.g., all credentials exhausted).
+            # These have an "error" key but no "choices", and would otherwise
+            # be silently dropped — causing clients to see an empty response.
+            if "error" in chunk and not chunk.get("choices"):
+                error_info = chunk["error"]
+                error_msg = error_info.get("message", "Unknown proxy error")
+                error_type = error_info.get("type", "proxy_error")
+                raise RuntimeError(
+                    f"[{error_type}] {error_msg}"
+                )
+
             choices = chunk.get("choices") or []
             if not choices:
                 continue
