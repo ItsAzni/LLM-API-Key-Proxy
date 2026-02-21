@@ -533,10 +533,19 @@ def openai_to_anthropic_response(openai_response: dict, original_model: str) -> 
     prompt_tokens = usage.get("prompt_tokens", 0)
     cached_tokens = 0
 
+    cache_creation_tokens = 0
+
     # Extract cached tokens if present
     if usage.get("prompt_tokens_details"):
         details = usage["prompt_tokens_details"]
         cached_tokens = details.get("cached_tokens", 0)
+        cache_creation_tokens = details.get("cache_creation_tokens", 0)
+
+    # Also check for Anthropic-format cache fields (set by GitLab Duo etc.)
+    if not cached_tokens and usage.get("cache_read_input_tokens"):
+        cached_tokens = usage["cache_read_input_tokens"]
+    if not cache_creation_tokens and usage.get("cache_creation_input_tokens"):
+        cache_creation_tokens = usage["cache_creation_input_tokens"]
 
     anthropic_usage = {
         "input_tokens": prompt_tokens - cached_tokens,  # Subtract cached tokens
@@ -544,9 +553,9 @@ def openai_to_anthropic_response(openai_response: dict, original_model: str) -> 
     }
 
     # Add cache tokens if present
-    if cached_tokens > 0:
+    if cached_tokens > 0 or cache_creation_tokens > 0:
         anthropic_usage["cache_read_input_tokens"] = cached_tokens
-        anthropic_usage["cache_creation_input_tokens"] = 0
+        anthropic_usage["cache_creation_input_tokens"] = cache_creation_tokens
 
     return {
         "id": openai_response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),

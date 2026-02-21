@@ -107,11 +107,13 @@ class AnthropicHandler:
             request.model,
         )
 
-        # Pass exact thinking budget for providers that handle it natively (e.g. GitLab Duo)
+        # Pass thinking config for providers that handle it natively (e.g. GitLab Duo)
         # This preserves the original budget_tokens without lossy reasoning_effort roundtrip
         # Note: type can be "enabled", "adaptive", etc. — anything not "disabled" means thinking is on
-        if request.thinking and request.thinking.type != "disabled" and request.thinking.budget_tokens is not None:
-            openai_request["thinking_budget"] = request.thinking.budget_tokens
+        if request.thinking and request.thinking.type != "disabled":
+            openai_request["thinking_type"] = request.thinking.type
+            if request.thinking.budget_tokens is not None:
+                openai_request["thinking_budget"] = request.thinking.budget_tokens
 
         # Pass parent log directory to acompletion for nested logging
         if anthropic_logger and anthropic_logger.log_dir:

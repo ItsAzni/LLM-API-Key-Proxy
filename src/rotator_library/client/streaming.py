@@ -162,14 +162,22 @@ class StreamingHandler:
                                     getattr(completion_details, "reasoning_tokens", 0)
                                     or 0
                                 )
-                        if processed.usage.get("cache_read_tokens") is not None:
-                            prompt_tokens_cached = (
-                                processed.usage.get("cache_read_tokens") or 0
-                            )
-                        if processed.usage.get("cache_creation_tokens") is not None:
-                            prompt_tokens_cache_write = (
-                                processed.usage.get("cache_creation_tokens") or 0
-                            )
+                        # Support both OpenAI (cache_read_tokens) and Anthropic
+                        # (cache_read_input_tokens) field names for cache metrics
+                        cache_read_val = (
+                            processed.usage.get("cache_read_tokens")
+                            if processed.usage.get("cache_read_tokens") is not None
+                            else processed.usage.get("cache_read_input_tokens")
+                        )
+                        if cache_read_val is not None:
+                            prompt_tokens_cached = cache_read_val or 0
+                        cache_write_val = (
+                            processed.usage.get("cache_creation_tokens")
+                            if processed.usage.get("cache_creation_tokens") is not None
+                            else processed.usage.get("cache_creation_input_tokens")
+                        )
+                        if cache_write_val is not None:
+                            prompt_tokens_cache_write = cache_write_val or 0
                         if thinking_tokens and completion_tokens >= thinking_tokens:
                             completion_tokens = completion_tokens - thinking_tokens
                         prompt_tokens_uncached = max(

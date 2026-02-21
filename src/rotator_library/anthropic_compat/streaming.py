@@ -64,6 +64,7 @@ async def anthropic_streaming_wrapper(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0  # Track cached tokens for proper Anthropic format
+    cache_creation_tokens = 0  # Track cache creation tokens
     accumulated_text = ""  # Track accumulated text for logging
     accumulated_thinking = ""  # Track accumulated thinking for logging
     accumulated_thinking_signature = ""  # Track thinking signature for Anthropic format
@@ -106,9 +107,9 @@ async def anthropic_streaming_wrapper(
                         "input_tokens": input_tokens - cached_tokens,
                         "output_tokens": 0,
                     }
-                    if cached_tokens > 0:
+                    if cached_tokens > 0 or cache_creation_tokens > 0:
                         usage_dict["cache_read_input_tokens"] = cached_tokens
-                        usage_dict["cache_creation_input_tokens"] = 0
+                        usage_dict["cache_creation_input_tokens"] = cache_creation_tokens
 
                     message_start = {
                         "type": "message_start",
@@ -153,9 +154,9 @@ async def anthropic_streaming_wrapper(
                     "input_tokens": input_tokens - cached_tokens,
                     "output_tokens": output_tokens,
                 }
-                if cached_tokens > 0:
+                if cached_tokens > 0 or cache_creation_tokens > 0:
                     final_usage["cache_read_input_tokens"] = cached_tokens
-                    final_usage["cache_creation_input_tokens"] = 0
+                    final_usage["cache_creation_input_tokens"] = cache_creation_tokens
 
                 # Send message_delta with final info
                 yield f'event: message_delta\ndata: {{"type": "message_delta", "delta": {{"stop_reason": "{stop_reason}", "stop_sequence": null}}, "usage": {json.dumps(final_usage)}}}\n\n'
@@ -204,9 +205,9 @@ async def anthropic_streaming_wrapper(
                         "input_tokens": input_tokens - cached_tokens,
                         "output_tokens": output_tokens,
                     }
-                    if cached_tokens > 0:
+                    if cached_tokens > 0 or cache_creation_tokens > 0:
                         log_usage["cache_read_input_tokens"] = cached_tokens
-                        log_usage["cache_creation_input_tokens"] = 0
+                        log_usage["cache_creation_input_tokens"] = cache_creation_tokens
 
                     anthropic_response = {
                         "id": request_id,
@@ -239,8 +240,12 @@ async def anthropic_streaming_wrapper(
                 output_tokens = usage.get("completion_tokens", output_tokens)
                 # Extract cached tokens from prompt_tokens_details
                 if usage.get("prompt_tokens_details"):
-                    cached_tokens = usage["prompt_tokens_details"].get(
+                    details = usage["prompt_tokens_details"]
+                    cached_tokens = details.get(
                         "cached_tokens", cached_tokens
+                    )
+                    cache_creation_tokens = details.get(
+                        "cache_creation_tokens", cache_creation_tokens
                     )
 
             # Send message_start on first chunk
@@ -250,9 +255,9 @@ async def anthropic_streaming_wrapper(
                     "input_tokens": input_tokens - cached_tokens,
                     "output_tokens": 0,
                 }
-                if cached_tokens > 0:
+                if cached_tokens > 0 or cache_creation_tokens > 0:
                     usage_dict["cache_read_input_tokens"] = cached_tokens
-                    usage_dict["cache_creation_input_tokens"] = 0
+                    usage_dict["cache_creation_input_tokens"] = cache_creation_tokens
 
                 message_start = {
                     "type": "message_start",
@@ -434,9 +439,9 @@ async def anthropic_streaming_wrapper(
                 "input_tokens": input_tokens - cached_tokens,
                 "output_tokens": 0,
             }
-            if cached_tokens > 0:
+            if cached_tokens > 0 or cache_creation_tokens > 0:
                 usage_dict["cache_read_input_tokens"] = cached_tokens
-                usage_dict["cache_creation_input_tokens"] = 0
+                usage_dict["cache_creation_input_tokens"] = cache_creation_tokens
 
             message_start = {
                 "type": "message_start",
@@ -477,9 +482,9 @@ async def anthropic_streaming_wrapper(
             "input_tokens": input_tokens - cached_tokens,
             "output_tokens": 0,
         }
-        if cached_tokens > 0:
+        if cached_tokens > 0 or cache_creation_tokens > 0:
             final_usage["cache_read_input_tokens"] = cached_tokens
-            final_usage["cache_creation_input_tokens"] = 0
+            final_usage["cache_creation_input_tokens"] = cache_creation_tokens
 
         # Send message_delta and message_stop to properly close the stream
         yield f'event: message_delta\ndata: {{"type": "message_delta", "delta": {{"stop_reason": "end_turn", "stop_sequence": null}}, "usage": {json.dumps(final_usage)}}}\n\n'

@@ -174,15 +174,15 @@ MODEL_MAP: Dict[str, Tuple[str, str]] = {
 
 # Thinking budget mapping for Claude reasoning effort
 THINKING_BUDGET_MAP = {
-    "auto": 16000,
+    "auto": 31999,
     "minimal": 1024,
     "low": 4096,
     "low_medium": 8192,
     "medium": 16000,
     "medium_high": 24000,
-    "high": 32000,
-    "xhigh": 32000,
-    "max": 32000,
+    "high": 31999,
+    "xhigh": 31999,
+    "max": 31999,
 }
 
 
@@ -1079,6 +1079,8 @@ class GitLabDuoProvider(ProviderInterface):
                 # Tool calls → tool_use blocks
                 for tc in msg.get("tool_calls", []):
                     func = tc.get("function", {})
+                    # Anthropic requires name to have ≥1 character
+                    fname = func.get("name") or tc.get("name") or "_unknown"
                     try:
                         input_data = json.loads(func.get("arguments", "{}"))
                     except json.JSONDecodeError:
@@ -1087,7 +1089,7 @@ class GitLabDuoProvider(ProviderInterface):
                         {
                             "type": "tool_use",
                             "id": self._sanitize_tool_id(tc.get("id", "")),
-                            "name": func.get("name", ""),
+                            "name": fname,
                             "input": input_data,
                         }
                     )
@@ -1195,26 +1197,34 @@ class GitLabDuoProvider(ProviderInterface):
                 payload["tool_choice"] = tc
 
         # Thinking / reasoning
-        # Default to enabling thinking for Claude models (matches Antigravity behavior)
         thinking_budget = kwargs.get("thinking_budget")
+        thinking_type = kwargs.get("thinking_type")  # "enabled", "adaptive", etc.
         reasoning_effort = kwargs.get("reasoning_effort")
         enable_thinking = False
 
         if thinking_budget is not None:
+            # Explicit budget from client
             budget = int(thinking_budget)
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             enable_thinking = True
         elif reasoning_effort:
             effort = str(reasoning_effort).strip().lower()
             if effort not in ("disable", "off", "none"):
-                budget = THINKING_BUDGET_MAP.get(effort, 16000)
+                budget = THINKING_BUDGET_MAP.get(effort, 31999)
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
                 enable_thinking = True
-        else:
-            # No explicit thinking config — enable by default with "auto" budget
-            budget = THINKING_BUDGET_MAP.get("auto", 16000)
+        elif thinking_type and thinking_type != "disabled":
+            # Client requested thinking (e.g. type="adaptive") without explicit budget
+            budget = 31999
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             enable_thinking = True
+        else:
+            # No explicit thinking config from client
+            # Enable by default for opus/sonnet, but NOT for haiku
+            if "haiku" not in backend_model.lower():
+                budget = THINKING_BUDGET_MAP.get("auto", 31999)
+                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                enable_thinking = True
 
         # Ensure max_tokens > budget_tokens when thinking is enabled
         if enable_thinking:
@@ -1383,8 +1393,13 @@ class GitLabDuoProvider(ProviderInterface):
                 completion_tokens=out,
                 total_tokens=inp + out,
             )
-            # Attach cache token info for the executor's usage tracking
+            # Attach cache token info via prompt_tokens_details (survives model_dump)
+            # and also as direct attributes for legacy consumers
             if cache_creation or cache_read:
+                usage_obj.prompt_tokens_details = {
+                    "cached_tokens": cache_read or 0,
+                    "cache_creation_tokens": cache_creation or 0,
+                }
                 usage_obj.cache_creation_input_tokens = cache_creation
                 usage_obj.cache_read_input_tokens = cache_read
                 lib_logger.debug(
@@ -1743,7 +1758,12 @@ class GitLabDuoProvider(ProviderInterface):
                             completion_tokens=out,
                             total_tokens=inp + out,
                         )
+                        # Attach cache via prompt_tokens_details (survives model_dump)
                         if cache_creation or cache_read:
+                            usage_obj.prompt_tokens_details = {
+                                "cached_tokens": cache_read or 0,
+                                "cache_creation_tokens": cache_creation or 0,
+                            }
                             usage_obj.cache_creation_input_tokens = cache_creation
                             usage_obj.cache_read_input_tokens = cache_read
                         final_chunk.usage = usage_obj
