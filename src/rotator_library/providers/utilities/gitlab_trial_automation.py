@@ -2125,9 +2125,170 @@ class GitLabTrialAutomator:
         self.console.print("[cyan]Onboarding step 1/3 – Welcome…[/cyan]")
         await self._human_pause(page, 400, 800)
 
-        # ---- Nuclear first: force every <select> on the page to have a
-        # valid (non-placeholder) value via raw JS BEFORE trying anything
-        # else.  This handles cases where selectors have changed or the
+        # ================================================================
+        # SCORCHED EARTH: Set ALL known form fields BY NAME, regardless
+        # of element type (<select>, <input type="hidden">, <input>, etc.)
+        # This handles GitLab's migration from native <select> to Vue
+        # GlCollapsibleListbox which uses hidden <input> elements.
+        # ================================================================
+        try:
+            field_report = await page.evaluate(
+                """() => {
+                    const report = {};
+                    const FIELDS = {
+                        'onboarding_status_role': 'software_developer',
+                        'onboarding_status_registration_objective': 'code_storage',
+                        'jobs_to_be_done': 'code_storage',
+                        'onboarding_status_joining_project': 'false',
+                        'onboarding_status_setup_for_company': 'false',
+                    };
+
+                    // Intercept browser validation globally
+                    if (!window.__glInvalidIntercepted) {
+                        window.__glInvalidIntercepted = true;
+                        document.addEventListener('invalid', (e) => {
+                            e.preventDefault();
+                            e.stopImmediatePropagation();
+                        }, true);
+                    }
+                    document.querySelectorAll('form').forEach(f => {
+                        f.setAttribute('novalidate', 'true');
+                        f.noValidate = true;
+                    });
+
+                    // Find and set ALL matching form elements by name
+                    for (const [namePattern, desiredValue] of Object.entries(FIELDS)) {
+                        // Match any element whose name contains the pattern
+                        const allInputs = document.querySelectorAll(
+                            'input, select, textarea'
+                        );
+                        let found = false;
+                        for (const el of allInputs) {
+                            const elName = (el.getAttribute('name') || '').toLowerCase();
+                            const elId = (el.getAttribute('id') || '').toLowerCase();
+                            if (!elName.includes(namePattern) && !elId.includes(namePattern))
+                                continue;
+
+                            found = true;
+                            const curVal = (el.value || '').trim();
+                            const tag = el.tagName.toLowerCase();
+                            const elType = (el.getAttribute('type') || '').toLowerCase();
+
+                            // Skip radio buttons here — handled separately
+                            if (elType === 'radio') continue;
+
+                            report[namePattern] = {
+                                tag, type: elType, name: elName,
+                                id: elId, curVal, willSet: desiredValue
+                            };
+
+                            if (tag === 'select') {
+                                // For <select>, find matching option or first valid
+                                let targetIdx = -1;
+                                for (let i = 0; i < el.options.length; i++) {
+                                    const optVal = (el.options[i].value || '').toLowerCase();
+                                    if (optVal === desiredValue ||
+                                        optVal.includes(desiredValue.replace('_', ''))) {
+                                        targetIdx = i; break;
+                                    }
+                                }
+                                // Fallback: first non-placeholder
+                                if (targetIdx < 0) {
+                                    for (let i = 1; i < el.options.length; i++) {
+                                        const v = (el.options[i].value || '').trim();
+                                        const t = (el.options[i].textContent || '')
+                                            .trim().toLowerCase();
+                                        if (v && !t.includes('select') &&
+                                            !t.includes('choose') && !t.startsWith('--')) {
+                                            targetIdx = i; break;
+                                        }
+                                    }
+                                }
+                                if (targetIdx >= 0) {
+                                    const ns = Object.getOwnPropertyDescriptor(
+                                        HTMLSelectElement.prototype, 'value');
+                                    if (ns && ns.set)
+                                        ns.set.call(el, el.options[targetIdx].value);
+                                    el.selectedIndex = targetIdx;
+                                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                                }
+                            } else {
+                                // For <input> (hidden, text, etc.)
+                                const ns = Object.getOwnPropertyDescriptor(
+                                    HTMLInputElement.prototype, 'value');
+                                if (ns && ns.set) ns.set.call(el, desiredValue);
+                                else el.value = desiredValue;
+                                el.dispatchEvent(new Event('input', {bubbles:true}));
+                                el.dispatchEvent(new Event('change', {bubbles:true}));
+                            }
+                            el.removeAttribute('required');
+                            el.removeAttribute('aria-required');
+                        }
+
+                        if (!found) {
+                            report[namePattern] = 'NOT_FOUND';
+                        }
+                    }
+
+                    // Handle radio button groups
+                    const radioGroups = new Set();
+                    document.querySelectorAll('input[type="radio"]').forEach(r => {
+                        const n = r.getAttribute('name');
+                        if (!n || radioGroups.has(n)) return;
+                        const grp = document.querySelectorAll(
+                            `input[type="radio"][name="${CSS.escape(n)}"]`
+                        );
+                        let anyChecked = false;
+                        grp.forEach(x => { if (x.checked) anyChecked = true; });
+                        if (!anyChecked && grp.length > 0) {
+                            let pick = grp[0];
+                            grp.forEach(x => { if (x.value === 'false') pick = x; });
+                            pick.checked = true;
+                            pick.dispatchEvent(new Event('input', {bubbles:true}));
+                            pick.dispatchEvent(new Event('change', {bubbles:true}));
+                            pick.click();
+                        }
+                        radioGroups.add(n);
+                    });
+
+                    // Strip ALL required attributes
+                    document.querySelectorAll('[required]').forEach(el => {
+                        el.removeAttribute('required');
+                        el.removeAttribute('aria-required');
+                    });
+
+                    return report;
+                }"""
+            )
+            lib_logger.info(
+                "Onboarding welcome: scorched-earth field report: %s",
+                field_report,
+            )
+            self.console.print(
+                f"[cyan]Field report: {field_report}[/cyan]"
+            )
+        except Exception as e:
+            lib_logger.error("Scorched earth field-by-name failed: %s", e)
+            self.console.print(f"[red]Scorched earth failed: {e}[/red]")
+
+        await self._human_pause(page, 300, 500)
+
+        # ---- Also try interacting with GlCollapsibleListbox components
+        # (Vue dropdowns that render as <button> + hidden <input>)
+        try:
+            await self._pick_gl_collapsible_listbox(
+                page,
+                field_hints=["role", "rôle"],
+                option_hints=["software developer", "développeur", "developer"],
+            )
+        except Exception as e:
+            lib_logger.debug("GlCollapsibleListbox role pick failed: %s", e)
+        await self._human_pause(page, 200, 400)
+
+        # ---- Nuclear fallback: force every <select> on the page to have a
+        # valid (non-placeholder) value via raw JS.
+        # This handles cases where selectors have changed or the
         # element is hidden behind a custom component overlay.
         try:
             await page.evaluate(
@@ -2618,30 +2779,60 @@ class GitLabTrialAutomator:
         try:
             submitted = await page.evaluate(
                 """() => {
-                    // Final sweep: force selects to valid values.
-                    document.querySelectorAll('select').forEach((sel) => {
-                        const v = (sel.value || '').trim();
-                        const cur = sel.options[sel.selectedIndex];
-                        const t = (cur ? cur.textContent : '').trim().toLowerCase();
-                        const bad = !v || t.includes('select') || t.includes('choose')
-                                    || t.startsWith('--') || t === ''
-                                    || t.includes('sélect') || t.includes('choisir')
-                                    || t.includes('role');
-                        if (bad && sel.options.length > 1) {
-                            for (let i = 1; i < sel.options.length; i++) {
-                                if ((sel.options[i].value||'').trim()) {
-                                    const ns = Object.getOwnPropertyDescriptor(
-                                        HTMLSelectElement.prototype, 'value');
-                                    if (ns && ns.set) ns.set.call(sel, sel.options[i].value);
-                                    sel.selectedIndex = i;
-                                    sel.dispatchEvent(new Event('input', {bubbles:true}));
-                                    sel.dispatchEvent(new Event('change', {bubbles:true}));
-                                    break;
+                    // Final sweep: force ALL form fields by name.
+                    const FIELDS = {
+                        'onboarding_status_role': 'software_developer',
+                        'registration_objective': 'code_storage',
+                        'jobs_to_be_done': 'code_storage',
+                        'joining_project': 'false',
+                        'setup_for_company': 'false',
+                    };
+                    document.querySelectorAll('input, select').forEach((el) => {
+                        const n = (el.getAttribute('name') || '').toLowerCase();
+                        const id = (el.getAttribute('id') || '').toLowerCase();
+                        const elType = (el.getAttribute('type') || '').toLowerCase();
+                        if (elType === 'radio' || elType === 'submit' ||
+                            elType === 'checkbox') return;
+                        for (const [pat, val] of Object.entries(FIELDS)) {
+                            if (n.includes(pat) || id.includes(pat)) {
+                                const curVal = (el.value || '').trim();
+                                if (!curVal || curVal === '' ||
+                                    curVal.toLowerCase().includes('select')) {
+                                    if (el.tagName === 'SELECT') {
+                                        // Find a valid option
+                                        for (let i = 0; i < el.options.length; i++) {
+                                            const ov = (el.options[i].value||'').toLowerCase();
+                                            if (ov === val || ov.includes(val.split('_')[0])) {
+                                                el.selectedIndex = i;
+                                                const ns = Object.getOwnPropertyDescriptor(
+                                                    HTMLSelectElement.prototype, 'value');
+                                                if (ns && ns.set)
+                                                    ns.set.call(el, el.options[i].value);
+                                                break;
+                                            }
+                                        }
+                                        // Fallback to first non-placeholder
+                                        if (!el.value || el.value === '') {
+                                            for (let i = 1; i < el.options.length; i++) {
+                                                if ((el.options[i].value||'').trim()) {
+                                                    el.selectedIndex = i; break;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        const ns = Object.getOwnPropertyDescriptor(
+                                            HTMLInputElement.prototype, 'value');
+                                        if (ns && ns.set) ns.set.call(el, val);
+                                        else el.value = val;
+                                    }
+                                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                                    el.dispatchEvent(new Event('change', {bubbles:true}));
                                 }
+                                el.removeAttribute('required');
+                                el.removeAttribute('aria-required');
+                                break;
                             }
                         }
-                        sel.removeAttribute('required');
-                        sel.removeAttribute('aria-required');
                     });
                     // Final sweep: force-check unchecked radio groups.
                     const doneGrp = new Set();
@@ -3259,6 +3450,140 @@ class GitLabTrialAutomator:
             self.console.print(f"[dim]JS ensure_select_has_value failed: {e}[/dim]")
         # Fallback through locator APIs if JS path fails.
         return await self._pick_native_select(page, selectors, option_hints)
+
+    async def _pick_gl_collapsible_listbox(
+        self,
+        page: Any,
+        field_hints: List[str],
+        option_hints: List[str],
+    ) -> bool:
+        """Handle GitLab's GlCollapsibleListbox Vue component.
+
+        These render as a ``<button>`` trigger (showing current selection)
+        plus a ``<ul role="listbox">`` popup with ``<li role="option">``
+        items.  The selected value is stored in a sibling hidden ``<input>``.
+        """
+        # Find trigger buttons near a matching label / form-group
+        trigger_selectors = [
+            'button[aria-haspopup="listbox"]',
+            "button.gl-new-dropdown-toggle",
+            "button.gl-listbox-trigger",
+            '[data-testid="role-dropdown"] button',
+            '[data-testid="listbox-toggle"]',
+        ]
+        for tsel in trigger_selectors:
+            triggers = page.locator(tsel)
+            tcount = await triggers.count()
+            for ti in range(tcount):
+                trigger = triggers.nth(ti)
+                try:
+                    if not await trigger.is_visible(timeout=1500):
+                        continue
+                except Exception:
+                    continue
+
+                # Check if this trigger is near a field we care about
+                nearby_text = ""
+                try:
+                    nearby_text = await page.evaluate(
+                        """(el) => {
+                            let p = el.closest(
+                                '.form-group, .gl-form-group, fieldset, '
+                                + '[class*="field"], [class*="dropdown"], '
+                                + '[data-testid]'
+                            );
+                            return p ? p.textContent : '';
+                        }""",
+                        await trigger.element_handle(),
+                    ) or ""
+                except Exception:
+                    pass
+
+                # Also check the trigger's own data-testid and aria-label
+                try:
+                    testid = await trigger.get_attribute("data-testid") or ""
+                    aria = await trigger.get_attribute("aria-label") or ""
+                    nearby_text += f" {testid} {aria}"
+                except Exception:
+                    pass
+
+                nearby_lower = nearby_text.lower()
+                if not any(h in nearby_lower for h in field_hints):
+                    continue
+
+                lib_logger.info(
+                    "GlCollapsibleListbox: found trigger near '%s'",
+                    nearby_lower[:80],
+                )
+
+                # Click the trigger to open the listbox
+                try:
+                    await trigger.click(timeout=3000)
+                except Exception:
+                    try:
+                        await trigger.click(timeout=2000, force=True)
+                    except Exception:
+                        continue
+                await page.wait_for_timeout(1000)
+
+                # Find and click a matching option
+                option_sels = [
+                    '[role="option"]',
+                    ".gl-listbox-item",
+                    ".gl-new-dropdown-item",
+                    ".gl-dropdown-item",
+                ]
+                for osel in option_sels:
+                    options = page.locator(osel)
+                    ocount = await options.count()
+                    if ocount == 0:
+                        continue
+
+                    for oi in range(ocount):
+                        opt = options.nth(oi)
+                        try:
+                            opt_text = (
+                                await opt.text_content(timeout=500) or ""
+                            ).strip().lower()
+                        except Exception:
+                            continue
+                        if any(h in opt_text for h in option_hints):
+                            try:
+                                await opt.click(timeout=3000)
+                                lib_logger.info(
+                                    "GlCollapsibleListbox: picked '%s'",
+                                    opt_text[:50],
+                                )
+                                return True
+                            except Exception:
+                                try:
+                                    await opt.click(timeout=2000, force=True)
+                                    return True
+                                except Exception:
+                                    pass
+
+                    # Fallback: pick first non-placeholder option
+                    for oi in range(ocount):
+                        opt = options.nth(oi)
+                        try:
+                            opt_text = (
+                                await opt.text_content(timeout=500) or ""
+                            ).strip().lower()
+                        except Exception:
+                            continue
+                        if opt_text and "select" not in opt_text and "choose" not in opt_text:
+                            try:
+                                await opt.click(timeout=3000)
+                                lib_logger.info(
+                                    "GlCollapsibleListbox: fallback picked '%s'",
+                                    opt_text[:50],
+                                )
+                                return True
+                            except Exception:
+                                pass
+                    break  # Tried this trigger, move on
+
+        return False
 
     async def _pick_gl_dropdown(
         self,
