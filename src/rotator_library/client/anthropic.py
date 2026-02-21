@@ -133,6 +133,10 @@ class AnthropicHandler:
             if request.thinking.budget_tokens is not None:
                 openai_request["thinking_budget"] = request.thinking.budget_tokens
 
+        # Pass output_config.effort for adaptive thinking (4.6 models)
+        if request.output_config and request.output_config.effort:
+            openai_request["effort"] = request.output_config.effort
+
         # Pass parent log directory to acompletion for nested logging
         if anthropic_logger and anthropic_logger.log_dir:
             openai_request["_parent_log_dir"] = anthropic_logger.log_dir

@@ -172,7 +172,7 @@ MODEL_MAP: Dict[str, Tuple[str, str]] = {
     "gpt-5-codex": ("gpt-5-codex", "openai"),
 }
 
-# Thinking budget mapping for Claude reasoning effort
+# Thinking budget mapping for Claude reasoning effort (legacy models: 4.5, haiku)
 THINKING_BUDGET_MAP = {
     "auto": 31999,
     "minimal": 1024,
@@ -184,6 +184,30 @@ THINKING_BUDGET_MAP = {
     "xhigh": 31999,
     "max": 31999,
 }
+
+# 4.6 models use adaptive thinking (type: "adaptive" + output_config.effort)
+ADAPTIVE_THINKING_MODELS = frozenset({"claude-opus-4-6", "claude-sonnet-4-6"})
+
+# Maps internal granular reasoning_effort names to Anthropic's effort levels
+REASONING_TO_EFFORT_MAP = {
+    "minimal": "low",
+    "low": "low",
+    "low_medium": "medium",
+    "medium": "medium",
+    "medium_high": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+    "auto": "high",
+}
+
+# Converts legacy budget_tokens to effort levels for 4.6 models
+BUDGET_TO_EFFORT_THRESHOLDS = [
+    (4096, "low"),
+    (12000, "medium"),
+    (24000, "high"),
+    (999999, "max"),
+]
 
 
 def _get_instance_url() -> str:
@@ -1314,6 +1338,47 @@ class GitLabDuoProvider(ProviderInterface):
                 return {"type": "tool", "name": func["name"]}
         return {"type": "auto"}
 
+    @staticmethod
+    def _resolve_effort_level(kwargs: Dict[str, Any]) -> str:
+        """Resolve the adaptive thinking effort level from request kwargs.
+
+        Priority:
+        1. Explicit disable (reasoning_effort=disable/off/none) -> returns "off"
+        2. output_config.effort passed via Anthropic SDK path
+        3. thinking_budget (converted via BUDGET_TO_EFFORT_THRESHOLDS)
+        4. reasoning_effort (converted via REASONING_TO_EFFORT_MAP)
+        5. Default "high"
+        """
+        # Check for explicit disable
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort:
+            effort_str = str(reasoning_effort).strip().lower()
+            if effort_str in ("disable", "off", "none"):
+                return "off"
+
+        # Explicit effort from Anthropic SDK output_config
+        effort = kwargs.get("effort")
+        if effort:
+            return str(effort).strip().lower()
+
+        # Convert legacy budget_tokens to effort level
+        thinking_budget = kwargs.get("thinking_budget")
+        if thinking_budget is not None:
+            budget = int(thinking_budget)
+            for threshold, level in BUDGET_TO_EFFORT_THRESHOLDS:
+                if budget <= threshold:
+                    return level
+            return "max"
+
+        # Convert reasoning_effort name to effort level
+        if reasoning_effort:
+            return REASONING_TO_EFFORT_MAP.get(
+                str(reasoning_effort).strip().lower(), "high"
+            )
+
+        # Default
+        return "high"
+
     # =========================================================================
     # ANTHROPIC (CLAUDE) COMPLETION
     # =========================================================================
@@ -1394,42 +1459,62 @@ class GitLabDuoProvider(ProviderInterface):
         thinking_type = kwargs.get("thinking_type")  # "enabled", "adaptive", etc.
         reasoning_effort = kwargs.get("reasoning_effort")
         enable_thinking = False
+        use_adaptive = backend_model in ADAPTIVE_THINKING_MODELS
 
-        if thinking_budget is not None:
-            # Explicit budget from client
-            budget = int(thinking_budget)
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            enable_thinking = True
-        elif reasoning_effort:
-            effort = str(reasoning_effort).strip().lower()
-            if effort not in ("disable", "off", "none"):
-                budget = THINKING_BUDGET_MAP.get(effort, 31999)
-                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if use_adaptive:
+            # --- 4.6 models: adaptive thinking with effort levels ---
+            effort = self._resolve_effort_level(kwargs)
+            if effort == "off":
+                payload["thinking"] = {"type": "disabled"}
+            else:
+                payload["thinking"] = {"type": "adaptive"}
+                payload["output_config"] = {"effort": effort}
                 enable_thinking = True
-        elif thinking_type and thinking_type != "disabled":
-            # Client requested thinking (e.g. type="adaptive") without explicit budget
-            budget = 31999
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            enable_thinking = True
+                # Floor max_tokens so the model has room to think
+                if payload["max_tokens"] < 16384:
+                    payload["max_tokens"] = 16384
+                lib_logger.info(
+                    "[GitLabDuo] Adaptive thinking: effort=%s, max_tokens=%d, model=%s",
+                    effort,
+                    payload["max_tokens"],
+                    backend_model,
+                )
         else:
-            # No explicit thinking config from client
-            # Enable by default for opus/sonnet, but NOT for haiku
-            if "haiku" not in backend_model.lower():
-                budget = THINKING_BUDGET_MAP.get("auto", 31999)
+            # --- Legacy models (4.5, haiku): budget_tokens thinking ---
+            if thinking_budget is not None:
+                # Explicit budget from client
+                budget = int(thinking_budget)
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
                 enable_thinking = True
+            elif reasoning_effort:
+                effort = str(reasoning_effort).strip().lower()
+                if effort not in ("disable", "off", "none"):
+                    budget = THINKING_BUDGET_MAP.get(effort, 31999)
+                    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    enable_thinking = True
+            elif thinking_type and thinking_type != "disabled":
+                # Client requested thinking without explicit budget
+                budget = 31999
+                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                enable_thinking = True
+            else:
+                # Enable by default for opus/sonnet, but NOT for haiku
+                if "haiku" not in backend_model.lower():
+                    budget = THINKING_BUDGET_MAP.get("auto", 31999)
+                    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    enable_thinking = True
 
-        # Ensure max_tokens > budget_tokens when thinking is enabled
-        if enable_thinking:
-            budget = payload["thinking"]["budget_tokens"]
-            if payload["max_tokens"] <= budget:
-                payload["max_tokens"] = budget + max(payload["max_tokens"], 8192)
-            lib_logger.info(
-                "[GitLabDuo] Thinking enabled: budget_tokens=%d, max_tokens=%d, model=%s",
-                budget,
-                payload["max_tokens"],
-                backend_model,
-            )
+            # Ensure max_tokens > budget_tokens when thinking is enabled
+            if enable_thinking:
+                budget = payload["thinking"]["budget_tokens"]
+                if payload["max_tokens"] <= budget:
+                    payload["max_tokens"] = budget + max(payload["max_tokens"], 8192)
+                lib_logger.info(
+                    "[GitLabDuo] Thinking enabled: budget_tokens=%d, max_tokens=%d, model=%s",
+                    budget,
+                    payload["max_tokens"],
+                    backend_model,
+                )
 
         # Optional parameters
         if kwargs.get("temperature") is not None:
@@ -1456,7 +1541,10 @@ class GitLabDuoProvider(ProviderInterface):
         )
 
         incoming_beta = forwarded_headers.get("anthropic-beta")
-        thinking_beta = ANTHROPIC_BETA if enable_thinking else None
+        # 4.6 adaptive models auto-enable interleaved thinking; skip the beta header
+        thinking_beta = (
+            ANTHROPIC_BETA if enable_thinking and not use_adaptive else None
+        )
         merged_beta = self._merge_csv_header_values(incoming_beta, thinking_beta)
         if merged_beta:
             req_headers["anthropic-beta"] = merged_beta

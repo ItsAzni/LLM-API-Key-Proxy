@@ -87,8 +87,14 @@ class AnthropicTool(BaseModel):
 class AnthropicThinkingConfig(BaseModel):
     """Anthropic thinking configuration."""
 
-    type: str  # "enabled" or "disabled"
+    type: str  # "enabled", "disabled", or "adaptive"
     budget_tokens: Optional[int] = None
+
+
+class AnthropicOutputConfig(BaseModel):
+    """Anthropic output configuration (used with adaptive thinking)."""
+
+    effort: Optional[str] = None  # "low", "medium", "high", or "max"
 
 
 # --- Messages Request ---
@@ -108,6 +114,7 @@ class AnthropicMessagesRequest(BaseModel):
     tool_choice: Optional[dict] = None
     metadata: Optional[dict] = None
     thinking: Optional[AnthropicThinkingConfig] = None
+    output_config: Optional[AnthropicOutputConfig] = None
 
 
 # --- Messages Response ---
