@@ -37,6 +37,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import uuid
@@ -942,6 +943,14 @@ class GitLabDuoProvider(ProviderInterface):
 
         return messages
 
+    @staticmethod
+    def _sanitize_tool_id(tool_id: str) -> str:
+        """Sanitize tool ID to match Anthropic's pattern: ^[a-zA-Z0-9_-]+$"""
+        if not tool_id:
+            return f"toolu_{uuid.uuid4().hex[:12]}"
+        sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)
+        return sanitized if sanitized else f"toolu_{uuid.uuid4().hex[:12]}"
+
     def _openai_to_anthropic_messages(
         self, messages: List[Dict[str, Any]]
     ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
@@ -1039,7 +1048,7 @@ class GitLabDuoProvider(ProviderInterface):
                 user_msg["content"].append(
                     {
                         "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "tool_use_id": self._sanitize_tool_id(msg.get("tool_call_id", "")),
                         "content": tool_content,
                     }
                 )
@@ -1077,7 +1086,7 @@ class GitLabDuoProvider(ProviderInterface):
                     blocks.append(
                         {
                             "type": "tool_use",
-                            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                            "id": self._sanitize_tool_id(tc.get("id", "")),
                             "name": func.get("name", ""),
                             "input": input_data,
                         }
