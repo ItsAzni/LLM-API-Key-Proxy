@@ -901,6 +901,17 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 original_exception=e,
                 status_code=status_code,
             )
+        if status_code == 402:
+            # 402 Payment Required — credit/quota exhaustion.
+            # Must be classified as quota_exceeded so the executor rotates
+            # to the next credential instead of failing immediately.
+            retry_after = get_retry_after(e)
+            return ClassifiedError(
+                error_type="quota_exceeded",
+                original_exception=e,
+                status_code=status_code,
+                retry_after=retry_after or 300,
+            )
         if 400 <= status_code < 500:
             # Other 4xx errors - generally client errors
             return ClassifiedError(

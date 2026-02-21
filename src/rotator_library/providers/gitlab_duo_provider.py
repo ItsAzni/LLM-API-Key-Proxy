@@ -1314,6 +1314,10 @@ class GitLabDuoProvider(ProviderInterface):
                 response.status_code,
                 error_text,
             )
+            # 403 Forbidden — account banned/suspended, remove immediately
+            if response.status_code == 403:
+                self._handle_credential_forbidden(api_key)
+
             # Track 402 credit exhaustion strikes
             if response.status_code == 402 and self._is_credit_exhaustion(response.text):
                 strikes = self._record_exhaustion_strike(api_key)
@@ -1510,6 +1514,36 @@ class GitLabDuoProvider(ProviderInterface):
                 exc,
             )
 
+    def _handle_credential_forbidden(self, api_key: str) -> None:
+        """Immediately remove a credential that returned 403 Forbidden.
+
+        Unlike exhaustion (which needs 3 strikes), a 403 means the account
+        is banned, suspended, or access-revoked — no point retrying.
+        The credential file is retired and the exhaustion callback is fired
+        so a replacement can be queued.
+        """
+        if api_key in self._removed_credentials:
+            return  # Already handled
+
+        masked = api_key[-8:] if len(api_key) > 8 else api_key[:4]
+        lib_logger.error(
+            "[GitLabDuo] Credential ...%s returned 403 Forbidden — "
+            "removing immediately",
+            masked,
+        )
+        self._removed_credentials.add(api_key)
+        self._retire_credential_file(api_key)
+
+        if self._credential_exhausted_callback is not None:
+            try:
+                asyncio.create_task(self._credential_exhausted_callback(api_key))
+            except Exception:
+                lib_logger.exception(
+                    "[GitLabDuo] Failed to schedule callback for "
+                    "forbidden credential ...%s",
+                    masked,
+                )
+
     async def _stream_anthropic_with_retry(
         self,
         client: httpx.AsyncClient,
@@ -1536,6 +1570,11 @@ class GitLabDuoProvider(ProviderInterface):
                     yield chunk
                 return  # Success — stream completed
             except httpx.HTTPStatusError as e:
+                # 403 Forbidden — immediate removal before propagating
+                if e.response.status_code == 403:
+                    self._handle_credential_forbidden(api_key)
+                    raise
+
                 if e.response.status_code != 402:
                     raise  # Non-402 — propagate immediately
 
@@ -1927,6 +1966,10 @@ class GitLabDuoProvider(ProviderInterface):
                 response.status_code,
                 response.text[:500],
             )
+            # 403 Forbidden — account banned/suspended, remove immediately
+            if response.status_code == 403:
+                self._handle_credential_forbidden(api_key)
+
             raise httpx.HTTPStatusError(
                 f"GitLab Duo API error: {response.status_code}",
                 request=response.request,
@@ -2008,6 +2051,10 @@ class GitLabDuoProvider(ProviderInterface):
                     response.status_code,
                     error_text[:500],
                 )
+                # 403 Forbidden — account banned/suspended, remove immediately
+                if response.status_code == 403:
+                    self._handle_credential_forbidden(api_key)
+
                 from httpx import Response as _Resp
 
                 synth_resp = _Resp(

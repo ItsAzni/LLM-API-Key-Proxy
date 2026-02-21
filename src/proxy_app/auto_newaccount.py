@@ -4,12 +4,12 @@
 """
 Auto-newaccount manager for GitLab Duo credentials.
 
-When a GitLab Duo credential is exhausted (3+ consecutive 402 credit-exhaustion
-errors), this module:
+When a GitLab Duo credential is removed from the pool (exhaustion via repeated
+402 errors, or immediate 403 Forbidden), this module:
 1. Sends a Telegram notification alerting the user
-2. Automatically creates a replacement account via GitLabTrialAutomator
-3. Hot-reloads the new credential into the running proxy
-4. Reports success or failure on Telegram
+2. Queues a replacement account creation
+3. Processes the queue strictly one-at-a-time with a 60 s cooldown between jobs
+4. Reports success or failure on Telegram for each replacement
 
 Enabled by default when TELEGRAM_BOT_TOKEN is set and gitlab_duo credentials
 exist. Set GITLAB_DUO_AUTO_NEWACCOUNT=false to disable.
@@ -29,9 +29,14 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Seconds to wait between consecutive account creations so that browser
+# sessions / temp-email inboxes don't collide.
+_INTER_CREATION_COOLDOWN = 60
+
 
 class AutoNewAccountManager:
-    """Handles automatic credential replacement when GitLab Duo creds are exhausted."""
+    """Queue-based manager that creates replacement GitLab Duo credentials
+    strictly one at a time."""
 
     def __init__(
         self,
@@ -47,58 +52,103 @@ class AutoNewAccountManager:
         self._proxy_port = proxy_port
         self._proxy_api_key = proxy_api_key or os.getenv("PROXY_API_KEY", "")
 
-        # Serialise replacement attempts — only one at a time
-        self._lock = asyncio.Lock()
+        # FIFO queue — each item is a credential path/string that was removed
+        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._worker_task: Optional[asyncio.Task] = None
         self._max_retries = 2
 
     # ------------------------------------------------------------------
-    # Public entry point (registered as callback on the provider)
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Launch the background queue worker.  Call once at startup."""
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(
+                self._process_queue(), name="auto-newaccount-worker"
+            )
+            logger.info("Auto-newaccount queue worker started")
+
+    # ------------------------------------------------------------------
+    # Public callback (registered on the provider)
     # ------------------------------------------------------------------
 
     async def on_credential_exhausted(self, credential: str) -> None:
-        """Called by the provider when a credential hits the exhaustion threshold.
+        """Called by the provider when a credential is removed from the pool.
 
-        *credential* is the file path (e.g. ``oauth_creds/gitlab_duo_oauth_3.json``)
-        or a raw PAT string.
+        Sends an immediate Telegram alert and enqueues a replacement job.
         """
-        cred_name = Path(credential).name if "/" in credential or "\\" in credential else credential
+        cred_name = (
+            Path(credential).name
+            if "/" in credential or "\\" in credential
+            else credential
+        )
         remaining = self._count_remaining_credentials(exclude=credential)
 
-        # Always notify about the removal
+        queued = self._queue.qsize()
+        queue_info = f"\n📋 Queue: {queued} pending" if queued > 0 else ""
+
         await self._send_telegram(
-            f"⚠️ *GitLab Duo credential exhausted*\n\n"
+            f"⚠️ *GitLab Duo credential removed*\n\n"
             f"📁 `{cred_name}`\n"
             f"🗑️ Removed from pool ({remaining} remaining)\n\n"
-            f"⏳ Creating replacement..."
+            f"⏳ Replacement queued...{queue_info}"
         )
 
-        errors: list[str] = []
-        async with self._lock:
-            for attempt in range(1, self._max_retries + 1):
-                try:
-                    result = await self._create_and_reload()
-                    # Success!
-                    await self._send_telegram(
-                        f"✅ *Replacement credential ready*\n\n"
-                        f"📁 `{result['cred_name']}`\n"
-                        f"📧 `{result['email']}`\n"
-                        f"🔄 Proxy reloaded"
-                    )
-                    return
-                except Exception as exc:
-                    msg = str(exc)
-                    if len(msg) > 300:
-                        msg = msg[:300] + "..."
-                    errors.append(f"Attempt {attempt}: {msg}")
-                    logger.exception(
-                        "auto-newaccount attempt %d/%d failed",
-                        attempt,
-                        self._max_retries,
-                    )
-                    if attempt < self._max_retries:
-                        await asyncio.sleep(5)  # Brief pause before retry
+        await self._queue.put(credential)
 
-        # All attempts failed
+    # ------------------------------------------------------------------
+    # Background queue worker
+    # ------------------------------------------------------------------
+
+    async def _process_queue(self) -> None:
+        """Process replacement requests strictly one at a time, forever."""
+        while True:
+            credential = await self._queue.get()
+            try:
+                await self._process_single_replacement(credential)
+
+                # Cooldown before the next job so browser sessions / emails
+                # don't collide.
+                if not self._queue.empty():
+                    pending = self._queue.qsize()
+                    await self._send_telegram(
+                        f"⏳ Waiting {_INTER_CREATION_COOLDOWN}s before next "
+                        f"replacement ({pending} still queued)"
+                    )
+                    await asyncio.sleep(_INTER_CREATION_COOLDOWN)
+            except Exception:
+                logger.exception("auto-newaccount queue worker error")
+            finally:
+                self._queue.task_done()
+
+    async def _process_single_replacement(self, credential: str) -> None:
+        """Attempt to create one replacement credential (with retries)."""
+        errors: list[str] = []
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                result = await self._create_and_reload()
+                await self._send_telegram(
+                    f"✅ *Replacement credential ready*\n\n"
+                    f"📁 `{result['cred_name']}`\n"
+                    f"📧 `{result['email']}`\n"
+                    f"🔄 Proxy reloaded"
+                )
+                return
+            except Exception as exc:
+                msg = str(exc)
+                if len(msg) > 300:
+                    msg = msg[:300] + "..."
+                errors.append(f"Attempt {attempt}: {msg}")
+                logger.exception(
+                    "auto-newaccount attempt %d/%d failed",
+                    attempt,
+                    self._max_retries,
+                )
+                if attempt < self._max_retries:
+                    await asyncio.sleep(5)
+
+        # All attempts exhausted
         error_lines = "\n".join(errors)
         await self._send_telegram(
             f"❌ *Auto-newaccount failed*\n\n"

@@ -642,6 +642,7 @@ async def lifespan(app: FastAPI):
                     proxy_api_key=os.getenv("PROXY_API_KEY", ""),
                 )
                 provider.set_credential_exhausted_callback(manager.on_credential_exhausted)
+                manager.start()
                 logging.info(
                     "✅ Auto-newaccount enabled for GitLab Duo (Telegram notifications active)"
                 )
