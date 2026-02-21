@@ -11,9 +11,8 @@ errors), this module:
 3. Hot-reloads the new credential into the running proxy
 4. Reports success or failure on Telegram
 
-Feature-gated by:
-  GITLAB_DUO_AUTO_NEWACCOUNT=true
-  TELEGRAM_BOT_TOKEN=<token>  (required for notifications)
+Enabled by default when TELEGRAM_BOT_TOKEN is set and gitlab_duo credentials
+exist. Set GITLAB_DUO_AUTO_NEWACCOUNT=false to disable.
 """
 
 from __future__ import annotations

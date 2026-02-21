@@ -603,6 +603,19 @@ def safe_write_json(
                 except (OSError, AttributeError):
                     pass
 
+        # Preserve parent directory ownership (Docker bind-mount fix).
+        # When the container runs as root but the volume is owned by the
+        # host user, atomic writes (tempfile→move) create root-owned files.
+        # This restores the original ownership so files stay accessible on
+        # the host without sudo.
+        try:
+            if os.getuid() == 0:
+                dir_stat = path.parent.stat()
+                if dir_stat.st_uid != 0:
+                    os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
+        except (OSError, AttributeError):
+            pass  # Windows / permission error — ignore silently
+
         # Success - remove from pending if it was there
         if buffer_on_failure:
             BufferedWriteRegistry.get_instance().unregister(path)

@@ -628,11 +628,10 @@ async def lifespan(app: FastAPI):
 
     await client.initialize_usage_managers()
 
-    # --- Auto-newaccount for GitLab Duo ---
-    if (
-        os.getenv("GITLAB_DUO_AUTO_NEWACCOUNT", "").lower() == "true"
-        and os.getenv("TELEGRAM_BOT_TOKEN")
-    ):
+    # --- Auto-newaccount for GitLab Duo (enabled by default when TELEGRAM_BOT_TOKEN is set) ---
+    _auto_na_disabled = os.getenv("GITLAB_DUO_AUTO_NEWACCOUNT", "").lower() == "false"
+    _tg_token_set = bool(os.getenv("TELEGRAM_BOT_TOKEN"))
+    if not _auto_na_disabled and _tg_token_set:
         try:
             from proxy_app.auto_newaccount import AutoNewAccountManager
 
@@ -644,14 +643,16 @@ async def lifespan(app: FastAPI):
                 )
                 provider.set_credential_exhausted_callback(manager.on_credential_exhausted)
                 logging.info(
-                    "Auto-newaccount enabled for GitLab Duo (Telegram notifications active)"
+                    "✅ Auto-newaccount enabled for GitLab Duo (Telegram notifications active)"
                 )
             else:
                 logging.debug(
-                    "Auto-newaccount: gitlab_duo provider not loaded, skipping"
+                    "Auto-newaccount: gitlab_duo provider not available, skipping"
                 )
         except Exception:
             logging.exception("Failed to initialise auto-newaccount manager")
+    elif _auto_na_disabled:
+        logging.info("Auto-newaccount explicitly disabled (GITLAB_DUO_AUTO_NEWACCOUNT=false)")
 
     # Log loaded credentials summary (compact, always visible for deployment verification)
     # _api_summary = ', '.join([f"{p}:{len(c)}" for p, c in api_keys.items()]) if api_keys else "none"

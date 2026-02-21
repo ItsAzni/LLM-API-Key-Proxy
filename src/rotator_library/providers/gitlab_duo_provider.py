@@ -1445,9 +1445,11 @@ class GitLabDuoProvider(ProviderInterface):
     def _record_exhaustion_strike(self, api_key: str) -> int:
         """Record an exhaustion strike for a credential. Returns new strike count.
 
-        When strikes reach ``MAX_EXHAUSTION_STRIKES``, the registered
-        ``_credential_exhausted_callback`` (if any) is scheduled via
-        ``asyncio.create_task`` so the request path is not blocked.
+        When strikes reach ``MAX_EXHAUSTION_STRIKES``:
+        - The credential file is renamed to ``*.exhausted`` so it is not
+          re-discovered on restart.
+        - The registered ``_credential_exhausted_callback`` (if any) is
+          scheduled via ``asyncio.create_task``.
         """
         strikes = self._exhaustion_strikes.get(api_key, 0) + 1
         self._exhaustion_strikes[api_key] = strikes
@@ -1459,11 +1461,20 @@ class GitLabDuoProvider(ProviderInterface):
             masked,
         )
 
-        # Fire the exhaustion callback exactly once when the threshold is reached
-        if strikes >= MAX_EXHAUSTION_STRIKES and self._credential_exhausted_callback is not None:
-            # Only fire on the exact threshold hit, not on subsequent calls
-            if strikes == MAX_EXHAUSTION_STRIKES:
+        # Handle threshold reached — fire exactly once
+        if strikes == MAX_EXHAUSTION_STRIKES:
+            # Retire the credential file so it is not loaded on next restart
+            self._retire_credential_file(api_key)
+
+            # Fire the optional callback (auto-newaccount / Telegram notification)
+            if self._credential_exhausted_callback is not None:
                 try:
+                    lib_logger.info(
+                        "[GitLabDuo] Credential ...%s reached %d strikes — "
+                        "scheduling auto-newaccount callback",
+                        masked,
+                        strikes,
+                    )
                     asyncio.create_task(self._credential_exhausted_callback(api_key))
                 except Exception:
                     lib_logger.exception(
@@ -1472,6 +1483,32 @@ class GitLabDuoProvider(ProviderInterface):
                     )
 
         return strikes
+
+    @staticmethod
+    def _retire_credential_file(api_key: str) -> None:
+        """Rename an exhausted credential file to ``*.exhausted`` so it is
+        not re-discovered by the ``*_oauth_*.json`` glob on restart.
+
+        Only operates on file-based credentials (OAuth JSON files).
+        PAT strings are silently ignored.
+        """
+        cred_path = Path(api_key)
+        if not cred_path.is_file():
+            return
+        retired_path = cred_path.with_suffix(".json.exhausted")
+        try:
+            cred_path.rename(retired_path)
+            lib_logger.info(
+                "[GitLabDuo] Retired exhausted credential: %s → %s",
+                cred_path.name,
+                retired_path.name,
+            )
+        except OSError as exc:
+            lib_logger.error(
+                "[GitLabDuo] Failed to retire credential file %s: %s",
+                cred_path.name,
+                exc,
+            )
 
     async def _stream_anthropic_with_retry(
         self,
