@@ -494,6 +494,24 @@ class RequestExecutor:
             context.credentials, model, provider
         )
         credentials = filter_result.all_usable
+
+        # Filter out credentials marked for removal by provider
+        # (e.g., GitLab Duo credit exhaustion after repeated 402 errors)
+        plugin = self._get_plugin_instance(provider)
+        if plugin and hasattr(plugin, "should_remove_credential"):
+            before_count = len(credentials)
+            credentials = [
+                c for c in credentials if not plugin.should_remove_credential(c)
+            ]
+            removed_count = before_count - len(credentials)
+            if removed_count > 0:
+                lib_logger.info(
+                    "Filtered %d exhausted credential(s) for %s/%s",
+                    removed_count,
+                    provider,
+                    model,
+                )
+
         quota_group = usage_manager.get_model_quota_group(model)
 
         await self._ensure_initialized(usage_manager, context, filter_result)

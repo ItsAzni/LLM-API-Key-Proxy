@@ -628,6 +628,31 @@ async def lifespan(app: FastAPI):
 
     await client.initialize_usage_managers()
 
+    # --- Auto-newaccount for GitLab Duo ---
+    if (
+        os.getenv("GITLAB_DUO_AUTO_NEWACCOUNT", "").lower() == "true"
+        and os.getenv("TELEGRAM_BOT_TOKEN")
+    ):
+        try:
+            from proxy_app.auto_newaccount import AutoNewAccountManager
+
+            provider = client._get_provider_instance("gitlab_duo")
+            if provider is not None and hasattr(provider, "set_credential_exhausted_callback"):
+                manager = AutoNewAccountManager(
+                    proxy_port=args.port,
+                    proxy_api_key=os.getenv("PROXY_API_KEY", ""),
+                )
+                provider.set_credential_exhausted_callback(manager.on_credential_exhausted)
+                logging.info(
+                    "Auto-newaccount enabled for GitLab Duo (Telegram notifications active)"
+                )
+            else:
+                logging.debug(
+                    "Auto-newaccount: gitlab_duo provider not loaded, skipping"
+                )
+        except Exception:
+            logging.exception("Failed to initialise auto-newaccount manager")
+
     # Log loaded credentials summary (compact, always visible for deployment verification)
     # _api_summary = ', '.join([f"{p}:{len(c)}" for p, c in api_keys.items()]) if api_keys else "none"
     # _oauth_summary = ', '.join([f"{p}:{len(c)}" for p, c in oauth_credentials.items()]) if oauth_credentials else "none"

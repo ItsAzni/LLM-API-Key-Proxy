@@ -255,6 +255,8 @@ class GitLabDuoProvider(ProviderInterface):
     _exhaustion_strikes: Dict[str, int] = {}
     # Credentials that have been auto-removed due to exhaustion
     _removed_credentials: set = set()
+    # Optional async callback fired when a credential is exhausted and removed
+    _credential_exhausted_callback: Optional[Callable[..., Awaitable[None]]] = None
 
     # =========================================================================
     # PROVIDER INTERFACE
@@ -266,6 +268,16 @@ class GitLabDuoProvider(ProviderInterface):
     def should_remove_credential(self, credential: str) -> bool:
         """Check if a credential has been flagged for removal due to exhaustion."""
         return credential in self._removed_credentials
+
+    def set_credential_exhausted_callback(
+        self, callback: Callable[..., Awaitable[None]]
+    ) -> None:
+        """Register an async callback invoked when a credential is exhausted and removed.
+
+        The callback receives a single argument: the credential string (file path or PAT).
+        It is fired via ``asyncio.create_task`` so it does not block the request path.
+        """
+        self._credential_exhausted_callback = callback
 
     async def initialize_token(
         self,
@@ -1431,7 +1443,12 @@ class GitLabDuoProvider(ProviderInterface):
         )
 
     def _record_exhaustion_strike(self, api_key: str) -> int:
-        """Record an exhaustion strike for a credential. Returns new strike count."""
+        """Record an exhaustion strike for a credential. Returns new strike count.
+
+        When strikes reach ``MAX_EXHAUSTION_STRIKES``, the registered
+        ``_credential_exhausted_callback`` (if any) is scheduled via
+        ``asyncio.create_task`` so the request path is not blocked.
+        """
         strikes = self._exhaustion_strikes.get(api_key, 0) + 1
         self._exhaustion_strikes[api_key] = strikes
         masked = api_key[-8:] if len(api_key) > 8 else api_key[:4]
@@ -1441,6 +1458,19 @@ class GitLabDuoProvider(ProviderInterface):
             MAX_EXHAUSTION_STRIKES,
             masked,
         )
+
+        # Fire the exhaustion callback exactly once when the threshold is reached
+        if strikes >= MAX_EXHAUSTION_STRIKES and self._credential_exhausted_callback is not None:
+            # Only fire on the exact threshold hit, not on subsequent calls
+            if strikes == MAX_EXHAUSTION_STRIKES:
+                try:
+                    asyncio.create_task(self._credential_exhausted_callback(api_key))
+                except Exception:
+                    lib_logger.exception(
+                        "[GitLabDuo] Failed to schedule credential exhausted callback for ...%s",
+                        masked,
+                    )
+
         return strikes
 
     async def _stream_anthropic_with_retry(
