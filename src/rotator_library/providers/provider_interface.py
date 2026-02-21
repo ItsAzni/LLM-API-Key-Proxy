@@ -695,6 +695,25 @@ class ProviderInterface(ABC, metaclass=SingletonABCMeta):
         return model
 
     # =========================================================================
+    # CREDENTIAL REMOVAL - For auto-removing exhausted credentials
+    # =========================================================================
+
+    def should_remove_credential(self, credential: str) -> bool:
+        """
+        Check if a credential should be auto-removed from the active pool.
+
+        Providers can override this to implement auto-removal logic, e.g.,
+        when a credential has been flagged as permanently exhausted.
+
+        Args:
+            credential: The credential identifier
+
+        Returns:
+            True if the credential should be removed
+        """
+        return False
+
+    # =========================================================================
     # BACKGROUND JOB INTERFACE - Override in subclass for periodic tasks
     # =========================================================================
 
