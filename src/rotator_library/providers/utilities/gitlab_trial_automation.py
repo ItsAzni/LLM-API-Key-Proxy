@@ -2261,13 +2261,60 @@ class GitLabTrialAutomator:
                         sel.removeAttribute('aria-required');
                     });
 
+                    // Auto-select required radio button groups.
+                    // GitLab's welcome form has required radio groups
+                    // (joining_project, setup_for_company) that must have
+                    // a selection or the form reloads on submit.
+                    const handledGroups = new Set();
+                    document.querySelectorAll('input[type="radio"]').forEach((radio) => {
+                        const name = radio.getAttribute('name');
+                        if (!name || handledGroups.has(name)) return;
+                        // Check if any radio in this group is already checked.
+                        const group = document.querySelectorAll(
+                            `input[type="radio"][name="${CSS.escape(name)}"]`
+                        );
+                        let anyChecked = false;
+                        group.forEach(r => { if (r.checked) anyChecked = true; });
+                        if (anyChecked) {
+                            handledGroups.add(name);
+                            return;
+                        }
+                        // Prefer known good values for specific groups.
+                        let preferred = null;
+                        if (name.includes('joining_project')) {
+                            // "Create a new project" = false
+                            preferred = 'false';
+                        } else if (name.includes('setup_for_company')) {
+                            // "Just me" = false
+                            preferred = 'false';
+                        }
+                        let picked = false;
+                        if (preferred) {
+                            group.forEach(r => {
+                                if (!picked && r.value === preferred) {
+                                    r.checked = true;
+                                    r.dispatchEvent(new Event('input', {bubbles:true}));
+                                    r.dispatchEvent(new Event('change', {bubbles:true}));
+                                    r.click();
+                                    picked = true;
+                                }
+                            });
+                        }
+                        // Fallback: pick the first radio in the group.
+                        if (!picked && group.length > 0) {
+                            group[0].checked = true;
+                            group[0].dispatchEvent(new Event('input', {bubbles:true}));
+                            group[0].dispatchEvent(new Event('change', {bubbles:true}));
+                            group[0].click();
+                        }
+                        handledGroups.add(name);
+                    });
+
                     // Also strip required from any other form elements
                     document.querySelectorAll('[required]').forEach((el) => {
                         if (el.tagName === 'SELECT') return; // already handled
-                        if (!el.value || el.value.trim() === '') {
-                            el.removeAttribute('required');
-                            el.removeAttribute('aria-required');
-                        }
+                        el.removeAttribute('required');
+                        el.removeAttribute('aria-required');
                     });
                 }"""
             )
@@ -2412,6 +2459,30 @@ class GitLabTrialAutomator:
                         sel.removeAttribute('required');
                     });
 
+                    // Force-select required radio button groups.
+                    const handled = new Set();
+                    document.querySelectorAll('input[type="radio"]').forEach((r) => {
+                        const n = r.getAttribute('name');
+                        if (!n || handled.has(n)) return;
+                        const grp = document.querySelectorAll(
+                            `input[type="radio"][name="${CSS.escape(n)}"]`
+                        );
+                        let any = false;
+                        grp.forEach(x => { if (x.checked) any = true; });
+                        if (!any && grp.length > 0) {
+                            // Prefer value="false" for joining_project / setup_for_company.
+                            let pick = grp[0];
+                            grp.forEach(x => {
+                                if (x.value === 'false') pick = x;
+                            });
+                            pick.checked = true;
+                            pick.dispatchEvent(new Event('input', {bubbles:true}));
+                            pick.dispatchEvent(new Event('change', {bubbles:true}));
+                            pick.click();
+                        }
+                        handled.add(n);
+                    });
+
                     // Remove required from everything
                     document.querySelectorAll('[required]').forEach((el) => {
                         el.removeAttribute('required');
@@ -2505,16 +2576,31 @@ class GitLabTrialAutomator:
 
         await self._human_pause(page, 200, 400)
 
-        # "Just me" radio
+        # "What would you like to do?" — Joining project radios
+        # (Added ~2025; required field: "Create a new project" or "Join existing")
         await self._click_first_visible(
             page,
             [
+                '[data-testid="create-a-new-project-radio"]',
+                'label:has-text("Create a new project")',
+                'label:has-text("Créer un nouveau projet")',
+                'input[name*="joining_project"][value="false"]',
+                'input[name*="joining_project"]',
+            ],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # "Setup for company" — "Just me" radio
+        await self._click_first_visible(
+            page,
+            [
+                '[data-testid="setup-for-just-me-radio"]',
+                '[data-testid="setup-for-just-me-content"]',
                 'label:has-text("Just me")',
                 'label:has-text("Juste moi")',
+                'input[name*="setup_for_company"][value="false"]',
                 'input[value="just_me"]',
                 'input[value="myself"]',
-                '[data-testid="radio-just-me"]',
-                'input[type="radio"]',
             ],
         )
         await self._human_pause(page, 300, 500)
@@ -2557,6 +2643,25 @@ class GitLabTrialAutomator:
                         sel.removeAttribute('required');
                         sel.removeAttribute('aria-required');
                     });
+                    // Final sweep: force-check unchecked radio groups.
+                    const doneGrp = new Set();
+                    document.querySelectorAll('input[type="radio"]').forEach((r) => {
+                        const n = r.getAttribute('name');
+                        if (!n || doneGrp.has(n)) return;
+                        const grp = document.querySelectorAll(
+                            `input[type="radio"][name="${CSS.escape(n)}"]`
+                        );
+                        let any = false;
+                        grp.forEach(x => { if (x.checked) any = true; });
+                        if (!any && grp.length > 0) {
+                            let pick = grp[0];
+                            grp.forEach(x => { if (x.value === 'false') pick = x; });
+                            pick.checked = true;
+                            pick.dispatchEvent(new Event('change', {bubbles:true}));
+                        }
+                        doneGrp.add(n);
+                    });
+
                     document.querySelectorAll('[required]').forEach(
                         el => { el.removeAttribute('required'); el.removeAttribute('aria-required'); }
                     );
@@ -2714,6 +2819,24 @@ class GitLabTrialAutomator:
                             if (!form) return false;
                             form.noValidate = true;
                             form.setAttribute('novalidate', 'true');
+                            // Force-check unchecked radio groups inside form.
+                            const dg = new Set();
+                            form.querySelectorAll('input[type="radio"]').forEach((r) => {
+                                const n = r.getAttribute('name');
+                                if (!n || dg.has(n)) return;
+                                const grp = form.querySelectorAll(
+                                    `input[type="radio"][name="${CSS.escape(n)}"]`
+                                );
+                                let any = false;
+                                grp.forEach(x => { if (x.checked) any = true; });
+                                if (!any && grp.length > 0) {
+                                    let pick = grp[0];
+                                    grp.forEach(x => { if (x.value === 'false') pick = x; });
+                                    pick.checked = true;
+                                    pick.dispatchEvent(new Event('change', {bubbles:true}));
+                                }
+                                dg.add(n);
+                            });
                             // Strip required from everything inside.
                             form.querySelectorAll('[required]').forEach(
                                 el => { el.removeAttribute('required'); el.removeAttribute('aria-required'); }
@@ -2833,14 +2956,22 @@ class GitLabTrialAutomator:
         # Phone – leave blank (optional), just skip.
 
         # Continue
+        pre_url = page.url
         await self._safe_click_by_button_name(
             page,
             ["Continue", "Continuer", "Start your free trial", "Submit", "Commencer"],
         )
+        # Wait for actual navigation/page change rather than a fixed timeout.
         try:
-            await page.wait_for_timeout(2500)
-        except Exception as e:
-            self.console.print(f"[dim]Company step wait failed: {e}[/dim]")
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        # Extra guard: if the URL hasn't changed, wait a bit longer for SPA routing.
+        try:
+            if page.url == pre_url:
+                await page.wait_for_timeout(3000)
+        except Exception:
+            pass
         lib_logger.info("Onboarding: company step completed")
         self.console.print("[green]Company step done.[/green]")
         return True
@@ -3289,16 +3420,20 @@ class GitLabTrialAutomator:
                     # fetching for lazy-loaded option lists.
                     await page.wait_for_timeout(1500)
 
-                    # Wait for any option elements to appear in the DOM
+                    # Wait for option elements to appear in the DOM.
+                    # GitLab dropdowns lazy-load options, so we need a
+                    # generous timeout here.
                     try:
                         await page.wait_for_selector(
                             '[role="option"], .dropdown-item, '
                             ".gl-dropdown-item, .gl-listbox-item, "
                             '[role="menuitem"]',
-                            timeout=3000,
+                            state="visible",
+                            timeout=6000,
                         )
                     except Exception:
-                        pass
+                        # Options may be slow — give a final extra wait
+                        await page.wait_for_timeout(2000)
 
                     if await self._pick_option_from_open_listbox(
                         page,
@@ -3622,13 +3757,24 @@ class GitLabTrialAutomator:
         return None
 
     async def _create_group_via_ui(self, page: Any, group_slug: str) -> bool:
-        await page.goto(GROUP_CREATE_URL, wait_until="domcontentloaded", timeout=90000)
+        await page.goto(GROUP_CREATE_URL, wait_until="networkidle", timeout=90000)
         await self._dismiss_cookie_banners(page)
 
         await self._safe_click_by_button_name(
             page,
             ["Create group", "Create a group", "Create blank group", "Continue"],
         )
+
+        # Wait for the group-creation form to actually render after the click.
+        for _sel in ["#group_name", 'input[name="group[name]"]']:
+            try:
+                await page.wait_for_selector(_sel, state="visible", timeout=8000)
+                break
+            except Exception:
+                pass
+        else:
+            # Extra fallback — give the SPA a moment to settle
+            await page.wait_for_timeout(3000)
 
         if not await self._safe_fill(
             page,
@@ -3637,12 +3783,15 @@ class GitLabTrialAutomator:
         ):
             return False
 
+        await self._human_pause(page, 300, 500)
+
         await self._safe_fill(
             page,
             ["#group_path", 'input[name="group[path]"]'],
             group_slug,
         )
 
+        pre_url = page.url
         clicked = await self._safe_click_by_button_name(
             page,
             ["Create group", "Create", "Continue"],
@@ -3650,10 +3799,13 @@ class GitLabTrialAutomator:
         if not clicked:
             return False
 
+        # Wait for navigation after group creation submit
         try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        if page.url == pre_url:
             await page.wait_for_timeout(3000)
-        except Exception as e:
-            self.console.print(f"[dim]Group creation wait failed: {e}[/dim]")
         return "/groups/new" not in page.url
 
     async def _list_owned_top_level_groups(
@@ -3834,12 +3986,19 @@ class GitLabTrialAutomator:
             # Phone number (optional, skip)
 
             # Submit
+            pre_url = page.url
             await self._safe_click_by_button_name(
                 page,
                 ["Start your free trial", "Continue", "Start free trial",
                  "Submit", "Commencer", "Continuer"],
             )
-            await page.wait_for_timeout(5000)
+            # Wait for the backend to process the trial activation form.
+            try:
+                await page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            if page.url == pre_url:
+                await page.wait_for_timeout(5000)
 
             final_url = page.url
             lib_logger.info("Trial activation form submitted, now at: %s", final_url)
@@ -3959,7 +4118,8 @@ class GitLabTrialAutomator:
                 )
                 created = await self._create_group_via_ui(page, group_slug)
                 if created:
-                    await asyncio.sleep(2)
+                    # Give GitLab's backend time to propagate the new group
+                    await asyncio.sleep(5)
                     try:
                         groups = await self._list_owned_top_level_groups(access_token)
                     except Exception:
