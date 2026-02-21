@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import platform as _platform_mod
 import random
 import secrets
 import time
@@ -37,6 +38,14 @@ lib_logger = logging.getLogger("rotator_library")
 
 # Cache subdirectory for device profiles
 DEVICE_PROFILES_SUBDIR = "device_profiles"
+
+# =============================================================================
+# PER-LAUNCH SESSION ID (matches real Antigravity: new UUID per extension activation)
+# =============================================================================
+
+# Generated once at module import time — unique per process lifetime.
+# Real Antigravity creates a new session ID each time the extension activates.
+LAUNCH_SESSION_ID: str = str(uuid.uuid4())
 
 # =============================================================================
 # FINGERPRINT CONSTANTS
@@ -93,6 +102,55 @@ IDE_TYPES = [
     #"ANDROID_STUDIO",
     #"CLOUD_SHELL_EDITOR",
 ]
+
+
+# =============================================================================
+# RUNTIME OS & HARDWARE DETECTION (zerogravity PR #52 / PR #50)
+# =============================================================================
+
+def _get_os_name() -> str:
+    """
+    Get OS name for Metadata proto field 5.
+
+    Returns consistent names matching what the real Antigravity LS sends:
+    'macOS', 'Linux', or 'Windows'. Always returns 'macOS' for stealth
+    consistency with our platform spoofing.
+    """
+    # Spoof as macOS to match our platform spoofing (darwin UA, MACOS metadata)
+    return "macOS"
+
+
+def _get_hardware_arch() -> str:
+    """
+    Get hardware architecture for Metadata proto field 8.
+
+    Uses runtime detection (like ZG's std::env::consts::ARCH) instead of
+    hardcoded values. This fixes ARM builds sending wrong arch.
+    """
+    machine = _platform_mod.machine().lower()
+    # Map Python platform.machine() values to Go-style arch names
+    arch_map = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "armv7l": "arm",
+    }
+    return arch_map.get(machine, machine)
+
+
+def _is_valid_uuid(value: str) -> bool:
+    """
+    Validate that a string is a properly formatted UUID.
+
+    Used to validate device fingerprints read from disk, matching
+    zerogravity's UUID format validation (commit cc5bd3c).
+    """
+    try:
+        uuid.UUID(value.strip())
+        return True
+    except (ValueError, AttributeError):
+        return False
 
 
 # =============================================================================
@@ -452,13 +510,19 @@ def build_fingerprint_headers(fp: DeviceFingerprint) -> Dict[str, str]:
         Dict with User-Agent, X-Goog-Api-Client, Client-Metadata,
         X-Goog-QuotaUser, X-Client-Device-Id
     """
+    # RE-confirmed from extension.js proto definitions (zerogravity PR #52):
+    # Metadata includes os, hardware, session_id, device_fingerprint fields
     client_metadata = {
         "ideType": fp.ide_type,
         "platform": fp.platform,
         "pluginType": fp.plugin_type,
         "osVersion": fp.os_version,
         "arch": fp.arch,
+        "os": _get_os_name(),              # RE-confirmed: field 5 in Metadata proto
+        "hardware": _get_hardware_arch(),   # RE-confirmed: field 8 in Metadata proto
         "sqmId": fp.sqm_id,
+        "sessionId": LAUNCH_SESSION_ID,     # RE-confirmed: field 10 — per-launch UUID
+        "deviceFingerprint": fp.device_id,  # RE-confirmed: field 24 — installationId
     }
 
     return {
@@ -580,9 +644,16 @@ def get_or_create_fingerprint(
     """
     data = load_credential_device_data(email)
 
-    # Check for existing fingerprint
+    # Check for existing fingerprint with UUID format validation (zerogravity cc5bd3c)
     if data and data.current_fingerprint:
-        return data.current_fingerprint
+        fp = data.current_fingerprint
+        if fp.device_id and not _is_valid_uuid(fp.device_id):
+            lib_logger.warning(
+                f"Invalid UUID format in device_id for {email}: {fp.device_id!r}, "
+                f"regenerating fingerprint"
+            )
+            return bind_new_fingerprint(email, label="regenerated_invalid_uuid")
+        return fp
 
     # Check for legacy profile and upgrade (silent upgrade)
     if data and data.current_profile:

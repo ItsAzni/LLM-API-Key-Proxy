@@ -132,7 +132,7 @@ BASE_URLS = [
 _ANTIGRAVITY_VERSION = "1.107.0"
 _CHROME_VERSION = "142.0.7444.175"
 _ELECTRON_VERSION = "39.2.3"
-_CLIENT_VERSION = "1.16.5"
+_CLIENT_VERSION = "1.18.4"
 _CHROME_MAJOR = _CHROME_VERSION.split(".")[0] if _CHROME_VERSION else "142"
 
 # Runtime-mutable versions (set by fetch_latest_version at startup)
@@ -519,6 +519,336 @@ def get_model_rate_limiter() -> ModelRateLimiter:
     if _model_rate_limiter is None:
         _model_rate_limiter = ModelRateLimiter()
     return _model_rate_limiter
+
+
+# =============================================================================
+# BAN SIGNAL DETECTOR (ported from ZeroGravity quota.rs / detection-intel.md)
+# =============================================================================
+# Parses API error responses for ban/restriction signals.
+# Confirmed detection fields from LS binary RE (zerogravity PR #50, PR #52):
+#   - isRevoked: account key has been revoked
+#   - userDataCollectionForceDisabled: account flagged for abuse
+#   - restricted: account is restricted (softer than ban)
+#   - noticeText: warning/ban notice from Google
+#   - HTTP 403 with TOS keywords: permanent ban, do NOT retry
+# =============================================================================
+
+# How long to cool down a banned credential (seconds)
+BAN_COOLDOWN_SECONDS = env_int("ANTIGRAVITY_BAN_COOLDOWN_SECONDS", 3600)  # 1 hour default
+
+# Keywords in 403 bodies that indicate a TOS ban (permanent, do not retry)
+_TOS_BAN_KEYWORDS = [
+    "TERMS_OF_SERVICE",
+    "termsOfService",
+    "terms of service",
+    "tos_violation",
+    "abuse",
+    "suspended",
+    "disabled",
+]
+
+
+class BanSignalDetector:
+    """
+    Detects ban/restriction signals from Google API responses.
+
+    Ported from zerogravity quota.rs (PR #50 commit a40de8d).
+    Parses error response bodies for ban indicators and tracks which
+    credentials have been banned to prevent re-triggering on every request.
+
+    Detection targets (RE-confirmed from LS binary strings analysis):
+      - isRevoked: key revoked
+      - userDataCollectionForceDisabled: abuse flag
+      - restricted: soft restriction
+      - noticeText: human-readable warning/ban notice
+      - HTTP 403 + TOS keywords: permanent ban
+    """
+
+    def __init__(self):
+        # {credential_identifier: {"banned_at": float, "reason": str, "notice": str|None}}
+        self._banned_credentials: Dict[str, Dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+        # Debounce: prevent logging the same ban signal every request
+        self._last_logged: Dict[str, float] = {}
+        self._log_debounce_seconds = 300  # Only re-log same credential ban every 5 min
+
+    async def check_response_for_ban(
+        self,
+        credential_id: str,
+        status_code: int,
+        response_body: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Parse an API error response for ban/restriction signals.
+
+        Args:
+            credential_id: The credential identifier (email hash or path)
+            status_code: HTTP status code
+            response_body: Raw response body text
+
+        Returns:
+            Dict with ban info if detected, None otherwise.
+            Keys: "banned" (bool), "restricted" (bool), "reason" (str),
+                  "notice_text" (str|None), "permanent" (bool)
+        """
+        result = self._parse_ban_signals(status_code, response_body)
+        if not result:
+            return None
+
+        is_banned = result.get("banned", False)
+        is_restricted = result.get("restricted", False)
+
+        if not is_banned and not is_restricted:
+            return None
+
+        async with self._lock:
+            now = time.time()
+
+            # Debounce logging — don't spam for same credential
+            last = self._last_logged.get(credential_id, 0)
+            should_log = (now - last) > self._log_debounce_seconds
+
+            if is_banned:
+                self._banned_credentials[credential_id] = {
+                    "banned_at": now,
+                    "reason": result.get("reason", "unknown"),
+                    "notice": result.get("notice_text"),
+                    "permanent": result.get("permanent", False),
+                }
+                if should_log:
+                    self._last_logged[credential_id] = now
+                    notice_msg = f" Notice: {result['notice_text']}" if result.get("notice_text") else ""
+                    lib_logger.warning(
+                        f"🚫 BAN DETECTED on credential {credential_id[:16]}...: "
+                        f"{result['reason']}.{notice_msg} "
+                        f"Cooldown: {BAN_COOLDOWN_SECONDS}s"
+                    )
+
+            elif is_restricted:
+                if should_log:
+                    self._last_logged[credential_id] = now
+                    lib_logger.warning(
+                        f"⚠️  RESTRICTION detected on credential {credential_id[:16]}...: "
+                        f"{result.get('reason', 'restricted')}"
+                    )
+
+        return result
+
+    def _parse_ban_signals(
+        self, status_code: int, body: str
+    ) -> Optional[Dict[str, Any]]:
+        """Parse response body for ban/restriction signals."""
+        result: Dict[str, Any] = {
+            "banned": False,
+            "restricted": False,
+            "reason": "",
+            "notice_text": None,
+            "permanent": False,
+        }
+
+        # 1. HTTP 403 with TOS keywords = permanent ban
+        if status_code == 403:
+            body_lower = body.lower()
+            for keyword in _TOS_BAN_KEYWORDS:
+                if keyword.lower() in body_lower:
+                    result["banned"] = True
+                    result["permanent"] = True
+                    result["reason"] = f"403 TOS violation ({keyword})"
+                    return result
+
+        # 2. Parse JSON body for structured ban signals
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        # Navigate into error response structure
+        # Google API errors can be nested in various ways
+        error_obj = data
+        if "error" in data:
+            error_obj = data["error"]
+        if "userStatus" in data:
+            error_obj = data["userStatus"]
+
+        # isRevoked = key has been revoked (permanent ban)
+        if error_obj.get("isRevoked") is True:
+            result["banned"] = True
+            result["permanent"] = True
+            result["reason"] = "isRevoked"
+
+        # userDataCollectionForceDisabled = abuse flag (ban)
+        if error_obj.get("userDataCollectionForceDisabled") is True:
+            result["banned"] = True
+            result["permanent"] = True
+            result["reason"] = result["reason"] or "userDataCollectionForceDisabled"
+
+        # restricted = soft restriction
+        if error_obj.get("restricted") is True:
+            result["restricted"] = True
+            result["reason"] = result["reason"] or "restricted"
+
+        # noticeText = human-readable warning/ban notice
+        notice = error_obj.get("noticeText") or error_obj.get("notice_text")
+        if notice and isinstance(notice, str):
+            result["notice_text"] = notice
+            # If we have a notice but no other signals, still flag as restricted
+            if not result["banned"] and not result["restricted"]:
+                result["restricted"] = True
+                result["reason"] = f"noticeText: {notice[:100]}"
+
+        if result["banned"] or result["restricted"]:
+            return result
+
+        return None
+
+    async def is_credential_banned(self, credential_id: str) -> bool:
+        """Check if a credential is currently known to be banned."""
+        async with self._lock:
+            ban_info = self._banned_credentials.get(credential_id)
+            if not ban_info:
+                return False
+
+            # Permanent bans don't expire
+            if ban_info.get("permanent"):
+                return True
+
+            # Non-permanent bans expire after cooldown
+            elapsed = time.time() - ban_info["banned_at"]
+            if elapsed < BAN_COOLDOWN_SECONDS:
+                return True
+
+            # Cooldown expired — remove from tracked bans
+            del self._banned_credentials[credential_id]
+            return False
+
+    async def clear_ban(self, credential_id: str) -> None:
+        """Clear ban status for a credential (e.g., after rotation/re-auth)."""
+        async with self._lock:
+            self._banned_credentials.pop(credential_id, None)
+            self._last_logged.pop(credential_id, None)
+
+    def get_banned_credentials(self) -> Dict[str, Dict[str, Any]]:
+        """Get a snapshot of all currently banned credentials (for status/debug)."""
+        return dict(self._banned_credentials)
+
+
+# Global ban signal detector instance
+_ban_detector: Optional[BanSignalDetector] = None
+
+
+def get_ban_detector() -> BanSignalDetector:
+    """Get or create the global ban signal detector."""
+    global _ban_detector
+    if _ban_detector is None:
+        _ban_detector = BanSignalDetector()
+    return _ban_detector
+
+
+# =============================================================================
+# CREDENTIAL EXHAUSTION TRACKER / PARK MODE
+# (ported from ZeroGravity quota.rs park mode + rotation.rs)
+# =============================================================================
+# When all credentials for Antigravity have been rate-limited or banned in
+# rapid succession, we enter "park mode" — stop rotating to avoid the
+# warmup/restart detection signal cascade (zerogravity detection-intel.md).
+#
+# Real users don't switch accounts 5x/day from the same IP. Each credential
+# failure + retry looks like machine-speed automated rotation to Google.
+# Park mode waits for natural cooldown expiry instead of burning through keys.
+# =============================================================================
+
+# Park mode auto-engages after this many consecutive credential failures
+PARK_MODE_THRESHOLD = env_int("ANTIGRAVITY_PARK_MODE_THRESHOLD", 0)  # 0 = auto (= num credentials)
+
+
+class CredentialExhaustionTracker:
+    """
+    Tracks consecutive credential failures to detect full-provider exhaustion.
+
+    When all credentials fail without any success in between, enters "park mode"
+    where the provider logs a warning and returns errors immediately instead of
+    cycling through cooled-down credentials (which generates detection signals).
+
+    Ported from zerogravity quota.rs park mode (commit a40de8d).
+    """
+
+    def __init__(self):
+        self._consecutive_failures: int = 0
+        self._total_credentials: int = 0
+        self._parked: bool = False
+        self._parked_since: float = 0
+        self._parked_warned: bool = False
+        self._lock = asyncio.Lock()
+
+    def set_credential_count(self, count: int) -> None:
+        """Set the total number of credentials for this provider."""
+        self._total_credentials = count
+
+    @property
+    def is_parked(self) -> bool:
+        """Check if provider is currently in park mode."""
+        return self._parked
+
+    async def record_failure(self, credential_id: str, reason: str = "") -> bool:
+        """
+        Record a credential failure. Returns True if park mode was just activated.
+
+        Args:
+            credential_id: The credential that failed
+            reason: Optional reason for the failure
+
+        Returns:
+            True if this failure triggered park mode activation
+        """
+        async with self._lock:
+            self._consecutive_failures += 1
+            threshold = PARK_MODE_THRESHOLD or self._total_credentials
+            if threshold <= 0:
+                return False
+
+            if not self._parked and self._consecutive_failures >= threshold:
+                self._parked = True
+                self._parked_since = time.time()
+                lib_logger.warning(
+                    f"🅿️  PARK MODE ACTIVATED — all {threshold} credentials exhausted. "
+                    f"Waiting for natural cooldown recovery. "
+                    f"Last failure: {reason[:100] if reason else 'unknown'}"
+                )
+                return True
+            return False
+
+    async def record_success(self) -> None:
+        """Record a successful request — clears park mode and failure counter."""
+        async with self._lock:
+            if self._parked:
+                elapsed = time.time() - self._parked_since
+                lib_logger.info(
+                    f"✅ PARK MODE CLEARED — credential recovered after {elapsed:.0f}s"
+                )
+            self._consecutive_failures = 0
+            self._parked = False
+            self._parked_warned = False
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get park mode status for diagnostics."""
+        return {
+            "parked": self._parked,
+            "consecutive_failures": self._consecutive_failures,
+            "total_credentials": self._total_credentials,
+            "parked_since": self._parked_since if self._parked else None,
+        }
+
+
+# Global exhaustion tracker
+_exhaustion_tracker: Optional[CredentialExhaustionTracker] = None
+
+
+def get_exhaustion_tracker() -> CredentialExhaustionTracker:
+    """Get or create the global credential exhaustion tracker."""
+    global _exhaustion_tracker
+    if _exhaustion_tracker is None:
+        _exhaustion_tracker = CredentialExhaustionTracker()
+    return _exhaustion_tracker
 
 
 # =============================================================================
@@ -2203,11 +2533,23 @@ class AntigravityProvider(
         """
         return None
 
-    # NOTE: initialize_credentials() is inherited from GeminiCredentialManager mixin
     # NOTE: get_background_job_config() is inherited from GeminiCredentialManager mixin
     # NOTE: run_background_job() is inherited from GeminiCredentialManager mixin
     # NOTE: _load_persisted_tiers() is inherited from GeminiCredentialManager mixin
     # NOTE: _post_auth_discovery() is inherited from AntigravityAuthBase
+
+    async def initialize_credentials(self, credential_paths: List[str]) -> None:
+        """
+        Initialize credentials and set up park mode tracking.
+
+        Extends parent to also initialize the exhaustion tracker with the
+        credential count, for park mode detection (zerogravity quota.rs).
+        """
+        # Initialize exhaustion tracker with credential count
+        get_exhaustion_tracker().set_credential_count(len(credential_paths))
+
+        # Call parent implementation (GeminiCredentialManager)
+        await super().initialize_credentials(credential_paths)
 
     # =========================================================================
     # MODEL UTILITIES
@@ -5448,6 +5790,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     max_tokens,
                     reasoning_effort,
                     tool_choice,
+                    credential_path=credential_path,
                 )
 
                 if stream:
@@ -5467,6 +5810,30 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         f"429 quota error - not retrying on fallback URL: {e}"
                     )
                     raise
+
+                # Check for ban signals before trying fallback URLs
+                # (zerogravity detection-intel.md: 403 TOS bans are permanent, don't retry)
+                if e.response.status_code in (403, 401):
+                    error_body = ""
+                    try:
+                        error_body = (
+                            e.response.text if hasattr(e.response, "text") else ""
+                        )
+                    except Exception:
+                        pass
+                    if error_body:
+                        ban_result = await get_ban_detector().check_response_for_ban(
+                            credential_path, e.response.status_code, error_body
+                        )
+                        if ban_result and ban_result.get("banned"):
+                            raise TransientQuotaError(
+                                provider="antigravity",
+                                model=model,
+                                message=(
+                                    f"Credential banned: {ban_result.get('reason', 'unknown')}. "
+                                    f"{'PERMANENT' if ban_result.get('permanent') else f'Cooldown: {BAN_COOLDOWN_SECONDS}s'}"
+                                ),
+                            )
 
                 # Other HTTP errors (403, 500, etc.) - try fallback URL
                 if self._try_next_base_url():
@@ -5764,6 +6131,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         )
 
                         yield litellm.ModelResponse(**openai_chunk)
+                        if not accumulator.get("yielded_any"):
+                            # First successful chunk — clear park mode
+                            await get_exhaustion_tracker().record_success()
                         accumulator["yielded_any"] = True
                     except json.JSONDecodeError:
                         if file_logger:
@@ -5866,6 +6236,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         max_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        credential_path: Optional[str] = None,
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
         """
         Wrapper around _handle_streaming that retries on empty responses, 429s,
@@ -6145,10 +6516,42 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         continue
 
                     # Has retry info but no inline retry - propagate for cooldown/rotation.
+                    # Record failure for park mode tracking (zerogravity quota.rs)
+                    await get_exhaustion_tracker().record_failure(
+                        credential_path or model, f"429 quota exhausted on {model}"
+                    )
                     lib_logger.debug(
                         f"429 with retry info - propagating for cooldown: {e}"
                     )
                     raise
+                # Check all HTTP error responses for ban signals
+                # (zerogravity detection-intel.md: 403 TOS, isRevoked, etc.)
+                if e.response.status_code in (403, 401, 400):
+                    error_body = ""
+                    try:
+                        error_body = (
+                            e.response.text if hasattr(e.response, "text") else ""
+                        )
+                    except Exception:
+                        pass
+                    if error_body and credential_path:
+                        ban_result = await get_ban_detector().check_response_for_ban(
+                            credential_path, e.response.status_code, error_body
+                        )
+                        if ban_result and ban_result.get("banned"):
+                            # Record failure for park mode + propagate for cooldown
+                            await get_exhaustion_tracker().record_failure(
+                                credential_path, f"banned: {ban_result.get('reason', 'unknown')}"
+                            )
+                            raise TransientQuotaError(
+                                provider="antigravity",
+                                model=model,
+                                message=(
+                                    f"Credential banned: {ban_result.get('reason', 'unknown')}. "
+                                    f"{'PERMANENT' if ban_result.get('permanent') else f'Cooldown: {BAN_COOLDOWN_SECONDS}s'}"
+                                ),
+                            )
+
                 # Other HTTP errors - raise immediately (let caller handle)
                 raise
 
