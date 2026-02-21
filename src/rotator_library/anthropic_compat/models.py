@@ -18,6 +18,7 @@ class AnthropicTextBlock(BaseModel):
 
     type: str = "text"
     text: str
+    cache_control: Optional[dict] = None
 
 
 class AnthropicImageSource(BaseModel):
@@ -33,6 +34,7 @@ class AnthropicImageBlock(BaseModel):
 
     type: str = "image"
     source: AnthropicImageSource
+    cache_control: Optional[dict] = None
 
 
 class AnthropicToolUseBlock(BaseModel):
@@ -51,6 +53,7 @@ class AnthropicToolResultBlock(BaseModel):
     tool_use_id: str
     content: Union[str, List[Any]]
     is_error: Optional[bool] = None
+    cache_control: Optional[dict] = None
 
 
 # --- Message and Tool Definitions ---
@@ -78,6 +81,7 @@ class AnthropicTool(BaseModel):
     name: str
     description: Optional[str] = None
     input_schema: dict
+    cache_control: Optional[dict] = None
 
 
 class AnthropicThinkingConfig(BaseModel):

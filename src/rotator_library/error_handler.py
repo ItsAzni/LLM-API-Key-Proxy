@@ -864,7 +864,9 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 )
             # Apply minimum cooldown for GitHub Copilot only - it may return
             # sub-second retry values that cause retry storms
-            effective_retry = retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+            effective_retry = (
+                retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+            )
             if provider == "github_copilot":
                 effective_retry = max(effective_retry, COOLDOWN_RATE_LIMIT_MIN)
             return ClassifiedError(
@@ -943,13 +945,32 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 except Exception:
                     pass
 
-            # Apply default 30s cooldown for all server errors
-            # This prevents rapid retries against overloaded/erroring servers
+            # Treat explicit overload signals like a transient rate-limit so we
+            # can rotate credentials after short inline retries.
+            overload_markers = (
+                "overloaded_error",
+                '"message": "overloaded"',
+                "model_capacity_exhausted",
+            )
+            is_overloaded = any(marker in error_body for marker in overload_markers)
+            if is_overloaded:
+                retry_after = 12
+                parsed_retry = get_retry_after(e)
+                if parsed_retry is not None and parsed_retry > 0:
+                    retry_after = max(parsed_retry, 12)
+                return ClassifiedError(
+                    error_type="rate_limit",
+                    original_exception=e,
+                    status_code=429,
+                    retry_after=retry_after,
+                )
+
+            # Apply server-error cooldown to prevent retry storms.
             return ClassifiedError(
                 error_type="server_error",
                 original_exception=e,
                 status_code=status_code,
-                retry_after=30,  # Default 30s cooldown for server errors
+                retry_after=30,
             )
 
     if isinstance(
@@ -1016,7 +1037,9 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 quota_id=quota_id,
             )
         # Apply minimum cooldown for GitHub Copilot only
-        effective_retry = retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+        effective_retry = (
+            retry_after if retry_after is not None else COOLDOWN_RATE_LIMIT_DEFAULT
+        )
         if provider == "github_copilot":
             effective_retry = max(effective_retry, COOLDOWN_RATE_LIMIT_MIN)
         return ClassifiedError(
@@ -1063,6 +1086,16 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             status_code=status_code or 503,
             retry_after=30,  # Default 30s cooldown for server errors
         )
+
+    if isinstance(e, RuntimeError):
+        err = str(e).lower()
+        if "overloaded_error" in err or "overloaded" in err:
+            return ClassifiedError(
+                error_type="rate_limit",
+                original_exception=e,
+                status_code=status_code or 429,
+                retry_after=12,
+            )
 
     # Fallback for any other unclassified errors
     return ClassifiedError(

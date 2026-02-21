@@ -118,6 +118,39 @@ def get_failure_logger() -> logging.Logger:
 # Get the main library logger for concise, propagated messages
 main_lib_logger = logging.getLogger("rotator_library")
 
+SENSITIVE_HEADER_KEYS = {
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-auth-token",
+    "cookie",
+    "set-cookie",
+}
+
+
+def _sanitize_request_headers(headers: Optional[dict]) -> Optional[dict]:
+    """Redact sensitive header values before writing failure logs."""
+    if not isinstance(headers, dict):
+        return headers
+
+    sanitized = {}
+    for key, value in headers.items():
+        key_str = str(key)
+        key_lower = key_str.lower()
+        if key_lower not in SENSITIVE_HEADER_KEYS:
+            sanitized[key_str] = value
+            continue
+
+        if key_lower in {"authorization", "proxy-authorization"} and isinstance(
+            value, str
+        ):
+            scheme = value.split(" ", 1)[0] if " " in value else ""
+            sanitized[key_str] = f"{scheme} ***REDACTED***".strip()
+        else:
+            sanitized[key_str] = "***REDACTED***"
+
+    return sanitized
+
 
 def _extract_response_body(error: Exception) -> str:
     """
@@ -231,7 +264,7 @@ def log_failure(
         "raw_response": raw_response[:FAILURE_LOG_RAW_RESPONSE_LIMIT]
         if raw_response
         else None,
-        "request_headers": request_headers,
+        "request_headers": _sanitize_request_headers(request_headers),
         "error_chain": error_chain if len(error_chain) > 1 else None,
     }
 

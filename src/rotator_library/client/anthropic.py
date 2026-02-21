@@ -11,7 +11,7 @@ Anthropic's Messages API format with the credential rotation system.
 import json
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional, Callable, cast
 
 from ..anthropic_compat import (
     AnthropicMessagesRequest,
@@ -56,7 +56,7 @@ class AnthropicHandler:
         self,
         request: AnthropicMessagesRequest,
         raw_request: Optional[Any] = None,
-        pre_request_callback: Optional[callable] = None,
+        pre_request_callback: Optional[Callable[..., Any]] = None,
     ) -> Any:
         """
         Handle Anthropic Messages API requests.
@@ -98,8 +98,26 @@ class AnthropicHandler:
         # Translate Anthropic request to OpenAI format
         openai_request = translate_anthropic_request(request)
 
+        # Forward selected Anthropic headers from the incoming request so provider
+        # plugins can preserve behavior like prompt-caching scope betas.
+        if raw_request is not None and hasattr(raw_request, "headers"):
+            forwarded_headers = {}
+            anthropic_beta = raw_request.headers.get("anthropic-beta")
+            anthropic_version = raw_request.headers.get("anthropic-version")
+            if anthropic_beta:
+                forwarded_headers["anthropic-beta"] = anthropic_beta
+            if anthropic_version:
+                forwarded_headers["anthropic-version"] = anthropic_version
+
+            if forwarded_headers:
+                existing = openai_request.get("extra_headers")
+                if isinstance(existing, dict):
+                    forwarded_headers = {**existing, **forwarded_headers}
+                openai_request["extra_headers"] = forwarded_headers
+
         # DEBUG: trace thinking config from Anthropic request
         import logging as _logging
+
         _logging.getLogger("rotator_library").info(
             "[AnthropicHandler] request.thinking=%s, max_tokens=%s, model=%s",
             request.thinking,
@@ -148,12 +166,13 @@ class AnthropicHandler:
                 pre_request_callback=pre_request_callback,
                 **openai_request,
             )
+            response_obj = cast(Any, response)
 
             # Convert OpenAI response to Anthropic format
             openai_response = (
-                response.model_dump()
-                if hasattr(response, "model_dump")
-                else dict(response)
+                response_obj.model_dump()
+                if hasattr(response_obj, "model_dump")
+                else dict(response_obj)
             )
             anthropic_response = openai_to_anthropic_response(
                 openai_response, original_model

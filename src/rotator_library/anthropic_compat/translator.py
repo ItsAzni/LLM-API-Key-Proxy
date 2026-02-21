@@ -160,7 +160,9 @@ def _reorder_assistant_content(content: List[dict]) -> List[dict]:
 
 
 def anthropic_to_openai_messages(
-    anthropic_messages: List[dict], system: Optional[Union[str, List[dict]]] = None
+    anthropic_messages: List[dict],
+    system: Optional[Union[str, List[dict]]] = None,
+    preserve_cache_control: bool = False,
 ) -> List[dict]:
     """
     Convert Anthropic message format to OpenAI format.
@@ -183,14 +185,35 @@ def anthropic_to_openai_messages(
         if isinstance(system, str):
             openai_messages.append({"role": "system", "content": system})
         elif isinstance(system, list):
-            # System can be list of text blocks in Anthropic format
-            system_text = " ".join(
-                block.get("text", "")
-                for block in system
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-            if system_text:
-                openai_messages.append({"role": "system", "content": system_text})
+            if preserve_cache_control:
+                # Preserve system content blocks (including cache_control) instead of
+                # flattening into a string.
+                system_blocks = []
+                for block in system:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type", "text")
+                    if block_type != "text":
+                        continue
+                    text = block.get("text", "")
+                    if not text:
+                        continue
+                    out_block = {"type": "text", "text": text}
+                    if "cache_control" in block:
+                        out_block["cache_control"] = block["cache_control"]
+                    system_blocks.append(out_block)
+
+                if system_blocks:
+                    openai_messages.append({"role": "system", "content": system_blocks})
+            else:
+                # Compatibility path for providers that expect string system content.
+                system_text = " ".join(
+                    block.get("text", "")
+                    for block in system
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                if system_text:
+                    openai_messages.append({"role": "system", "content": system_text})
 
     for msg in anthropic_messages:
         role = msg.get("role", "user")
@@ -215,15 +238,18 @@ def anthropic_to_openai_messages(
                     block_type = block.get("type", "text")
 
                     if block_type == "text":
-                        openai_content.append(
-                            {"type": "text", "text": block.get("text", "")}
-                        )
+                        text_block = {"type": "text", "text": block.get("text", "")}
+                        if preserve_cache_control and "cache_control" in block:
+                            text_block["cache_control"] = block["cache_control"]
+                        openai_content.append(text_block)
                     elif block_type == "image":
                         # Convert Anthropic image format to OpenAI
                         converted = _convert_anthropic_source_to_openai(
                             block.get("source", {}), "image/png"
                         )
                         if converted:
+                            if preserve_cache_control and "cache_control" in block:
+                                converted["cache_control"] = block["cache_control"]
                             openai_content.append(converted)
                     elif block_type == "document":
                         # Convert Anthropic document format (e.g. PDF) to OpenAI
@@ -231,6 +257,8 @@ def anthropic_to_openai_messages(
                             block.get("source", {}), "application/pdf"
                         )
                         if converted:
+                            if preserve_cache_control and "cache_control" in block:
+                                converted["cache_control"] = block["cache_control"]
                             openai_content.append(converted)
                     elif block_type == "thinking":
                         signature = block.get("signature", "")
@@ -282,25 +310,50 @@ def anthropic_to_openai_messages(
                                     continue
                                 b_type = b.get("type", "")
                                 if b_type == "text":
-                                    tool_content_parts.append(
-                                        {"type": "text", "text": b.get("text", "")}
-                                    )
+                                    text_block = {
+                                        "type": "text",
+                                        "text": b.get("text", ""),
+                                    }
+                                    if preserve_cache_control and "cache_control" in b:
+                                        text_block["cache_control"] = b["cache_control"]
+                                    tool_content_parts.append(text_block)
                                 elif b_type == "image":
                                     converted = _convert_anthropic_source_to_openai(
                                         b.get("source", {}), "image/png"
                                     )
                                     if converted:
+                                        if (
+                                            preserve_cache_control
+                                            and "cache_control" in b
+                                        ):
+                                            converted["cache_control"] = b[
+                                                "cache_control"
+                                            ]
                                         tool_content_parts.append(converted)
                                 elif b_type == "document":
                                     converted = _convert_anthropic_source_to_openai(
                                         b.get("source", {}), "application/pdf"
                                     )
                                     if converted:
+                                        if (
+                                            preserve_cache_control
+                                            and "cache_control" in b
+                                        ):
+                                            converted["cache_control"] = b[
+                                                "cache_control"
+                                            ]
                                         tool_content_parts.append(converted)
 
                             # If we only have text parts, join them as a string for compatibility
-                            # Otherwise use the array format for multimodal content
-                            if all(p.get("type") == "text" for p in tool_content_parts):
+                            # unless any part has cache_control (must preserve block shape).
+                            has_cached_parts = preserve_cache_control and any(
+                                isinstance(p, dict) and "cache_control" in p
+                                for p in tool_content_parts
+                            )
+                            if (
+                                all(p.get("type") == "text" for p in tool_content_parts)
+                                and not has_cached_parts
+                            ):
                                 combined_text = " ".join(
                                     p.get("text", "") for p in tool_content_parts
                                 )
@@ -364,7 +417,14 @@ def anthropic_to_openai_messages(
                 openai_messages.append(msg_dict)
             elif openai_content:
                 # Check if it's just text or mixed content
-                if len(openai_content) == 1 and openai_content[0].get("type") == "text":
+                if (
+                    len(openai_content) == 1
+                    and openai_content[0].get("type") == "text"
+                    and (
+                        not preserve_cache_control
+                        or "cache_control" not in openai_content[0]
+                    )
+                ):
                     msg_dict = {
                         "role": role,
                         "content": openai_content[0].get("text", ""),
@@ -393,6 +453,7 @@ def anthropic_to_openai_messages(
 
 def anthropic_to_openai_tools(
     anthropic_tools: Optional[List[dict]],
+    preserve_cache_control: bool = False,
 ) -> Optional[List[dict]]:
     """
     Convert Anthropic tool definitions to OpenAI format.
@@ -408,16 +469,21 @@ def anthropic_to_openai_tools(
 
     openai_tools = []
     for tool in anthropic_tools:
-        openai_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.get("name", ""),
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", {}),
-                },
-            }
-        )
+        out_tool = {
+            "type": "function",
+            "function": {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {}),
+            },
+        }
+        if (
+            preserve_cache_control
+            and isinstance(tool, dict)
+            and "cache_control" in tool
+        ):
+            out_tool["cache_control"] = tool["cache_control"]
+        openai_tools.append(out_tool)
     return openai_tools
 
 
@@ -584,12 +650,20 @@ def translate_anthropic_request(request: AnthropicMessagesRequest) -> Dict[str, 
     """
     anthropic_request = request.model_dump(exclude_none=True)
 
+    provider = request.model.split("/", 1)[0].lower() if "/" in request.model else ""
+    preserve_cache_control = provider in {"gitlab_duo"}
+
     messages = anthropic_request.get("messages", [])
     openai_messages = anthropic_to_openai_messages(
-        messages, anthropic_request.get("system")
+        messages,
+        anthropic_request.get("system"),
+        preserve_cache_control=preserve_cache_control,
     )
 
-    openai_tools = anthropic_to_openai_tools(anthropic_request.get("tools"))
+    openai_tools = anthropic_to_openai_tools(
+        anthropic_request.get("tools"),
+        preserve_cache_control=preserve_cache_control,
+    )
     openai_tool_choice = anthropic_to_openai_tool_choice(
         anthropic_request.get("tool_choice")
     )

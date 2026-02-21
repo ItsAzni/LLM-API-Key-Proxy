@@ -109,17 +109,17 @@ OAUTH_REFRESH_BUFFER = 5 * 60
 # Source: https://docs.gitlab.com/subscriptions/gitlab_credits/
 CREDIT_COSTS: Dict[str, float] = {
     # Anthropic Claude models
-    "claude-opus-4-6": 1 / 0.7,       # 0.7 requests/credit → ~1.43 credits/req
-    "claude-opus-4-5": 1 / 1.2,       # 1.2 requests/credit → ~0.83 credits/req
-    "claude-sonnet-4-6": 1 / 1.1,     # ~0.91 credits/req
-    "claude-sonnet-4-5": 1 / 2.0,     # 2.0 requests/credit → 0.5 credits/req
-    "claude-haiku-4-5": 1 / 6.7,      # 6.7 requests/credit → ~0.15 credits/req
+    "claude-opus-4-6": 1 / 0.7,  # 0.7 requests/credit → ~1.43 credits/req
+    "claude-opus-4-5": 1 / 1.2,  # 1.2 requests/credit → ~0.83 credits/req
+    "claude-sonnet-4-6": 1 / 1.1,  # ~0.91 credits/req
+    "claude-sonnet-4-5": 1 / 2.0,  # 2.0 requests/credit → 0.5 credits/req
+    "claude-haiku-4-5": 1 / 6.7,  # 6.7 requests/credit → ~0.15 credits/req
     # OpenAI GPT models
-    "gpt-5-2": 1 / 2.5,               # 2.5 requests/credit → 0.4 credits/req
-    "gpt-5-1": 1 / 3.3,               # 3.3 requests/credit → ~0.30 credits/req
-    "gpt-5-mini": 1 / 8.0,            # 8.0 requests/credit → 0.125 credits/req
-    "gpt-5-2-codex": 1 / 3.3,         # codex variant → ~0.30 credits/req
-    "gpt-5-codex": 1 / 3.3,           # codex variant → ~0.30 credits/req
+    "gpt-5-2": 1 / 2.5,  # 2.5 requests/credit → 0.4 credits/req
+    "gpt-5-1": 1 / 3.3,  # 3.3 requests/credit → ~0.30 credits/req
+    "gpt-5-mini": 1 / 8.0,  # 8.0 requests/credit → 0.125 credits/req
+    "gpt-5-2-codex": 1 / 3.3,  # codex variant → ~0.30 credits/req
+    "gpt-5-codex": 1 / 3.3,  # codex variant → ~0.30 credits/req
 }
 
 # Default credits per account (Ultimate = 24/user/month, Premium = 12)
@@ -813,7 +813,15 @@ class GitLabDuoProvider(ProviderInterface):
         )
 
         api_key = kwargs.pop("credential_identifier", kwargs.pop("credential_path", ""))
-        kwargs.pop("extra_headers", None)
+        extra_headers = kwargs.pop("extra_headers", None)
+        forwarded_headers: Dict[str, str] = {}
+        if isinstance(extra_headers, dict):
+            for key, value in extra_headers.items():
+                if value is None:
+                    continue
+                key_l = str(key).lower().strip()
+                if key_l in {"anthropic-beta", "anthropic-version"}:
+                    forwarded_headers[key_l] = str(value)
 
         # Strip provider prefix
         clean_model = model.split("/", 1)[1] if "/" in model else model
@@ -864,6 +872,7 @@ class GitLabDuoProvider(ProviderInterface):
                 messages=messages,
                 stream=stream,
                 api_key=api_key,
+                forwarded_headers=forwarded_headers,
                 **filtered,
             )
         else:
@@ -963,16 +972,32 @@ class GitLabDuoProvider(ProviderInterface):
         sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)
         return sanitized if sanitized else f"toolu_{uuid.uuid4().hex[:12]}"
 
+    @staticmethod
+    def _merge_csv_header_values(*values: Optional[str]) -> Optional[str]:
+        """Merge comma-separated header values while preserving order."""
+        seen = set()
+        merged: List[str] = []
+        for value in values:
+            if not value:
+                continue
+            for part in value.split(","):
+                token = part.strip()
+                if token and token not in seen:
+                    seen.add(token)
+                    merged.append(token)
+        return ",".join(merged) if merged else None
+
     def _openai_to_anthropic_messages(
         self, messages: List[Dict[str, Any]]
-    ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    ) -> Tuple[Optional[Union[str, List[Dict[str, Any]]]], List[Dict[str, Any]]]:
         """
         Convert OpenAI-format messages to Anthropic Messages API format.
 
         Returns:
-            Tuple of (system_text, anthropic_messages)
+            Tuple of (system_content, anthropic_messages)
         """
         system_parts: List[str] = []
+        system_blocks: List[Dict[str, Any]] = []
         anthropic_msgs: List[Dict[str, Any]] = []
 
         def _ensure_role(role: str) -> Dict[str, Any]:
@@ -1046,7 +1071,10 @@ class GitLabDuoProvider(ProviderInterface):
                         if isinstance(b, dict) and b.get("type") == "text":
                             text = b.get("text", "")
                             if text:
-                                system_parts.append(text)
+                                block: Dict[str, Any] = {"type": "text", "text": text}
+                                if "cache_control" in b:
+                                    block["cache_control"] = b["cache_control"]
+                                system_blocks.append(block)
                 continue
 
             # Tool results → user message with tool_result blocks
@@ -1054,13 +1082,20 @@ class GitLabDuoProvider(ProviderInterface):
                 user_msg = _ensure_role("user")
                 tool_content = content
                 if isinstance(tool_content, list):
-                    tool_content = json.dumps(tool_content)
+                    converted_tool_content = _content_to_blocks(tool_content)
+                    tool_content = (
+                        converted_tool_content
+                        if converted_tool_content
+                        else json.dumps(tool_content)
+                    )
                 elif not isinstance(tool_content, str):
                     tool_content = str(tool_content) if tool_content else ""
                 user_msg["content"].append(
                     {
                         "type": "tool_result",
-                        "tool_use_id": self._sanitize_tool_id(msg.get("tool_call_id", "")),
+                        "tool_use_id": self._sanitize_tool_id(
+                            msg.get("tool_call_id", "")
+                        ),
                         "content": tool_content,
                     }
                 )
@@ -1112,12 +1147,20 @@ class GitLabDuoProvider(ProviderInterface):
                 user_msg = _ensure_role("user")
                 user_msg["content"].extend(_content_to_blocks(content))
 
-        system_text = "\n\n".join(system_parts) if system_parts else None
+        system_payload: Optional[Union[str, List[Dict[str, Any]]]] = None
+        if system_blocks:
+            if system_parts:
+                system_blocks.insert(
+                    0, {"type": "text", "text": "\n\n".join(system_parts)}
+                )
+            system_payload = system_blocks
+        elif system_parts:
+            system_payload = "\n\n".join(system_parts)
 
         # Fix orphaned tool_use blocks that have no matching tool_result
         anthropic_msgs = self._fix_orphaned_tool_use(anthropic_msgs)
 
-        return system_text, anthropic_msgs
+        return system_payload, anthropic_msgs
 
     @staticmethod
     def _fix_orphaned_tool_use(
@@ -1240,14 +1283,15 @@ class GitLabDuoProvider(ProviderInterface):
             name = func.get("name")
             if not name:
                 continue
-            result.append(
-                {
-                    "name": name,
-                    "description": func.get("description", ""),
-                    "input_schema": func.get("parameters")
-                    or {"type": "object", "properties": {}},
-                }
-            )
+            converted = {
+                "name": name,
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters")
+                or {"type": "object", "properties": {}},
+            }
+            if "cache_control" in tool:
+                converted["cache_control"] = tool["cache_control"]
+            result.append(converted)
         return result or None
 
     def _openai_tool_choice_to_anthropic(
@@ -1284,10 +1328,13 @@ class GitLabDuoProvider(ProviderInterface):
         messages: List[Dict[str, Any]],
         stream: bool,
         api_key: str = "",
+        forwarded_headers: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
         """Handle completion via Anthropic Messages API proxy."""
-        system_text, anthropic_messages = self._openai_to_anthropic_messages(messages)
+        system_content, anthropic_messages = self._openai_to_anthropic_messages(
+            messages
+        )
 
         payload: Dict[str, Any] = {
             "model": backend_model,
@@ -1295,19 +1342,42 @@ class GitLabDuoProvider(ProviderInterface):
             "max_tokens": kwargs.get("max_tokens") or 8192,
         }
 
-        if system_text:
+        if system_content:
             # Auto-add cache_control for long system prompts (>4000 chars ≈ 1024 tokens)
-            # This enables Anthropic prompt caching to save credits
-            if len(system_text) > 4000:
-                payload["system"] = [
-                    {
-                        "type": "text",
-                        "text": system_text,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-            else:
-                payload["system"] = system_text
+            # only when no explicit cache_control markers are provided.
+            if isinstance(system_content, str):
+                if len(system_content) > 4000:
+                    payload["system"] = [
+                        {
+                            "type": "text",
+                            "text": system_content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                else:
+                    payload["system"] = system_content
+            elif isinstance(system_content, list):
+                payload["system"] = system_content
+                has_explicit_cache = any(
+                    isinstance(block, dict) and "cache_control" in block
+                    for block in system_content
+                )
+                if not has_explicit_cache:
+                    total_system_chars = sum(
+                        len(block.get("text", ""))
+                        for block in system_content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                    if total_system_chars > 4000:
+                        for i in range(len(payload["system"]) - 1, -1, -1):
+                            block = payload["system"][i]
+                            if (
+                                isinstance(block, dict)
+                                and block.get("type") == "text"
+                                and block.get("text", "").strip()
+                            ):
+                                block["cache_control"] = {"type": "ephemeral"}
+                                break
         if stream:
             payload["stream"] = True
 
@@ -1379,9 +1449,17 @@ class GitLabDuoProvider(ProviderInterface):
         endpoint = f"{ai_gateway_url}/ai/v1/proxy/anthropic/v1/messages"
 
         # Anthropic-specific headers
-        req_headers = {**headers, "anthropic-version": ANTHROPIC_VERSION}
-        if enable_thinking:
-            req_headers["anthropic-beta"] = ANTHROPIC_BETA
+        forwarded_headers = forwarded_headers or {}
+        req_headers = dict(headers)
+        req_headers["anthropic-version"] = str(
+            forwarded_headers.get("anthropic-version") or ANTHROPIC_VERSION
+        )
+
+        incoming_beta = forwarded_headers.get("anthropic-beta")
+        thinking_beta = ANTHROPIC_BETA if enable_thinking else None
+        merged_beta = self._merge_csv_header_values(incoming_beta, thinking_beta)
+        if merged_beta:
+            req_headers["anthropic-beta"] = merged_beta
 
         lib_logger.debug(
             "[GitLabDuo] Anthropic request to %s: %s...",
@@ -1430,7 +1508,9 @@ class GitLabDuoProvider(ProviderInterface):
                 self._handle_credential_forbidden(api_key)
 
             # Track 402 credit exhaustion strikes
-            if response.status_code == 402 and self._is_credit_exhaustion(response.text):
+            if response.status_code == 402 and self._is_credit_exhaustion(
+                response.text
+            ):
                 strikes = self._record_exhaustion_strike(api_key)
                 if strikes >= MAX_EXHAUSTION_STRIKES:
                     self._removed_credentials.add(api_key)
@@ -1538,9 +1618,10 @@ class GitLabDuoProvider(ProviderInterface):
 
         return response_obj
 
-    # Maximum internal retries for transient 402 errors (reduced from 10)
-    _TRANSIENT_402_MAX_RETRIES = 3
+    # Maximum internal retries for transient stream failures
+    _STREAM_TRANSIENT_MAX_RETRIES = 3
     _TRANSIENT_402_DELAY = 5  # seconds
+    _TRANSIENT_OVERLOADED_DELAY = 3  # seconds
 
     @staticmethod
     def _is_credit_exhaustion(error_body: str) -> bool:
@@ -1556,6 +1637,29 @@ class GitLabDuoProvider(ProviderInterface):
                 "duo credits",
             )
         )
+
+    @staticmethod
+    def _is_overloaded_stream_error(error_body: str) -> bool:
+        """Check whether a stream failure body indicates transient overload."""
+        body_lower = (error_body or "").lower()
+        return (
+            "overloaded_error" in body_lower
+            or '"message": "overloaded"' in body_lower
+            or "model_capacity_exhausted" in body_lower
+        )
+
+    @staticmethod
+    def _parse_retry_after_seconds(header_value: Optional[str]) -> Optional[float]:
+        """Parse Retry-After header value if present."""
+        if not header_value:
+            return None
+        try:
+            value = float(str(header_value).strip())
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            return None
+        return None
 
     def _record_exhaustion_strike(self, api_key: str) -> int:
         """Record an exhaustion strike for a credential. Returns new strike count.
@@ -1664,16 +1768,17 @@ class GitLabDuoProvider(ProviderInterface):
         proxy_model: str,
         api_key: str = "",
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
-        """Wrap _stream_anthropic_response with internal retry on transient 402.
+        """Wrap _stream_anthropic_response with internal transient retries.
 
         Distinguishes between:
         - Real credit exhaustion (insufficient_credits): increment strikes, propagate
           immediately so the executor rotates to the next credential
-        - Transient 402: retry up to _TRANSIENT_402_MAX_RETRIES times
+        - Transient 402: retry briefly, then propagate
+        - Transient overload (503/429): retry briefly, then propagate
         """
         import asyncio as _asyncio
 
-        for attempt in range(self._TRANSIENT_402_MAX_RETRIES):
+        for attempt in range(self._STREAM_TRANSIENT_MAX_RETRIES):
             try:
                 async for chunk in self._stream_anthropic_response(
                     client, endpoint, headers, payload, proxy_model, api_key
@@ -1681,15 +1786,13 @@ class GitLabDuoProvider(ProviderInterface):
                     yield chunk
                 return  # Success — stream completed
             except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+
                 # 403 Forbidden — immediate removal before propagating
-                if e.response.status_code == 403:
+                if status == 403:
                     self._handle_credential_forbidden(api_key)
                     raise
 
-                if e.response.status_code != 402:
-                    raise  # Non-402 — propagate immediately
-
-                # Read error body to distinguish transient vs real exhaustion
                 error_body = ""
                 try:
                     error_body = e.response.text or ""
@@ -1698,6 +1801,30 @@ class GitLabDuoProvider(ProviderInterface):
                         error_body = e.response.content.decode("utf-8", errors="ignore")
                     except Exception:
                         pass
+
+                # Handle overload and temporary capacity errors.
+                if status in (429, 503) and self._is_overloaded_stream_error(
+                    error_body
+                ):
+                    if attempt < self._STREAM_TRANSIENT_MAX_RETRIES - 1:
+                        retry_after = self._parse_retry_after_seconds(
+                            e.response.headers.get("retry-after")
+                        )
+                        delay = retry_after or self._TRANSIENT_OVERLOADED_DELAY
+                        lib_logger.info(
+                            "[GitLabDuo] Transient overload (%d), retrying in %.1fs "
+                            "(attempt %d/%d)",
+                            status,
+                            delay,
+                            attempt + 1,
+                            self._STREAM_TRANSIENT_MAX_RETRIES,
+                        )
+                        await _asyncio.sleep(delay)
+                        continue
+                    raise  # Last attempt — propagate
+
+                if status != 402:
+                    raise  # Non-402 — propagate immediately
 
                 if self._is_credit_exhaustion(error_body):
                     # Real credit exhaustion — record strike and propagate
@@ -1714,12 +1841,12 @@ class GitLabDuoProvider(ProviderInterface):
                     raise  # Always propagate — let executor handle rotation
 
                 # Transient 402 — retry with delay
-                if attempt < self._TRANSIENT_402_MAX_RETRIES - 1:
+                if attempt < self._STREAM_TRANSIENT_MAX_RETRIES - 1:
                     lib_logger.info(
                         "[GitLabDuo] Transient 402, retrying in %ds (attempt %d/%d)",
                         self._TRANSIENT_402_DELAY,
                         attempt + 1,
-                        self._TRANSIENT_402_MAX_RETRIES,
+                        self._STREAM_TRANSIENT_MAX_RETRIES,
                     )
                     await _asyncio.sleep(self._TRANSIENT_402_DELAY)
                     continue
@@ -1771,7 +1898,7 @@ class GitLabDuoProvider(ProviderInterface):
                 )
                 # Build a synthetic non-streaming response so classify_error
                 # can read status_code and body even after the stream context exits.
-                from httpx import Response as _Resp, Request as _Req
+                from httpx import Response as _Resp
 
                 synth_resp = _Resp(
                     status_code=response.status_code,
@@ -1992,6 +2119,42 @@ class GitLabDuoProvider(ProviderInterface):
 
                 elif event_type == "error":
                     err = evt.get("error") if isinstance(evt, dict) else None
+                    err_type = ""
+                    if isinstance(err, dict):
+                        err_type = str(err.get("type", "")).lower()
+
+                    if err_type in {"overloaded_error", "rate_limit_error"}:
+                        from httpx import Response as _Resp
+
+                        status_code = 503 if err_type == "overloaded_error" else 429
+                        retry_after = None
+                        if isinstance(err, dict):
+                            retry_after = err.get("retry_after") or err.get(
+                                "retry-after"
+                            )
+
+                        raw_body = (
+                            evt
+                            if isinstance(evt, dict)
+                            else {"error": err or {"message": str(evt)}}
+                        )
+                        body_bytes = json.dumps(raw_body).encode("utf-8")
+                        synth_headers = dict(response.headers)
+                        if retry_after is not None:
+                            synth_headers["retry-after"] = str(retry_after)
+
+                        synth_resp = _Resp(
+                            status_code=status_code,
+                            headers=synth_headers,
+                            content=body_bytes,
+                            request=response.request,
+                        )
+                        raise httpx.HTTPStatusError(
+                            f"GitLab Duo Anthropic stream error: {err or evt}",
+                            request=response.request,
+                            response=synth_resp,
+                        )
+
                     raise RuntimeError(
                         f"GitLab Duo Anthropic stream error: {err or evt}"
                     )
@@ -2423,7 +2586,9 @@ class GitLabDuoProvider(ProviderInterface):
         # Check per-credential env var (e.g., GITLAB_DUO_CREDITS_PER_ACCOUNT_1)
         # Try to find the credential index
         global_limit = float(
-            os.getenv("GITLAB_DUO_CREDITS_PER_ACCOUNT", str(DEFAULT_CREDITS_PER_ACCOUNT))
+            os.getenv(
+                "GITLAB_DUO_CREDITS_PER_ACCOUNT", str(DEFAULT_CREDITS_PER_ACCOUNT)
+            )
         )
         self._credit_limits[api_key] = global_limit
         return global_limit
