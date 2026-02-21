@@ -305,6 +305,40 @@ class RotatingClient:
         if hasattr(self, "http_client") and self.http_client:
             await self.http_client.aclose()
 
+    async def remove_credential(self, provider: str, credential: str) -> bool:
+        """Remove a credential from the running proxy.
+
+        Used for auto-removing exhausted credentials (e.g., GitLab Duo credit exhaustion).
+        The credential is removed from the active pool but usage data is preserved.
+
+        Args:
+            provider: Provider name (e.g., "gitlab_duo")
+            credential: The credential identifier (API key or path)
+
+        Returns:
+            True if the credential was removed, False if not found
+        """
+        creds = self.all_credentials.get(provider, [])
+        if credential not in creds:
+            return False
+
+        creds.remove(credential)
+
+        # Also remove from oauth_credentials if present
+        oauth_creds = self.oauth_credentials.get(provider, [])
+        if credential in oauth_creds:
+            oauth_creds.remove(credential)
+
+        # Invalidate token cache if provider supports it
+        instance = self._get_provider_instance(provider)
+        if instance and hasattr(instance, "_invalidate_token"):
+            instance._invalidate_token(credential)
+
+        lib_logger.warning(
+            f"Removed exhausted credential from {provider}: {mask_credential(credential)}"
+        )
+        return True
+
     async def add_oauth_credential(self, provider: str, path: str) -> bool:
         """Hot-load a new OAuth credential at runtime.
 
@@ -584,6 +618,13 @@ class RotatingClient:
             # Skip providers with no activity (filters out invalid/unused providers)
             if stats.get("total_requests", 0) == 0:
                 continue
+
+            # Add credit info for providers that track credits (e.g., GitLab Duo)
+            plugin = self._get_provider_instance(provider)
+            if plugin and hasattr(plugin, "get_credits_info"):
+                credits_info = plugin.get_credits_info()
+                if credits_info and credits_info.get("per_credential"):
+                    stats["credits"] = credits_info
 
             providers[provider] = stats
 

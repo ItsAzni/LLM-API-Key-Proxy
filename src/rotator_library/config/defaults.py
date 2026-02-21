@@ -41,9 +41,9 @@ DEFAULT_MAX_RETRIES: int = 2
 # Override: MAX_RETRIES_GITHUB_COPILOT=<int>
 MAX_RETRIES_GITHUB_COPILOT: int = int(os.getenv("MAX_RETRIES_GITHUB_COPILOT", "5"))
 
-# Maximum retries for GitLab Duo (higher due to transient 402/429 errors)
+# Maximum retries for GitLab Duo (moderate; 402 handling is now smarter)
 # Override: MAX_RETRIES_GITLAB_DUO=<int>
-MAX_RETRIES_GITLAB_DUO: int = int(os.getenv("MAX_RETRIES_GITLAB_DUO", "10"))
+MAX_RETRIES_GITLAB_DUO: int = int(os.getenv("MAX_RETRIES_GITLAB_DUO", "5"))
 
 # Global request timeout in seconds
 # This controls how long a request can wait for an available credential.

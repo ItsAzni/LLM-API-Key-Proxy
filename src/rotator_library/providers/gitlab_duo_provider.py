@@ -100,6 +100,36 @@ OAUTH_CALLBACK_PATH = "/callback"
 # Token refresh buffer (refresh 5 minutes before expiry)
 OAUTH_REFRESH_BUFFER = 5 * 60
 
+# =============================================================================
+# CREDIT COST TABLE
+# =============================================================================
+
+# Credits consumed per request for each model
+# Source: https://docs.gitlab.com/subscriptions/gitlab_credits/
+CREDIT_COSTS: Dict[str, float] = {
+    # Anthropic Claude models
+    "claude-opus-4-6": 1 / 0.7,       # 0.7 requests/credit → ~1.43 credits/req
+    "claude-opus-4-5": 1 / 1.2,       # 1.2 requests/credit → ~0.83 credits/req
+    "claude-sonnet-4-6": 1 / 1.1,     # ~0.91 credits/req
+    "claude-sonnet-4-5": 1 / 2.0,     # 2.0 requests/credit → 0.5 credits/req
+    "claude-haiku-4-5": 1 / 6.7,      # 6.7 requests/credit → ~0.15 credits/req
+    # OpenAI GPT models
+    "gpt-5-2": 1 / 2.5,               # 2.5 requests/credit → 0.4 credits/req
+    "gpt-5-1": 1 / 3.3,               # 3.3 requests/credit → ~0.30 credits/req
+    "gpt-5-mini": 1 / 8.0,            # 8.0 requests/credit → 0.125 credits/req
+    "gpt-5-2-codex": 1 / 3.3,         # codex variant → ~0.30 credits/req
+    "gpt-5-codex": 1 / 3.3,           # codex variant → ~0.30 credits/req
+}
+
+# Default credits per account (Ultimate = 24/user/month, Premium = 12)
+DEFAULT_CREDITS_PER_ACCOUNT = 24.0
+
+# Maximum exhaustion strikes before auto-removing a credential
+MAX_EXHAUSTION_STRIKES = 3
+
+# Cooldown applied when a real credit exhaustion 402 is detected (seconds)
+CREDIT_EXHAUSTION_COOLDOWN = 300
+
 # Anthropic API version
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -215,12 +245,26 @@ class GitLabDuoProvider(ProviderInterface):
     # In-memory OAuth credential cache: cred_path -> loaded creds dict
     _oauth_cred_cache: Dict[str, dict] = {}
 
+    # Credit tracking state
+    # Per-credential accumulated credit usage this month
+    _credit_usage: Dict[str, float] = {}
+    # Per-credential credit limit (from env or default)
+    _credit_limits: Dict[str, float] = {}
+    # Per-credential 402 "insufficient_credits" strike counter
+    _exhaustion_strikes: Dict[str, int] = {}
+    # Credentials that have been auto-removed due to exhaustion
+    _removed_credentials: set = set()
+
     # =========================================================================
     # PROVIDER INTERFACE
     # =========================================================================
 
     def has_custom_logic(self) -> bool:
         return True
+
+    def should_remove_credential(self, credential: str) -> bool:
+        """Check if a credential has been flagged for removal due to exhaustion."""
+        return credential in self._removed_credentials
 
     async def initialize_token(
         self,
@@ -798,7 +842,7 @@ class GitLabDuoProvider(ProviderInterface):
         }
 
         if provider_type == "anthropic":
-            return await self._anthropic_completion(
+            result = await self._anthropic_completion(
                 client=client,
                 ai_gateway_url=ai_gateway_url,
                 headers=gateway_headers,
@@ -810,7 +854,7 @@ class GitLabDuoProvider(ProviderInterface):
                 **filtered,
             )
         else:
-            return await self._openai_completion(
+            result = await self._openai_completion(
                 client=client,
                 ai_gateway_url=ai_gateway_url,
                 headers=gateway_headers,
@@ -821,6 +865,33 @@ class GitLabDuoProvider(ProviderInterface):
                 api_key=api_key,
                 **filtered,
             )
+
+        # Track credit usage
+        if stream:
+            # Wrap the async generator to record credits on stream completion
+            return self._wrap_stream_with_credit_tracking(result, api_key, clean_model)
+        else:
+            # Non-streaming: record immediately
+            self.record_credit_usage(api_key, clean_model)
+            return result
+
+    # =========================================================================
+    # STREAM CREDIT TRACKING WRAPPER
+    # =========================================================================
+
+    async def _wrap_stream_with_credit_tracking(
+        self,
+        stream: AsyncGenerator[litellm.ModelResponse, None],
+        api_key: str,
+        clean_model: str,
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """Wrap a streaming response to record credit usage on completion."""
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            # Record credit usage when stream completes (success or error)
+            self.record_credit_usage(api_key, clean_model)
 
     # =========================================================================
     # OPENAI→ANTHROPIC MESSAGE CONVERSION
@@ -924,12 +995,19 @@ class GitLabDuoProvider(ProviderInterface):
                 if ptype == "text":
                     text = part.get("text", "")
                     if text:
-                        blocks.append({"type": "text", "text": text})
+                        block: Dict[str, Any] = {"type": "text", "text": text}
+                        # Pass through cache_control for prompt caching
+                        if "cache_control" in part:
+                            block["cache_control"] = part["cache_control"]
+                        blocks.append(block)
                 elif ptype == "image_url":
                     url = part.get("image_url", {}).get("url", "")
                     if url:
                         img = _convert_image(url)
                         if img:
+                            # Pass through cache_control for images too
+                            if "cache_control" in part:
+                                img["cache_control"] = part["cache_control"]
                             blocks.append(img)
             return blocks
 
@@ -1084,7 +1162,18 @@ class GitLabDuoProvider(ProviderInterface):
         }
 
         if system_text:
-            payload["system"] = system_text
+            # Auto-add cache_control for long system prompts (>4000 chars ≈ 1024 tokens)
+            # This enables Anthropic prompt caching to save credits
+            if len(system_text) > 4000:
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                payload["system"] = system_text
         if stream:
             payload["stream"] = True
 
@@ -1188,11 +1277,18 @@ class GitLabDuoProvider(ProviderInterface):
             self._invalidate_token(api_key)
 
         if response.status_code >= 400:
+            error_text = response.text[:500]
             lib_logger.error(
                 "[GitLabDuo] Anthropic API error %d: %s",
                 response.status_code,
-                response.text[:500],
+                error_text,
             )
+            # Track 402 credit exhaustion strikes
+            if response.status_code == 402 and self._is_credit_exhaustion(response.text):
+                strikes = self._record_exhaustion_strike(api_key)
+                if strikes >= MAX_EXHAUSTION_STRIKES:
+                    self._removed_credentials.add(api_key)
+
             raise httpx.HTTPStatusError(
                 f"GitLab Duo API error: {response.status_code}",
                 request=response.request,
@@ -1270,17 +1366,58 @@ class GitLabDuoProvider(ProviderInterface):
         if usage:
             inp = usage.get("input_tokens", 0)
             out = usage.get("output_tokens", 0)
-            response_obj.usage = litellm.Usage(
+            cache_creation = usage.get("cache_creation_input_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
+
+            usage_obj = litellm.Usage(
                 prompt_tokens=inp,
                 completion_tokens=out,
                 total_tokens=inp + out,
             )
+            # Attach cache token info for the executor's usage tracking
+            if cache_creation or cache_read:
+                usage_obj.cache_creation_input_tokens = cache_creation
+                usage_obj.cache_read_input_tokens = cache_read
+                lib_logger.debug(
+                    "[GitLabDuo] Cache tokens: creation=%d, read=%d",
+                    cache_creation,
+                    cache_read,
+                )
+            response_obj.usage = usage_obj
 
         return response_obj
 
-    # Maximum internal retries for transient 402 errors
-    _TRANSIENT_402_MAX_RETRIES = 10
+    # Maximum internal retries for transient 402 errors (reduced from 10)
+    _TRANSIENT_402_MAX_RETRIES = 3
     _TRANSIENT_402_DELAY = 5  # seconds
+
+    @staticmethod
+    def _is_credit_exhaustion(error_body: str) -> bool:
+        """Check if a 402 error body indicates real credit exhaustion vs transient."""
+        body_lower = error_body.lower()
+        return any(
+            marker in body_lower
+            for marker in (
+                "insufficient_credits",
+                "usage_quota_exceeded",
+                "credit",
+                "quota exceeded",
+                "duo credits",
+            )
+        )
+
+    def _record_exhaustion_strike(self, api_key: str) -> int:
+        """Record an exhaustion strike for a credential. Returns new strike count."""
+        strikes = self._exhaustion_strikes.get(api_key, 0) + 1
+        self._exhaustion_strikes[api_key] = strikes
+        masked = api_key[-8:] if len(api_key) > 8 else api_key[:4]
+        lib_logger.warning(
+            "[GitLabDuo] Credit exhaustion strike %d/%d for credential ...%s",
+            strikes,
+            MAX_EXHAUSTION_STRIKES,
+            masked,
+        )
+        return strikes
 
     async def _stream_anthropic_with_retry(
         self,
@@ -1291,7 +1428,13 @@ class GitLabDuoProvider(ProviderInterface):
         proxy_model: str,
         api_key: str = "",
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
-        """Wrap _stream_anthropic_response with internal retry on transient 402."""
+        """Wrap _stream_anthropic_response with internal retry on transient 402.
+
+        Distinguishes between:
+        - Real credit exhaustion (insufficient_credits): increment strikes, propagate
+          immediately so the executor rotates to the next credential
+        - Transient 402: retry up to _TRANSIENT_402_MAX_RETRIES times
+        """
         import asyncio as _asyncio
 
         for attempt in range(self._TRANSIENT_402_MAX_RETRIES):
@@ -1302,10 +1445,35 @@ class GitLabDuoProvider(ProviderInterface):
                     yield chunk
                 return  # Success — stream completed
             except httpx.HTTPStatusError as e:
-                if (
-                    e.response.status_code == 402
-                    and attempt < self._TRANSIENT_402_MAX_RETRIES - 1
-                ):
+                if e.response.status_code != 402:
+                    raise  # Non-402 — propagate immediately
+
+                # Read error body to distinguish transient vs real exhaustion
+                error_body = ""
+                try:
+                    error_body = e.response.text or ""
+                except Exception:
+                    try:
+                        error_body = e.response.content.decode("utf-8", errors="ignore")
+                    except Exception:
+                        pass
+
+                if self._is_credit_exhaustion(error_body):
+                    # Real credit exhaustion — record strike and propagate
+                    # The executor will rotate to the next credential
+                    strikes = self._record_exhaustion_strike(api_key)
+                    if strikes >= MAX_EXHAUSTION_STRIKES:
+                        self._removed_credentials.add(api_key)
+                        lib_logger.error(
+                            "[GitLabDuo] Credential reached %d exhaustion strikes, "
+                            "marked for removal: ...%s",
+                            strikes,
+                            api_key[-8:] if len(api_key) > 8 else api_key[:4],
+                        )
+                    raise  # Always propagate — let executor handle rotation
+
+                # Transient 402 — retry with delay
+                if attempt < self._TRANSIENT_402_MAX_RETRIES - 1:
                     lib_logger.info(
                         "[GitLabDuo] Transient 402, retrying in %ds (attempt %d/%d)",
                         self._TRANSIENT_402_DELAY,
@@ -1314,7 +1482,7 @@ class GitLabDuoProvider(ProviderInterface):
                     )
                     await _asyncio.sleep(self._TRANSIENT_402_DELAY)
                     continue
-                raise  # Non-402 or last attempt — propagate
+                raise  # Last attempt — propagate
 
     async def _stream_anthropic_response(
         self,
@@ -1558,11 +1726,18 @@ class GitLabDuoProvider(ProviderInterface):
                     if usage:
                         inp = usage.get("input_tokens", 0)
                         out = usage.get("output_tokens", 0)
-                        final_chunk.usage = litellm.Usage(
+                        cache_creation = usage.get("cache_creation_input_tokens", 0)
+                        cache_read = usage.get("cache_read_input_tokens", 0)
+
+                        usage_obj = litellm.Usage(
                             prompt_tokens=inp,
                             completion_tokens=out,
                             total_tokens=inp + out,
                         )
+                        if cache_creation or cache_read:
+                            usage_obj.cache_creation_input_tokens = cache_creation
+                            usage_obj.cache_read_input_tokens = cache_read
+                        final_chunk.usage = usage_obj
 
                     if is_first_chunk:
                         final_chunk._response_headers = captured_headers
@@ -1901,11 +2076,18 @@ class GitLabDuoProvider(ProviderInterface):
     # ERROR PARSING
     # =========================================================================
 
-    @staticmethod
+    @classmethod
     def parse_quota_error(
-        error: Exception, error_body: Optional[str] = None
+        cls, error: Exception, error_body: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Parse GitLab Duo quota/rate-limit errors."""
+        """Parse GitLab Duo quota/rate-limit errors.
+
+        Distinguishes between:
+        - 402 with credit exhaustion markers → CREDITS_EXHAUSTED (long cooldown, auto_remove)
+        - 402 without markers → TRANSIENT_CREDIT_ERROR (short retry)
+        - 429 → RATE_LIMITED
+        - 403 with credit keywords → QUOTA_EXHAUSTED
+        """
         if not isinstance(error, httpx.HTTPStatusError):
             return None
 
@@ -1928,17 +2110,28 @@ class GitLabDuoProvider(ProviderInterface):
                 "quota_reset_timestamp": None,
             }
 
-        # Transient credit error (402) — GitLab returns this intermittently
-        # Retry same key with a short delay
+        # 402 — distinguish real exhaustion from transient
         if status == 402:
-            return {
-                "retry_after": 5,
-                "reason": "TRANSIENT_CREDIT_ERROR",
-                "reset_timestamp": None,
-                "quota_reset_timestamp": None,
-            }
+            if cls._is_credit_exhaustion(body):
+                return {
+                    "retry_after": CREDIT_EXHAUSTION_COOLDOWN,
+                    "reason": "CREDITS_EXHAUSTED",
+                    "reset_timestamp": None,
+                    "quota_reset_timestamp": None,
+                }
+            else:
+                # Transient 402 — rotate to another credential
+                # Use retry_after > 10 (small_cooldown_threshold) to ensure rotation
+                # rather than retrying the same key, since internal retries already
+                # happened in _stream_anthropic_with_retry
+                return {
+                    "retry_after": 30,
+                    "reason": "TRANSIENT_CREDIT_ERROR",
+                    "reset_timestamp": None,
+                    "quota_reset_timestamp": None,
+                }
 
-        # Credit exhaustion
+        # Credit exhaustion via 403
         if status == 403:
             body_lower = body.lower()
             if any(kw in body_lower for kw in ("credit", "exhaust", "quota", "limit")):
@@ -1950,3 +2143,68 @@ class GitLabDuoProvider(ProviderInterface):
                 }
 
         return None
+
+    # =========================================================================
+    # CREDIT TRACKING
+    # =========================================================================
+
+    def record_credit_usage(self, api_key: str, model: str) -> None:
+        """Record credit consumption for a successful request."""
+        clean_model = model.split("/", 1)[1] if "/" in model else model
+        cost = CREDIT_COSTS.get(clean_model, 0.5)  # Default 0.5 if unknown
+        current = self._credit_usage.get(api_key, 0.0)
+        self._credit_usage[api_key] = current + cost
+        lib_logger.debug(
+            "[GitLabDuo] Credit usage for ...%s: +%.3f (total: %.3f)",
+            api_key[-8:] if len(api_key) > 8 else api_key[:4],
+            cost,
+            self._credit_usage[api_key],
+        )
+
+    def get_credit_limit(self, api_key: str) -> float:
+        """Get the credit limit for a credential."""
+        if api_key in self._credit_limits:
+            return self._credit_limits[api_key]
+
+        # Check per-credential env var (e.g., GITLAB_DUO_CREDITS_PER_ACCOUNT_1)
+        # Try to find the credential index
+        global_limit = float(
+            os.getenv("GITLAB_DUO_CREDITS_PER_ACCOUNT", str(DEFAULT_CREDITS_PER_ACCOUNT))
+        )
+        self._credit_limits[api_key] = global_limit
+        return global_limit
+
+    def get_credits_info(self) -> Dict[str, Any]:
+        """Get credit usage info for all tracked credentials.
+
+        Returns a dict suitable for inclusion in quota stats.
+        """
+        total_limit = 0.0
+        total_used = 0.0
+        per_credential: Dict[str, Dict[str, Any]] = {}
+
+        for api_key in list(self._credit_usage.keys()):
+            limit = self.get_credit_limit(api_key)
+            used = self._credit_usage.get(api_key, 0.0)
+            remaining = max(0.0, limit - used)
+            pct = round(remaining / limit * 100, 1) if limit > 0 else 0
+
+            masked = api_key[-8:] if len(api_key) > 8 else api_key[:4]
+            per_credential[masked] = {
+                "limit": round(limit, 2),
+                "used": round(used, 2),
+                "remaining": round(remaining, 2),
+                "pct_remaining": pct,
+                "strikes": self._exhaustion_strikes.get(api_key, 0),
+            }
+            total_limit += limit
+            total_used += used
+
+        total_remaining = max(0.0, total_limit - total_used)
+
+        return {
+            "total_across_accounts": round(total_limit, 2),
+            "used_across_accounts": round(total_used, 2),
+            "remaining_across_accounts": round(total_remaining, 2),
+            "per_credential": per_credential,
+        }
