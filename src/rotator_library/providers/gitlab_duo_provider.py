@@ -1113,7 +1113,118 @@ class GitLabDuoProvider(ProviderInterface):
                 user_msg["content"].extend(_content_to_blocks(content))
 
         system_text = "\n\n".join(system_parts) if system_parts else None
+
+        # Fix orphaned tool_use blocks that have no matching tool_result
+        anthropic_msgs = self._fix_orphaned_tool_use(anthropic_msgs)
+
         return system_text, anthropic_msgs
+
+    @staticmethod
+    def _fix_orphaned_tool_use(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Ensure every assistant tool_use block has a matching tool_result
+        in the immediately following user message.
+
+        Anthropic requires that each tool_use in an assistant message is
+        paired with a tool_result in the very next (user) message. Clients
+        (especially mobile apps with web-search) sometimes send truncated
+        histories where tool results are missing. This method:
+
+        1. Collects tool_use IDs from each assistant message.
+        2. Checks the next message for matching tool_result blocks.
+        3. For any orphaned tool_use IDs, either:
+           a. Inserts a synthetic user message with placeholder tool_results
+              (if the next message isn't a user message or doesn't exist), or
+           b. Appends the missing tool_result blocks to the existing next
+              user message.
+
+        This prevents Anthropic 400 errors like:
+        "tool_use ids were found without tool_result blocks immediately after"
+        """
+        if not messages:
+            return messages
+
+        result: List[Dict[str, Any]] = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            result.append(msg)
+
+            if msg.get("role") != "assistant":
+                i += 1
+                continue
+
+            # Collect all tool_use IDs in this assistant message
+            tool_use_ids: List[str] = []
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tid = block.get("id")
+                    if tid:
+                        tool_use_ids.append(tid)
+
+            if not tool_use_ids:
+                i += 1
+                continue
+
+            # Check what's in the next message
+            next_msg = messages[i + 1] if i + 1 < len(messages) else None
+
+            if next_msg and next_msg.get("role") == "user":
+                # Find which tool_use IDs already have results
+                existing_result_ids = set()
+                for block in next_msg.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        rid = block.get("tool_use_id")
+                        if rid:
+                            existing_result_ids.add(rid)
+
+                # Add placeholder results for any missing ones
+                missing_ids = [
+                    tid for tid in tool_use_ids if tid not in existing_result_ids
+                ]
+                if missing_ids:
+                    lib_logger.warning(
+                        "[GitLabDuo] Injecting %d placeholder tool_result(s) "
+                        "for orphaned tool_use IDs: %s",
+                        len(missing_ids),
+                        missing_ids,
+                    )
+                    for tid in missing_ids:
+                        next_msg["content"].insert(
+                            0,
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tid,
+                                "content": "[Tool result not available]",
+                            },
+                        )
+            else:
+                # Next message is another assistant or doesn't exist —
+                # insert a synthetic user message with all tool_results
+                lib_logger.warning(
+                    "[GitLabDuo] Inserting synthetic tool_result message "
+                    "for %d orphaned tool_use IDs: %s",
+                    len(tool_use_ids),
+                    tool_use_ids,
+                )
+                synthetic_user: Dict[str, Any] = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tid,
+                            "content": "[Tool result not available]",
+                        }
+                        for tid in tool_use_ids
+                    ],
+                }
+                result.append(synthetic_user)
+
+            i += 1
+
+        return result
 
     def _openai_tools_to_anthropic(
         self, tools: Optional[List[Dict[str, Any]]]
