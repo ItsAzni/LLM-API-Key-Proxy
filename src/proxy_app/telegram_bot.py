@@ -1596,6 +1596,26 @@ async def newaccount_command(
         auto_result = await automator.run(oauth_runner)
         saved_path = auto_result.oauth_path
 
+        # If no group was created, the credential is useless — delete
+        # it and report failure so we don't pollute the proxy with
+        # non-functional accounts.
+        if not auto_result.group_path:
+            logger.warning(
+                "Account %s created but no group — removing credential %s",
+                auto_result.email, saved_path,
+            )
+            try:
+                os.remove(saved_path)
+            except OSError as e:
+                logger.error(f"Failed to remove credential file {saved_path}: {e}")
+            await update_status(
+                f"❌ *Account creation failed*\n\n"
+                f"Account `{auto_result.email}` was registered on GitLab "
+                f"but the trial/group could not be activated\\.\n\n"
+                f"The credential has been removed\\. Please try `/newaccount` again\\."
+            )
+            return
+
         # Add proxy metadata to the credential file
         try:
             with open(saved_path, "r") as f:
