@@ -315,11 +315,19 @@ class RequestErrorAccumulator:
         self.model: str = ""
         self.provider: str = ""
 
+    def record_attempt(self, credential: str) -> None:
+        """Record that a credential was attempted.
+
+        This is used for cases where a credential was acquired but the request
+        ended before a classified error could be recorded.
+        """
+        self._tried_credentials.add(credential)
+
     def record_error(
         self, credential: str, classified_error: "ClassifiedError", error_message: str
     ):
         """Record an error for a credential."""
-        self._tried_credentials.add(credential)
+        self.record_attempt(credential)
         masked_cred = mask_credential(credential)
 
         error_record = {

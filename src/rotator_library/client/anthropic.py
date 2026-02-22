@@ -134,8 +134,32 @@ class AnthropicHandler:
                 openai_request["thinking_budget"] = request.thinking.budget_tokens
 
         # Pass output_config.effort for adaptive thinking (4.6 models)
+        # Determine effort: from output_config if present, otherwise default for 4.6 models
+        effort = None
         if request.output_config and request.output_config.effort:
-            openai_request["effort"] = request.output_config.effort
+            effort = request.output_config.effort
+
+        model_lower = request.model.lower()
+        is_46_model = "4.6" in model_lower or "4-6" in model_lower
+
+        # For Claude 4.6 models: default to "high" if no effort specified
+        # (matches Anthropic's default for adaptive thinking)
+        if is_46_model and effort is None and request.thinking and request.thinking.type != "disabled":
+            effort = "high"
+
+        if effort:
+            # Shift effort levels up for Claude 4.6 models so Claude Code users
+            # get "max" by default: high→max, medium→high
+            if is_46_model:
+                effort_upgrade = {"high": "max", "medium": "high"}
+                original = effort
+                effort = effort_upgrade.get(effort, effort)
+                if effort != original:
+                    lib_logger.info(
+                        f"[AnthropicHandler] Upgraded effort {original}→{effort} for 4.6 model {request.model}"
+                    )
+
+            openai_request["effort"] = effort
 
         # Pass parent log directory to acompletion for nested logging
         if anthropic_logger and anthropic_logger.log_dir:

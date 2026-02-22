@@ -34,6 +34,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncGenerator,
     Dict,
@@ -41,39 +42,38 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    TYPE_CHECKING,
 )
 
 import httpx
 import litellm
 
-from .provider_interface import ProviderInterface, UsageResetConfigDef, QuotaGroupMap
+from ..error_handler import EmptyResponseError, TransientQuotaError
+from ..model_definitions import ModelDefinitions
+from ..timeout_config import TimeoutConfig
+from ..transaction_logger import AntigravityProviderLogger
+from ..utils.paths import get_cache_dir, get_logs_dir
 from .antigravity_auth_base import AntigravityAuthBase
 from .provider_cache import ProviderCache
+from .provider_interface import ProviderInterface, QuotaGroupMap, UsageResetConfigDef
 from .utilities.antigravity_quota_tracker import AntigravityQuotaTracker
+from .utilities.gemini_credential_manager import GeminiCredentialManager
 from .utilities.gemini_shared_utils import (
+    DEFAULT_SAFETY_SETTINGS,
+    DEFAULT_TIER_PRIORITY,
+    FINISH_REASON_MAP,
+    GEMINI3_TOOL_RENAMES,
+    GEMINI3_TOOL_RENAMES_REVERSE,
+    # Tier utilities
+    TIER_PRIORITIES,
     env_bool,
     env_int,
     inline_schema_refs,
     normalize_type_arrays,
     recursively_parse_json_strings,
-    sanitize_gemini_tool_name,
     restore_gemini_tool_name,
-    GEMINI3_TOOL_RENAMES,
-    GEMINI3_TOOL_RENAMES_REVERSE,
-    FINISH_REASON_MAP,
-    DEFAULT_SAFETY_SETTINGS,
-    # Tier utilities
-    TIER_PRIORITIES,
-    DEFAULT_TIER_PRIORITY,
+    sanitize_gemini_tool_name,
 )
-from ..transaction_logger import AntigravityProviderLogger
 from .utilities.gemini_tool_handler import GeminiToolHandler
-from .utilities.gemini_credential_manager import GeminiCredentialManager
-from ..model_definitions import ModelDefinitions
-from ..timeout_config import TimeoutConfig
-from ..error_handler import EmptyResponseError, TransientQuotaError
-from ..utils.paths import get_logs_dir, get_cache_dir
 
 if TYPE_CHECKING:
     from ..usage import UsageManager
@@ -534,7 +534,9 @@ def get_model_rate_limiter() -> ModelRateLimiter:
 # =============================================================================
 
 # How long to cool down a banned credential (seconds)
-BAN_COOLDOWN_SECONDS = env_int("ANTIGRAVITY_BAN_COOLDOWN_SECONDS", 3600)  # 1 hour default
+BAN_COOLDOWN_SECONDS = env_int(
+    "ANTIGRAVITY_BAN_COOLDOWN_SECONDS", 3600
+)  # 1 hour default
 
 # Keywords in 403 bodies that indicate a TOS ban (permanent, do not retry)
 _TOS_BAN_KEYWORDS = [
@@ -617,7 +619,11 @@ class BanSignalDetector:
                 }
                 if should_log:
                     self._last_logged[credential_id] = now
-                    notice_msg = f" Notice: {result['notice_text']}" if result.get("notice_text") else ""
+                    notice_msg = (
+                        f" Notice: {result['notice_text']}"
+                        if result.get("notice_text")
+                        else ""
+                    )
                     lib_logger.warning(
                         f"🚫 BAN DETECTED on credential {credential_id[:16]}...: "
                         f"{result['reason']}.{notice_msg} "
@@ -758,7 +764,9 @@ def get_ban_detector() -> BanSignalDetector:
 # =============================================================================
 
 # Park mode auto-engages after this many consecutive credential failures
-PARK_MODE_THRESHOLD = env_int("ANTIGRAVITY_PARK_MODE_THRESHOLD", 0)  # 0 = auto (= num credentials)
+PARK_MODE_THRESHOLD = env_int(
+    "ANTIGRAVITY_PARK_MODE_THRESHOLD", 0
+)  # 0 = auto (= num credentials)
 
 
 class CredentialExhaustionTracker:
@@ -936,9 +944,7 @@ async def run_warmup_sequence(http_client: httpx.AsyncClient, base_url: str) -> 
 
         await asyncio.sleep(random.uniform(0.05, 0.2))
 
-    lib_logger.info(
-        f"Warmup complete ({success_count} succeeded)"
-    )
+    lib_logger.info(f"Warmup complete ({success_count} succeeded)")
     return success_count > 0
 
 
@@ -1138,7 +1144,7 @@ VIOLATION OF THESE RULES WILL CAUSE IMMEDIATE SYSTEM FAILURE.
 ## COMMON FAILURE PATTERNS TO AVOID
 
 - Using 'path' when schema says 'filePath' (or vice versa)
-- Using 'content' when schema says 'text' (or vice versa)  
+- Using 'content' when schema says 'text' (or vice versa)
 - Providing {"file": "..."} when schema wants [{"path": "...", "line_ranges": [...]}]
 - Omitting required nested fields in array items
 - Adding 'additionalProperties' that the schema doesn't define
@@ -1257,7 +1263,7 @@ Your web applications should be built using the following technologies:,
 3. **Web App**: If the USER specifies that they want a more complex web app, use a framework like Next.js or Vite. Only do this if the USER explicitly requests a web app.
 4. **New Project Creation**: If you need to use a framework for a new app, use `npx` with the appropriate script, but there are some rules to follow:,
    - Use `npx -y` to automatically install the script and its dependencies
-   - You MUST run the command with `--help` flag to see all available options first, 
+   - You MUST run the command with `--help` flag to see all available options first,
    - Initialize the app in the current directory with `./` (example: `npx -y create-vite-app@latest ./`),
    - You should run in non-interactive mode so that the user doesn't need to input anything,
 5. **Running Locally**: When running locally, use `npm run dev` or equivalent dev server. Only build the production bundle if the USER explicitly requests it or you are validating the code for correctness.
@@ -1306,7 +1312,7 @@ Automatically implement SEO best practices on every page:,
 CRITICAL REMINDER: AESTHETICS ARE VERY IMPORTANT. If your web app looks simple and basic then you have FAILED!
 </web_application_development>
 <ephemeral_message>
-There will be an <EPHEMERAL_MESSAGE> appearing in the conversation at times. This is not coming from the user, but instead injected by the system as important information to pay attention to. 
+There will be an <EPHEMERAL_MESSAGE> appearing in the conversation at times. This is not coming from the user, but instead injected by the system as important information to pay attention to.
 Do not respond to nor acknowledge those messages, but do follow them strictly.
 </ephemeral_message>
 
@@ -2465,8 +2471,8 @@ class AntigravityProvider(
             if email:
                 try:
                     from .utilities.device_profile import (
-                        get_or_create_fingerprint,
                         build_fingerprint_headers,
+                        get_or_create_fingerprint,
                     )
 
                     fingerprint = get_or_create_fingerprint(email)
@@ -2504,8 +2510,8 @@ class AntigravityProvider(
             if email:
                 try:
                     from .utilities.device_profile import (
-                        get_or_create_fingerprint,
                         build_content_request_headers,
+                        get_or_create_fingerprint,
                     )
 
                     fingerprint = get_or_create_fingerprint(email)
@@ -2695,8 +2701,8 @@ class AntigravityProvider(
 
         try:
             from .utilities.device_profile import (
-                set_antigravity_version,
                 get_antigravity_version,
+                set_antigravity_version,
             )
 
             old_version = get_antigravity_version()
@@ -3526,6 +3532,7 @@ class AntigravityProvider(
         self,
         reasoning_effort: Optional[str],
         model: str,
+        thinking_budget: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Map reasoning_effort to thinking configuration.
@@ -3533,6 +3540,13 @@ class AntigravityProvider(
         - Gemini 2.5 & Claude: thinkingBudget (integer tokens)
         - Gemini 3 Pro: thinkingLevel (string: "low"/"high")
         - Gemini 3 Flash: thinkingLevel (string: "minimal"/"low"/"medium"/"high")
+
+        Args:
+            reasoning_effort: Effort level string (e.g., "low", "high", "max")
+            model: Model name
+            thinking_budget: Raw budget_tokens from Anthropic request (if available).
+                             For Claude models, this is passed through directly as
+                             thinkingBudget instead of using the quantized mapping.
         """
         internal = self._alias_to_internal(model)
         is_gemini_25 = "gemini-2.5" in model
@@ -3579,9 +3593,15 @@ class AntigravityProvider(
             )
             effort = "auto"
 
-        # Map xhigh/max to high (highest supported level for Antigravity models)
+        # Map xhigh/max to high for non-Claude models
+        # Claude 4.6 models (Opus/Sonnet) can use "max" natively
+        # For older Claude models, xhigh falls back to high
+        is_claude_46 = is_claude and ("4.6" in model or "4-6" in model)
         if effort in ("xhigh", "max"):
-            effort = "high"
+            if is_claude_46:
+                effort = "max"
+            else:
+                effort = "high"
 
         # Gemini 3 Flash: minimal/low/medium/high
         # Mapping mirrors zerogravity params.rs map_reasoning_effort_to_level()
@@ -3612,6 +3632,24 @@ class AntigravityProvider(
 
         if effort == "auto":
             return {"thinkingBudget": -1, "include_thoughts": True}
+
+        # Claude 4.6 "max" effort: use thinkingBudget 62000 (tested working)
+        # thinkingLevel "max" was rejected by the backend (not a valid ThinkingLevel enum)
+        # 120k was also rejected (INVALID_ARGUMENT), 62000 is the highest confirmed working value
+        if is_claude and effort == "max":
+            lib_logger.info(
+                f"[Antigravity] Using max effort (thinkingBudget=62000) for Claude model {model}"
+            )
+            return {"thinkingBudget": 62000, "include_thoughts": True}
+
+        # Claude models: pass raw thinking_budget directly when available
+        # This preserves the exact budget_tokens from the Anthropic request
+        # instead of quantizing through effort level buckets
+        if is_claude and thinking_budget is not None and thinking_budget > 0:
+            lib_logger.info(
+                f"[Antigravity] Using raw thinking_budget={thinking_budget} for Claude model {model}"
+            )
+            return {"thinkingBudget": thinking_budget, "include_thoughts": True}
 
         # Model-specific budgets
         if "gemini-2.5-flash" in model:
@@ -5127,8 +5165,14 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             func_config = tool_config.setdefault("functionCallingConfig", {})
             func_config["mode"] = "AUTO"
 
-        # Handle Gemini 3 thinking logic
-        if not (internal_model.startswith("gemini-3-") or internal_model.startswith("gemini-3.1-")):
+        # Strip thinkingLevel for models that don't support it
+        # Gemini 3.x uses thinkingLevel natively; Claude 4.6 uses it for "max" effort
+        is_thinkinglevel_model = (
+            internal_model.startswith("gemini-3-")
+            or internal_model.startswith("gemini-3.1-")
+            or (self._is_claude(model) and ("4.6" in model or "4-6" in model or "4.6" in internal_model or "4-6" in internal_model))
+        )
+        if not is_thinkinglevel_model:
             thinking_config = gen_config.get("thinkingConfig", {})
             if "thinkingLevel" in thinking_config:
                 del thinking_config["thinkingLevel"]
@@ -5136,7 +5180,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         # Ensure first function call in each model message has a thoughtSignature for Gemini 3
         # Per Gemini docs: Only the FIRST parallel function call gets a signature
-        if internal_model.startswith("gemini-3-") or internal_model.startswith("gemini-3.1-"):
+        if internal_model.startswith("gemini-3-") or internal_model.startswith(
+            "gemini-3.1-"
+        ):
             for content in antigravity_payload["request"].get("contents", []):
                 if content.get("role") == "model":
                     first_func_seen = False
@@ -5532,10 +5578,19 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         tools = kwargs.get("tools")
         tool_choice = kwargs.get("tool_choice")
         reasoning_effort = kwargs.get("reasoning_effort")
+        thinking_budget = kwargs.get(
+            "thinking_budget"
+        )  # raw budget_tokens from Anthropic
+        effort = kwargs.get("effort")  # effort from output_config (adaptive thinking)
         top_p = kwargs.get("top_p")
         temperature = kwargs.get("temperature")
         max_tokens = kwargs.get("max_tokens")
         transaction_context = kwargs.pop("transaction_context", None)
+
+        # Resolve effort priority: output_config.effort (adaptive thinking) takes
+        # precedence over reasoning_effort derived from deprecated budget_tokens
+        if effort:
+            reasoning_effort = effort
 
         # Create provider logger from transaction context
         file_logger = AntigravityProviderLogger(transaction_context)
@@ -5679,7 +5734,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             # Gemini 3 performs better with temperature=1 for tool use
             gen_config["temperature"] = 1.0
 
-        thinking_config = self._get_thinking_config(reasoning_effort, model)
+        thinking_config = self._get_thinking_config(
+            reasoning_effort, model, thinking_budget=thinking_budget
+        )
         if thinking_config:
             gen_config.setdefault("thinkingConfig", {}).update(thinking_config)
 
@@ -5900,7 +5957,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         for tc in delta.tool_calls:
                             self._accumulate_tool_call(tc, collected_tool_calls)
                     psf = getattr(delta, "provider_specific_fields", None) or {}
-                    for sig in (psf.get("thought_signatures", []) if isinstance(psf, dict) else []):
+                    for sig in (
+                        psf.get("thought_signatures", [])
+                        if isinstance(psf, dict)
+                        else []
+                    ):
                         if sig not in collected_thought_sigs:
                             collected_thought_sigs.append(sig)
             if hasattr(chunk, "usage") and chunk.usage:
@@ -6167,9 +6228,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [
-                    {"index": 0, "delta": final_delta, "finish_reason": None}
-                ],
+                "choices": [{"index": 0, "delta": final_delta, "finish_reason": None}],
             }
             # Include accumulated usage on final chunk
             if accumulator.get("last_usage"):
@@ -6541,7 +6600,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         if ban_result and ban_result.get("banned"):
                             # Record failure for park mode + propagate for cooldown
                             await get_exhaustion_tracker().record_failure(
-                                credential_path, f"banned: {ban_result.get('reason', 'unknown')}"
+                                credential_path,
+                                f"banned: {ban_result.get('reason', 'unknown')}",
                             )
                             raise TransientQuotaError(
                                 provider="antigravity",

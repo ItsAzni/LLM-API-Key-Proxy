@@ -578,15 +578,18 @@ class RequestExecutor:
                 self._log_acquiring_credential(
                     model, len(retry_state.tried_credentials), availability
                 )
+                wait_for_cooldown = len(retry_state.tried_credentials) == 0
                 async with await usage_manager.acquire_credential(
                     model=model,
                     quota_group=quota_group,
                     candidates=untried,
                     priorities=filter_result.priorities,
+                    wait_for_cooldown=wait_for_cooldown,
                     deadline=deadline,
                 ) as cred_context:
                     cred = cred_context.credential
                     retry_state.record_attempt(cred)
+                    error_accumulator.record_attempt(cred)
 
                     state = getattr(usage_manager, "states", {}).get(
                         cred_context.stable_id
@@ -788,15 +791,18 @@ class RequestExecutor:
                     self._log_acquiring_credential(
                         model, len(retry_state.tried_credentials), availability
                     )
+                    wait_for_cooldown = len(retry_state.tried_credentials) == 0
                     async with await usage_manager.acquire_credential(
                         model=model,
                         quota_group=quota_group,
                         candidates=untried,
                         priorities=filter_result.priorities,
+                        wait_for_cooldown=wait_for_cooldown,
                         deadline=deadline,
                     ) as cred_context:
                         cred = cred_context.credential
                         retry_state.record_attempt(cred)
+                        error_accumulator.record_attempt(cred)
 
                         state = getattr(usage_manager, "states", {}).get(
                             cred_context.stable_id

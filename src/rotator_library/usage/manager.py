@@ -411,6 +411,7 @@ class UsageManager:
         exclude: Optional[Set[str]] = None,
         candidates: Optional[List[str]] = None,
         priorities: Optional[Dict[str, int]] = None,
+        wait_for_cooldown: bool = True,
         deadline: float = 0.0,
     ) -> CredentialContext:
         """
@@ -430,6 +431,8 @@ class UsageManager:
                        If provided, only these will be considered for selection.
             priorities: Optional priority overrides (accessor -> priority).
                        If provided, overrides the stored priorities.
+            wait_for_cooldown: Whether to wait for cooldown expiry when all
+                       candidates are currently cooldown-blocked.
             deadline: Request deadline timestamp
 
         Returns:
@@ -560,6 +563,15 @@ class UsageManager:
                 )
 
                 if soonest_cooldown is not None:
+                    if not wait_for_cooldown:
+                        lib_logger.debug(
+                            "All candidate credentials are on cooldown for %s/%s; "
+                            "skipping cooldown wait for immediate rotation.",
+                            self.provider,
+                            normalized_model,
+                        )
+                        break
+
                     remaining_budget = deadline - time.time()
                     wait_needed = soonest_cooldown - time.time()
 
