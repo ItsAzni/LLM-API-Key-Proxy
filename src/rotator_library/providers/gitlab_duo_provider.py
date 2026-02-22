@@ -126,7 +126,7 @@ CREDIT_COSTS: Dict[str, float] = {
 DEFAULT_CREDITS_PER_ACCOUNT = 24.0
 
 # Maximum exhaustion strikes before auto-removing a credential
-MAX_EXHAUSTION_STRIKES = 3
+MAX_EXHAUSTION_STRIKES = 1
 
 # Cooldown applied when a real credit exhaustion 402 is detected (seconds)
 CREDIT_EXHAUSTION_COOLDOWN = 300
