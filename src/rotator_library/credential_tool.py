@@ -279,6 +279,7 @@ def _get_oauth_credentials_summary() -> dict:
         "qwen_code",
         "iflow",
         "antigravity",
+        "codex",
         "github_copilot",
         "gitlab_duo",
     ]
