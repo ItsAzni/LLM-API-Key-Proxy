@@ -129,6 +129,22 @@ class GitLabTrialAutomator:
         import glob as _glob
         import signal as _signal
 
+        # Known Chrome-related process names.  /proc/PID/comm is
+        # truncated to 15 characters by the kernel, so we use
+        # startswith() to catch variants like "google-chrome-stable"
+        # (truncated to "google-chrome-s") and "chromium-browser"
+        # (truncated to "chromium-browse").
+        _CHROME_COMM_EXACT = {
+            "chrome",
+            "chromium",
+            "headless_shell",
+        }
+        _CHROME_COMM_PREFIXES = (
+            "chrome_crashpad",
+            "google-chrome",
+            "chromium-browse",
+        )
+
         # Kill any lingering chrome/crashpad processes (skip PID 1 and self).
         if os.name != "nt":
             try:
@@ -139,14 +155,11 @@ class GitLabTrialAutomator:
                     if pid <= 1 or pid == os.getpid():
                         continue
                     try:
-                        cmdline = Path(f"/proc/{pid}/comm").read_text().strip()
+                        comm = Path(f"/proc/{pid}/comm").read_text().strip()
                     except (OSError, PermissionError):
                         continue
-                    if cmdline in (
-                        "chrome",
-                        "chrome_crashpad",
-                        "google-chrome",
-                        "chromium",
+                    if comm in _CHROME_COMM_EXACT or comm.startswith(
+                        _CHROME_COMM_PREFIXES
                     ):
                         try:
                             os.kill(pid, _signal.SIGKILL)
@@ -165,7 +178,11 @@ class GitLabTrialAutomator:
         import tempfile as _tmpmod
 
         tmpdir = _tmpmod.gettempdir()
-        for pattern in ("com.google.Chrome.*", "playwright-artifacts-*"):
+        for pattern in (
+            "com.google.Chrome.*",
+            "playwright-artifacts-*",
+            "gitlab-trial-chrome-*",
+        ):
             for p in _glob.glob(os.path.join(tmpdir, pattern)):
                 shutil.rmtree(p, ignore_errors=True)
 
@@ -351,13 +368,32 @@ class GitLabTrialAutomator:
                 return None
             await asyncio.sleep(0.5)
 
-        # Chrome didn't start in time.
+        # Chrome didn't start in time — kill the entire process group.
         try:
-            process.terminate()
-        except Exception as e:
-            self.console.print(
-                f"[dim]Failed to terminate stale Chrome process: {e}[/dim]"
-            )
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, 15)  # SIGTERM
+        except (ProcessLookupError, PermissionError):
+            pass
+        except Exception:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, 9)  # SIGKILL
+            except (ProcessLookupError, PermissionError):
+                pass
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return None
 
     @staticmethod
@@ -4947,12 +4983,34 @@ class GitLabTrialAutomator:
                                 "falling back to standard launch.[/yellow]"
                             )
                             browser = None
-                            try:
-                                chrome_process.terminate()
-                            except Exception as e:
-                                self.console.print(
-                                    f"[dim]Chrome cleanup on CDP failure: {e}[/dim]"
-                                )
+                            # Kill the entire Chrome process group — a bare
+                            # terminate() can leave GPU/crashpad children.
+                            if chrome_process is not None:
+                                try:
+                                    pgid = os.getpgid(chrome_process.pid)
+                                    os.killpg(pgid, 15)
+                                except (ProcessLookupError, PermissionError):
+                                    pass
+                                except Exception:
+                                    try:
+                                        chrome_process.terminate()
+                                    except Exception:
+                                        pass
+                                try:
+                                    chrome_process.wait(timeout=3)
+                                except subprocess.TimeoutExpired:
+                                    try:
+                                        pgid = os.getpgid(chrome_process.pid)
+                                        os.killpg(pgid, 9)
+                                    except (ProcessLookupError, PermissionError):
+                                        pass
+                                    except Exception:
+                                        try:
+                                            chrome_process.kill()
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                             chrome_process = None
 
                 # =============================================================
