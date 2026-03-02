@@ -2053,12 +2053,12 @@ class GitLabTrialAutomator:
         return clicked
 
     async def _handle_welcome_onboarding(self, page: Any) -> bool:
-        """Handle GitLab's multi-step post-signup onboarding flow.
+        """Handle GitLab's post-signup onboarding flow.
 
-        The onboarding consists of up to three pages:
-        1. Welcome – role, reason, usage context
-        2. Company info – company name, size, country
-        3. Create first project – group + project names
+        GitLab now typically shows a single combined page with role, reason,
+        project creation (group + project names), and a "Create project"
+        button.  The legacy three-step flow (Welcome → Company → Project) is
+        kept as a fallback in case GitLab A/B tests or reverts the change.
         """
         handled_any = False
 
@@ -2835,6 +2835,41 @@ class GitLabTrialAutomator:
 
         await self._human_pause(page, 200, 400)
 
+        # --- "Who will be using GitLab?" dropdown (new combined page) ---
+        # On the legacy flow this was radios ("Just me" / "My team"); on the
+        # combined page it's a native <select> or GL dropdown.
+        who_using_selectors = [
+            'select[name*="setup_for_company"]',
+            'select[name*="who_will"]',
+            'select[name*="using_gitlab"]',
+            'select[id*="setup_for_company" i]',
+            '[data-testid="who-will-be-using-dropdown"]',
+        ]
+        who_picked = False
+        try:
+            who_picked = await self._pick_native_select(
+                page,
+                who_using_selectors,
+                ["just me", "myself", "juste moi"],
+            )
+        except Exception as e:
+            self.console.print(f"[red]Who-using native select failed: {e}[/red]")
+        if not who_picked:
+            try:
+                who_picked = await self._pick_gl_dropdown(
+                    page,
+                    label_hints=[
+                        "using gitlab",
+                        "who will",
+                        "qui utilisera",
+                        "setup_for_company",
+                    ],
+                    option_hints=["just me", "myself", "juste moi"],
+                )
+            except Exception as e:
+                self.console.print(f"[red]Who-using GL dropdown failed: {e}[/red]")
+        await self._human_pause(page, 300, 500)
+
         # "What would you like to do?" — Joining project radios
         # (Added ~2025; required field: "Create a new project" or "Join existing")
         await self._click_first_visible(
@@ -2861,6 +2896,76 @@ class GitLabTrialAutomator:
                 'input[value="just_me"]',
                 'input[value="myself"]',
             ],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # --- Combined page: company + project fields (merged flow) ---
+        # Country or region dropdown (was on the company step, now on welcome)
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["country", "pays", "region"],
+            option_hints=["france", "united states", "canada"],
+        )
+        await self._human_pause(page, 300, 500)
+
+        # State/province (only visible for some countries like the US)
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["state", "province", "etat"],
+            option_hints=["california", "texas", "new york"],
+        )
+        await self._human_pause(page, 200, 400)
+
+        # Company name
+        company = f"DevTeam {secrets.token_hex(3)}"
+        await self._safe_fill(
+            page,
+            [
+                "#company_name",
+                'input[name="company_name"]',
+                'input[name="trial_company_name"]',
+                '[data-testid="company-name-input"]',
+                'input[placeholder*="Company" i]',
+                'input[placeholder*="company" i]',
+                'input[placeholder*="entreprise" i]',
+            ],
+            company,
+        )
+        await self._human_pause(page, 300, 500)
+
+        # Number of employees dropdown (may or may not be on combined page)
+        await self._pick_gl_dropdown(
+            page,
+            label_hints=["employees", "size", "taille", "employ"],
+            option_hints=["1-99", "1 - 99", "small"],
+        )
+        await self._human_pause(page, 200, 400)
+
+        # Group + project name
+        slug = f"duo-{secrets.token_hex(4)}"
+
+        await self._safe_fill(
+            page,
+            [
+                "#group_name",
+                'input[name="group[name]"]',
+                '[data-testid="group-name-input"]',
+                'input[placeholder*="group" i]',
+            ],
+            f"Duo {slug}",
+        )
+        await self._human_pause(page, 300, 500)
+
+        await self._safe_fill(
+            page,
+            [
+                "#project_name",
+                'input[name="project[name]"]',
+                '[data-testid="project-name-input"]',
+                'input[placeholder*="project" i]',
+                'input[placeholder*="My awesome" i]',
+            ],
+            f"project-{slug}",
         )
         await self._human_pause(page, 300, 500)
 
@@ -3206,7 +3311,7 @@ class GitLabTrialAutomator:
             if not btn_clicked:
                 await self._safe_click_by_button_name(
                     page,
-                    ["Continue", "Continuer", "Get started", "Commencer"],
+                    ["Continue", "Continuer", "Get started", "Commencer", "Create project", "Créer un projet", "Continue to GitLab"],
                 )
             try:
                 await page.wait_for_timeout(2500)
@@ -5155,10 +5260,54 @@ class GitLabTrialAutomator:
                     identity["password"],
                 )
 
-                # Handle the welcome/onboarding page that GitLab shows
-                # for newly registered accounts before granting dashboard
-                # access.
+                # Navigate explicitly to the welcome/onboarding page.
+                # After email verification GitLab does not always redirect
+                # there automatically, so we force it.
+                _welcome_url = "https://gitlab.com/users/sign_up/welcome"
+                try:
+                    await page.goto(
+                        _welcome_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                except Exception as e:
+                    self.console.print(
+                        f"[dim]Navigate to welcome page failed: {e}[/dim]"
+                    )
+
                 await self._handle_welcome_onboarding(page)
+
+                # Verify onboarding is fully complete before proceeding to
+                # OAuth.  The OAuth token must NOT be obtained until the
+                # onboarding form is submitted and we leave the welcome page.
+                _onboard_slugs = (
+                    "sign_up/welcome", "registrations/welcome",
+                    "sign_up/company", "registrations/company",
+                    "sign_up/project", "registrations/project",
+                    "projects/new",
+                )
+                for _verify_attempt in range(4):
+                    await page.wait_for_timeout(2000)
+                    _cur = page.url
+                    if not any(s in _cur for s in _onboard_slugs):
+                        break
+                    self.console.print(
+                        f"[yellow]Still on onboarding page ({_cur}), "
+                        f"retrying… (attempt {_verify_attempt + 1}/4)[/yellow]"
+                    )
+                    # Re-navigate to the welcome page and retry the form.
+                    try:
+                        await page.goto(
+                            _welcome_url,
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(2000)
+                    _cur = page.url
+                    if any(s in _cur for s in _onboard_slugs):
+                        await self._handle_welcome_onboarding(page)
 
                 await self._notify("7/9 Starting OAuth authorization flow...")
 
