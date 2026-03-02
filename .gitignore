@@ -137,3 +137,4 @@ oauth_creds/
 .vscode/
 .serena/
 AGENTS.md
+context_portal/

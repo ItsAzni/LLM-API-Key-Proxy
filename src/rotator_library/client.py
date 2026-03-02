@@ -1211,6 +1211,30 @@ class RotatingClient:
                     f"Failed to parse {provider_headers_key}: {e}. Expected JSON format."
                 )
 
+        # Add provider-specific headers from provider plugin's get_auth_header method
+        # This allows providers like OpenCode to inject required headers (e.g., HTTP-Referer)
+        provider_instance = self._get_provider_instance(provider)
+        if provider_instance and hasattr(provider_instance, "get_auth_header"):
+            try:
+                auth_headers = provider_instance.get_auth_header(credential)
+                if auth_headers and isinstance(auth_headers, dict):
+                    if "headers" not in litellm_kwargs:
+                        litellm_kwargs["headers"] = {}
+                    if isinstance(litellm_kwargs["headers"], dict):
+                        # Update headers, but don't override Authorization if already set
+                        for key, value in auth_headers.items():
+                            if key.lower() != "authorization" or "authorization" not in (
+                                h.lower() for h in litellm_kwargs["headers"].keys()
+                            ):
+                                litellm_kwargs["headers"][key] = value
+                        lib_logger.debug(
+                            f"Applied auth headers from provider '{provider}'"
+                        )
+            except Exception as e:
+                lib_logger.debug(
+                    f"Failed to get auth headers from provider '{provider}': {e}"
+                )
+
     def get_oauth_credentials(self) -> Dict[str, List[str]]:
         return self.oauth_credentials
 

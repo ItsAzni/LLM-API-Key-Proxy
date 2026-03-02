@@ -97,6 +97,12 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
     "zai": {
         "category": "popular",
     },
+    "opencode": {
+        "category": "popular",
+        "extra_vars": [
+            ("OPENCODE_API_BASE", "API Base URL", "https://opencode.ai/zen/v1"),
+        ],
+    },
     "minimax": {
         "category": "popular",
         "extra_vars": [

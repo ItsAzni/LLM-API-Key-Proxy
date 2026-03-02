@@ -89,6 +89,7 @@ PROXY_PROVIDERS = frozenset(
         "kilocode",  # Routes to multiple providers (minimax, moonshot, z-ai, etc.)
         "openrouter",  # Routes to 100+ providers
         "requesty",  # Router/aggregator
+        "opencode",  # OpenCode AI provider with quota-based rate limits
     }
 )
 
