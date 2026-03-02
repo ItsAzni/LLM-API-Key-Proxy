@@ -304,6 +304,20 @@ def _is_claude_model(model: str) -> bool:
     return clean.startswith("claude")
 
 
+def _claude_supports_thinking(model: str) -> bool:
+    """Check if a Claude model supports extended thinking.
+
+    Only Sonnet 3.7+, Sonnet 4+, and Opus models support thinking.
+    Haiku and older models do not.
+    """
+    clean = model.split("/")[-1].lower() if "/" in model else model.lower()
+    if "haiku" in clean:
+        return False
+    if "3.5" in clean:
+        return False
+    return True
+
+
 def _is_gemini_model(model: str) -> bool:
     """Check if model is a Gemini model."""
     clean = model.split("/")[-1].lower() if "/" in model else model.lower()
@@ -876,8 +890,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 "id": call_id,
                                 "type": "function",
                                 "function": {
-                                    "name": "AskUserQuestion",
-                                    "arguments": json.dumps({"question": "User input"}),
+                                    "name": "_relay_user_input",
+                                    "arguments": "{}",
                                 },
                             }
                         ],
@@ -902,6 +916,20 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 user_msgs_kept,
                 ratio,
             )
+
+        # Ensure the first non-system message is role "user".
+        # The Copilot backend converts to Anthropic format for Claude,
+        # which requires conversations to start with a user message.
+        # When all user messages are transformed, the first non-system
+        # message becomes "assistant" (tool_use), causing the backend
+        # to reject the tool_result for lacking a prior tool_use.
+        if user_msgs_transformed > 0:
+            first_non_system = next(
+                (i for i, m in enumerate(transformed) if m.get("role") not in ("system", "developer")),
+                None,
+            )
+            if first_non_system is not None and transformed[first_non_system].get("role") != "user":
+                transformed.insert(first_non_system, {"role": "user", "content": "Respond to the user's message provided via the tool result below."})
 
         return transformed
 
@@ -1209,7 +1237,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "reasoningSummary"
         )
 
-        if _is_claude_model(model):
+        if _is_claude_model(model) and _claude_supports_thinking(model):
             # Check if tool_choice forces use - if so, skip thinking
             # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
             tools = kwargs.get("tools") or payload.get("tools")
@@ -1240,14 +1268,25 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     # OpenCode parity: use flat thinking_budget at top level
                     # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
                     payload["thinking_budget"] = final_thinking_budget
+                    # Ensure max_tokens > thinking_budget (Anthropic requirement)
+                    current_max = payload.get("max_tokens") or 0
+                    if current_max <= final_thinking_budget:
+                        payload["max_tokens"] = final_thinking_budget + 4096
                     lib_logger.info(
-                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s, max_tokens: %s%s",
                         model,
                         final_thinking_budget,
+                        payload["max_tokens"],
                         f" (from reasoning_effort={reasoning_effort})"
                         if reasoning_effort and not thinking_budget
                         else "",
                     )
+        elif _is_claude_model(model):
+            # Claude models that don't support thinking (e.g. haiku, 3.5)
+            lib_logger.debug(
+                "[GitHubCopilot] Skipping thinking_budget for %s (model does not support extended thinking)",
+                model,
+            )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
@@ -1450,7 +1489,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "reasoningSummary"
         )
 
-        if _is_claude_model(model):
+        if _is_claude_model(model) and _claude_supports_thinking(model):
             # Check if tool_choice forces use - if so, skip thinking
             # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
             tools = kwargs.get("tools") or payload.get("tools")
@@ -1481,14 +1520,25 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     # OpenCode parity: use flat thinking_budget at top level
                     # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
                     payload["thinking_budget"] = final_thinking_budget
+                    # Ensure max_tokens > thinking_budget (Anthropic requirement)
+                    current_max = payload.get("max_tokens") or 0
+                    if current_max <= final_thinking_budget:
+                        payload["max_tokens"] = final_thinking_budget + 4096
                     lib_logger.info(
-                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s, max_tokens: %s%s",
                         model,
                         final_thinking_budget,
+                        payload["max_tokens"],
                         f" (from reasoning_effort={reasoning_effort})"
                         if reasoning_effort and not thinking_budget
                         else "",
                     )
+        elif _is_claude_model(model):
+            # Claude models that don't support thinking (e.g. haiku, 3.5)
+            lib_logger.debug(
+                "[GitHubCopilot] Skipping thinking_budget for %s (model does not support extended thinking)",
+                model,
+            )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
