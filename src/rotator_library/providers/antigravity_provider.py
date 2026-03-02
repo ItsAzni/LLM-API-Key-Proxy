@@ -2320,6 +2320,10 @@ class AntigravityProvider(
             False  # Track if initial full fetch completed
         )
 
+        # Ultra tier periodic quota verification state
+        self._ultra_claude_counts: Dict[str, int] = {}  # credential -> request count
+        self._usage_manager_ref = None  # Set by _store_baselines_to_usage_manager
+
         # Feature flags
         self._preserve_signatures_in_client = env_bool(
             "ANTIGRAVITY_PRESERVE_THOUGHT_SIGNATURES", True
@@ -6712,6 +6716,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         Reports the actual number of API calls made, including internal retries
         for empty responses, bare 429s, and malformed function calls.
 
+        Also tracks Ultra tier Claude requests and triggers periodic quota
+        verification every 200 requests to prevent premature exhaustion.
+
         This uses the ContextVar pattern for thread-safe retry counting:
         - _internal_attempt_count is set to 1 at start of _streaming_with_retry
         - Incremented before each retry
@@ -6726,6 +6733,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             RequestCompleteResult with count_override set to actual attempt count
         """
         from ..core.types import RequestCompleteResult
+        from .utilities.antigravity_quota_tracker import ULTRA_CLAUDE_VERIFY_INTERVAL
 
         # Get the attempt count for this request
         attempt_count = _internal_attempt_count.get()
@@ -6740,4 +6748,35 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 f"(includes internal retries)"
             )
 
+        # Ultra tier Claude periodic quota verification
+        if success and self._is_claude_model(model):
+            tier = self.project_tier_cache.get(credential)
+            if tier == "ULTRA":
+                count = self._ultra_claude_counts.get(credential, 0) + attempt_count
+                self._ultra_claude_counts[credential] = count
+
+                if count >= ULTRA_CLAUDE_VERIFY_INTERVAL:
+                    self._ultra_claude_counts[credential] = 0
+                    # Schedule background verification (non-blocking)
+                    try:
+                        asyncio.create_task(
+                            self._run_ultra_quota_check(credential),
+                            name=f"ultra_verify_{credential[-20:]}",
+                        )
+                    except RuntimeError:
+                        # No event loop running (shouldn't happen in async context)
+                        pass
+
         return RequestCompleteResult(count_override=attempt_count)
+
+    async def _run_ultra_quota_check(self, credential: str) -> None:
+        """Background task to verify Ultra tier Claude quota from API."""
+        try:
+            result = await self.verify_ultra_claude_quota(credential)
+            if result:
+                lib_logger.info(
+                    f"[Ultra verify] Quota check passed for "
+                    f"{credential[-30:]}, baselines refreshed"
+                )
+        except Exception as e:
+            lib_logger.debug(f"[Ultra verify] Background check failed: {e}")

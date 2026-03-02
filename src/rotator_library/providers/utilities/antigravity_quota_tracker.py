@@ -52,6 +52,30 @@ lib_logger = logging.getLogger("rotator_library")
 
 DEFAULT_MAX_REQUESTS: Dict[str, Dict[str, int]] = {
     # Canonical tier names
+    "ULTRA": {
+        # Claude/GPT-OSS group - Ultra tier has near-unlimited Claude access
+        # No verified limit published by Google; using 1000 as conservative estimate
+        # Periodic API verification every 200 requests prevents premature exhaustion
+        "claude-sonnet-4-5": 1000,
+        "claude-sonnet-4-5-thinking": 1000,
+        "claude-opus-4-5": 1000,
+        "claude-opus-4-5-thinking": 1000,
+        "claude-opus-4-6": 1000,
+        "claude-opus-4-6-thinking": 1000,
+        "claude-sonnet-4.5": 1000,
+        "claude-opus-4.5": 1000,
+        "claude-opus-4.6": 1000,
+        "gpt-oss-120b-medium": 1000,
+        # Other models: same as PRO (no evidence of different limits)
+        "gemini-3-pro-high": 320,
+        "gemini-3-pro-low": 320,
+        "gemini-3-pro-preview": 320,
+        "gemini-3-flash": 400,
+        "gemini-2.5-flash": 3000,
+        "gemini-2.5-flash-thinking": 3000,
+        "gemini-2.5-flash-lite": 5000,
+        "gemini-2.5-pro": 1,
+    },
     "PRO": {
         # Claude/GPT-OSS group (verified: 0.6667% per request = 150 requests)
         "claude-sonnet-4-5": 150,
@@ -109,6 +133,11 @@ DEFAULT_MAX_REQUESTS: Dict[str, Dict[str, int]] = {
 # Legacy tier name aliases (backwards compatibility)
 DEFAULT_MAX_REQUESTS["standard-tier"] = DEFAULT_MAX_REQUESTS["PRO"]
 DEFAULT_MAX_REQUESTS["free-tier"] = DEFAULT_MAX_REQUESTS["FREE"]
+DEFAULT_MAX_REQUESTS["ultra-tier"] = DEFAULT_MAX_REQUESTS["ULTRA"]
+DEFAULT_MAX_REQUESTS["g1-ultra-tier"] = DEFAULT_MAX_REQUESTS["ULTRA"]
+
+# Ultra tier periodic verification interval (check API every N requests for Claude models)
+ULTRA_CLAUDE_VERIFY_INTERVAL = 200
 
 # Default max requests for unknown models (1% = 100 requests)
 DEFAULT_MAX_REQUESTS_UNKNOWN = 100
@@ -178,6 +207,10 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
     _quota_refresh_interval: int
     project_tier_cache: Dict[str, str]
     project_id_cache: Dict[str, str]
+
+    # Ultra tier periodic verification state (set by provider __init__)
+    _ultra_claude_counts: Dict[str, int]
+    _usage_manager_ref: Optional["UsageManager"]
 
     # =========================================================================
     # ANTIGRAVITY-SPECIFIC HELPERS
@@ -316,6 +349,101 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
             if clean_model in models:
                 return group_name
         return None
+
+    # =========================================================================
+    # ULTRA TIER PERIODIC QUOTA VERIFICATION
+    # =========================================================================
+
+    @staticmethod
+    def _is_claude_model(model: str) -> bool:
+        """Check if a model is a Claude model."""
+        clean = model.split("/")[-1] if "/" in model else model
+        return clean.startswith("claude")
+
+    async def _store_baselines_to_usage_manager(
+        self,
+        quota_results: Dict[str, Any],
+        usage_manager: "UsageManager",
+        force: bool = False,
+        is_initial_fetch: bool = False,
+    ) -> int:
+        """Override to capture usage_manager reference for periodic verification."""
+        # Store reference for later use by periodic quota checks
+        self._usage_manager_ref = usage_manager
+        return await super()._store_baselines_to_usage_manager(
+            quota_results, usage_manager, force=force, is_initial_fetch=is_initial_fetch
+        )
+
+    async def verify_ultra_claude_quota(
+        self,
+        credential_path: str,
+    ) -> bool:
+        """
+        Verify Ultra tier Claude quota from API and reset if still available.
+
+        Called every ULTRA_CLAUDE_VERIFY_INTERVAL requests to prevent premature
+        exhaustion of Ultra tier credentials which have near-unlimited Claude access.
+
+        Args:
+            credential_path: Credential to check
+
+        Returns:
+            True if quota is still available and baselines were reset
+        """
+        usage_manager = getattr(self, "_usage_manager_ref", None)
+        if not usage_manager:
+            lib_logger.debug(
+                "[Ultra verify] No usage_manager ref available, skipping"
+            )
+            return False
+
+        try:
+            quota_data = await self.fetch_quota_from_api(credential_path)
+            if quota_data.get("status") != "success":
+                lib_logger.warning(
+                    f"[Ultra verify] API fetch failed for "
+                    f"{Path(credential_path).name if not credential_path.startswith('env://') else credential_path}"
+                )
+                return False
+
+            # Check Claude model remaining quota
+            has_remaining = False
+            for model_name, model_info in quota_data.get("models", {}).items():
+                user_model = self._api_to_user_model(model_name)
+                if not self._is_claude_model(user_model):
+                    continue
+                remaining = model_info.get("remaining_fraction", 0.0)
+                if remaining > 0:
+                    has_remaining = True
+                    break
+
+            if has_remaining:
+                # Reset baselines from fresh API data
+                stored = await super()._store_baselines_to_usage_manager(
+                    {credential_path: quota_data},
+                    usage_manager,
+                    force=True,
+                    is_initial_fetch=False,
+                )
+                identifier = (
+                    Path(credential_path).name
+                    if not credential_path.startswith("env://")
+                    else credential_path
+                )
+                lib_logger.info(
+                    f"[Ultra verify] Claude quota still available for {identifier}, "
+                    f"reset {stored} baselines"
+                )
+                return True
+            else:
+                lib_logger.info(
+                    "[Ultra verify] Claude quota actually exhausted per API"
+                )
+                return False
+
+        except Exception as e:
+            lib_logger.warning(f"[Ultra verify] Error during verification: {e}")
+            return False
 
     # =========================================================================
     # BaseQuotaTracker ABSTRACT METHOD IMPLEMENTATIONS
