@@ -1724,7 +1724,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
                     # It's an enum pattern - merge into single enum
                     result = {k: v for k, v in schema.items() if k != union_key}
                     result["type"] = "string"
-                    result["enum"] = merged_enum
+                    result["enum"] = [str(v) for v in merged_enum]
                     if parent_desc:
                         result["description"] = parent_desc
                     return _clean_claude_schema(result, for_gemini)
@@ -1773,7 +1773,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # Also add 'type' if not present, since enum requires type: "string"
     if "const" in schema:
         const_value = schema["const"]
-        cleaned["enum"] = [const_value]
+        cleaned["enum"] = [str(const_value)]
         # Gemini requires type when using enum - infer from const value or default to string
         if "type" not in schema:
             if isinstance(const_value, bool):
@@ -1844,12 +1844,16 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         elif isinstance(value, dict):
             cleaned[key] = _clean_claude_schema(value, for_gemini)
         elif isinstance(value, list):
-            cleaned[key] = [
-                _clean_claude_schema(item, for_gemini)
-                if isinstance(item, dict)
-                else item
-                for item in value
-            ]
+            if key == "enum":
+                # Google's Proto-based API requires all enum values to be strings
+                cleaned[key] = [str(item) for item in value]
+            else:
+                cleaned[key] = [
+                    _clean_claude_schema(item, for_gemini)
+                    if isinstance(item, dict)
+                    else item
+                    for item in value
+                ]
         else:
             cleaned[key] = value
 
