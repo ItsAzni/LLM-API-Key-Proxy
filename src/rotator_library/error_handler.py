@@ -599,6 +599,8 @@ class ClassifiedError:
         retry_after: Optional[int] = None,
         quota_reset_timestamp: Optional[float] = None,
         throttle_assessment: Optional[ThrottleAssessment] = None,
+        quota_value: Optional[str] = None,
+        quota_id: Optional[str] = None,
     ):
         self.error_type = error_type
         self.original_exception = original_exception
@@ -609,6 +611,9 @@ class ClassifiedError:
         self.quota_reset_timestamp = quota_reset_timestamp
         # IP throttle assessment (when multiple credentials show correlated 429s)
         self.throttle_assessment = throttle_assessment
+        # Quota details from Google/Gemini API errors (quotaValue and quotaId)
+        self.quota_value = quota_value
+        self.quota_id = quota_id
 
     def __str__(self):
         parts = [
@@ -620,6 +625,10 @@ class ClassifiedError:
             parts.append(f"quota_reset_ts={self.quota_reset_timestamp}")
         if self.throttle_assessment:
             parts.append(f"throttle_scope={self.throttle_assessment.scope.value}")
+        if self.quota_value:
+            parts.append(f"quota_value={self.quota_value}")
+        if self.quota_id:
+            parts.append(f"quota_id={self.quota_id}")
         parts.append(f"original_exc={self.original_exception}")
         return f"ClassifiedError({', '.join(parts)})"
 
@@ -958,6 +967,17 @@ def classify_stream_error(raw_response: Dict) -> "ClassifiedError":
 
     Creates ClassifiedError appropriate for retry logic.
     """
+    # Inception Labs specific error patterns
+    raw_str = str(raw_response).lower()
+    if "inception" in raw_str:
+        if "server had an error" in raw_str or "the server had an error" in raw_str:
+            return ClassifiedError(
+                error_type="server_error",
+                status_code=503,
+                original_exception=None,
+                retry_after=5.0,
+            )
+
     if is_provider_abort(raw_response):
         return ClassifiedError(
             error_type="api_connection",  # Treat as transient for retry
@@ -990,6 +1010,12 @@ PROVIDER_BACKOFF_CONFIGS: Dict[str, Dict[str, float]] = {
         "server_error_base": 1.5,
         "connection_base": 0.5,
         "max_backoff": 20.0,
+    },
+    "inception": {
+        "server_error_base": 2.0,  # Longer initial backoff for 500s
+        "connection_base": 1.0,
+        "max_backoff": 60.0,
+        "max_retries": 5,
     },
 }
 
@@ -1396,11 +1422,22 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             retry_after = get_retry_after(e)
             # Check if this is a quota error vs rate limit
             if "quota" in error_body or "resource_exhausted" in error_body:
+                # Try to extract quotaValue and quotaId from Google/Gemini errors
+                quota_value = None
+                quota_id = None
+                try:
+                    response_text = e.response.text if hasattr(e.response, "text") else ""
+                    if response_text:
+                        quota_value, quota_id = _extract_quota_details(response_text)
+                except Exception:
+                    pass
                 return ClassifiedError(
                     error_type="quota_exceeded",
                     original_exception=e,
                     status_code=status_code,
                     retry_after=retry_after,
+                    quota_value=quota_value,
+                    quota_id=quota_id,
                 )
             # Check for IP-based rate limiting (affects all credentials)
             ip_throttle_cooldown = _detect_ip_throttle(error_body, provider=provider)

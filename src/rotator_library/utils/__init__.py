@@ -13,6 +13,7 @@ from .paths import (
 )
 from .reauth_coordinator import get_reauth_coordinator, ReauthCoordinator
 from .resilient_io import (
+    AsyncResilientStateWriter,
     BufferedWriteRegistry,
     ResilientStateWriter,
     safe_write_json,
@@ -30,6 +31,7 @@ __all__ = [
     "get_data_file",
     "get_reauth_coordinator",
     "ReauthCoordinator",
+    "AsyncResilientStateWriter",
     "BufferedWriteRegistry",
     "ResilientStateWriter",
     "safe_write_json",

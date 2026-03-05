@@ -176,7 +176,9 @@ class UsageManager:
         # Batch persistence manager for high-throughput scenarios
         # Enabled via USAGE_PERSISTENCE_ENABLE=true environment variable
         self._batch_persistence: Optional[UsagePersistenceManager] = None
-        self._use_batch_persistence = os.getenv("USAGE_BATCH_PERSISTENCE", "false").lower() in ("true", "1", "yes")
+        self._use_batch_persistence = os.getenv(
+            "USAGE_BATCH_PERSISTENCE", "false"
+        ).lower() in ("true", "1", "yes")
 
         if daily_reset_time_utc:
             hour, minute = map(int, daily_reset_time_utc.split(":"))
@@ -225,7 +227,10 @@ class UsageManager:
         # Check for provider prefix format (e.g., "openai:sk-xxx")
         if ":" in credential:
             provider = credential.split(":")[0]
-            if provider in self.provider_rotation_modes or provider in self.fair_cycle_enabled:
+            if (
+                provider in self.provider_rotation_modes
+                or provider in self.fair_cycle_enabled
+            ):
                 return provider
 
         # Fallback: try to extract from known credential patterns
@@ -1518,7 +1523,10 @@ class UsageManager:
                 # Initialize batch persistence if enabled
                 if self._use_batch_persistence:
                     from pathlib import Path
-                    self._batch_persistence = UsagePersistenceManager(Path(self.file_path))
+
+                    self._batch_persistence = UsagePersistenceManager(
+                        Path(self.file_path)
+                    )
                     await self._batch_persistence.initialize()
                     lib_logger.info("Batch persistence enabled for usage data")
 
@@ -1940,7 +1948,9 @@ class UsageManager:
                 "success_count": 0,
                 "prompt_tokens": 0,
                 "prompt_tokens_cached": 0,
+                "prompt_tokens_cache_creation": 0,
                 "completion_tokens": 0,
+                "thinking_tokens": 0,
                 "approx_cost": 0.0,
             },
         )
@@ -1950,6 +1960,9 @@ class UsageManager:
         global_model["prompt_tokens_cached"] = global_model.get(
             "prompt_tokens_cached", 0
         ) + model_data.get("prompt_tokens_cached", 0)
+        global_model["prompt_tokens_cache_creation"] = global_model.get(
+            "prompt_tokens_cache_creation", 0
+        ) + model_data.get("prompt_tokens_cache_creation", 0)
         global_model["completion_tokens"] += model_data.get("completion_tokens", 0)
         global_model["approx_cost"] += model_data.get("approx_cost", 0.0)
 
@@ -2116,7 +2129,9 @@ class UsageManager:
                     "success_count": 0,
                     "prompt_tokens": 0,
                     "prompt_tokens_cached": 0,
+                    "prompt_tokens_cache_creation": 0,
                     "completion_tokens": 0,
+                    "thinking_tokens": 0,
                     "approx_cost": 0.0,
                 },
             )
@@ -2125,6 +2140,9 @@ class UsageManager:
             global_model_stats["prompt_tokens_cached"] = global_model_stats.get(
                 "prompt_tokens_cached", 0
             ) + stats.get("prompt_tokens_cached", 0)
+            global_model_stats["prompt_tokens_cache_creation"] = global_model_stats.get(
+                "prompt_tokens_cache_creation", 0
+            ) + stats.get("prompt_tokens_cache_creation", 0)
             global_model_stats["completion_tokens"] += stats.get("completion_tokens", 0)
             global_model_stats["approx_cost"] += stats.get("approx_cost", 0.0)
 
@@ -2285,7 +2303,9 @@ class UsageManager:
                     )
                     return key
                 elif state["models_in_use"].get(model, 0) < max_concurrent:
-                    state["models_in_use"][model] = state["models_in_use"].get(model, 0) + 1
+                    state["models_in_use"][model] = (
+                        state["models_in_use"].get(model, 0) + 1
+                    )
                     lib_logger.info(
                         f"Acquired key {mask_credential(key)} for model {model} "
                         f"(fast path: concurrent {state['models_in_use'][model]}/{max_concurrent})"
@@ -2498,14 +2518,17 @@ class UsageManager:
                         )
                         # Pick any available key to wait on (they're all locked)
                         if available_keys:
-                            wait_condition = self.key_states[available_keys[0]]["condition"]
+                            wait_condition = self.key_states[available_keys[0]][
+                                "condition"
+                            ]
                             try:
                                 async with wait_condition:
                                     remaining_budget = deadline - time.time()
                                     if remaining_budget <= 0:
                                         break
                                     await asyncio.wait_for(
-                                        wait_condition.wait(), timeout=min(0.5, remaining_budget)
+                                        wait_condition.wait(),
+                                        timeout=min(0.5, remaining_budget),
                                     )
                             except asyncio.TimeoutError:
                                 pass  # Continue loop and re-evaluate
@@ -2724,14 +2747,17 @@ class UsageManager:
                         )
                         # Pick any available key to wait on (they're all locked)
                         if available_keys:
-                            wait_condition = self.key_states[available_keys[0]]["condition"]
+                            wait_condition = self.key_states[available_keys[0]][
+                                "condition"
+                            ]
                             try:
                                 async with wait_condition:
                                     remaining_budget = deadline - time.time()
                                     if remaining_budget <= 0:
                                         break
                                     await asyncio.wait_for(
-                                        wait_condition.wait(), timeout=min(0.5, remaining_budget)
+                                        wait_condition.wait(),
+                                        timeout=min(0.5, remaining_budget),
                                     )
                             except asyncio.TimeoutError:
                                 pass  # Continue loop and re-evaluate
@@ -2860,7 +2886,9 @@ class UsageManager:
                         "request_count": 0,
                         "prompt_tokens": 0,
                         "prompt_tokens_cached": 0,
+                        "prompt_tokens_cache_creation": 0,
                         "completion_tokens": 0,
+                        "thinking_tokens": 0,
                         "approx_cost": 0.0,
                     },
                 )
@@ -2903,6 +2931,7 @@ class UsageManager:
                                     "prompt_tokens": 0,
                                     "prompt_tokens_cached": 0,
                                     "completion_tokens": 0,
+                                    "thinking_tokens": 0,
                                     "approx_cost": 0.0,
                                 },
                             )
@@ -2958,7 +2987,9 @@ class UsageManager:
                         "success_count": 0,
                         "prompt_tokens": 0,
                         "prompt_tokens_cached": 0,
+                        "prompt_tokens_cache_creation": 0,
                         "completion_tokens": 0,
+                        "thinking_tokens": 0,
                         "approx_cost": 0.0,
                     },
                 )
@@ -2983,15 +3014,23 @@ class UsageManager:
 
                 # Extract cached tokens from prompt_tokens_details if present
                 cached_tokens = 0
+                cache_creation_tokens = 0
                 prompt_details = getattr(usage, "prompt_tokens_details", None)
                 if prompt_details:
                     if isinstance(prompt_details, dict):
                         cached_tokens = prompt_details.get("cached_tokens", 0) or 0
+                        cache_creation_tokens = (
+                            prompt_details.get("cache_creation_tokens", 0) or 0
+                        )
                     elif hasattr(prompt_details, "cached_tokens"):
                         cached_tokens = prompt_details.cached_tokens or 0
+                    if hasattr(prompt_details, "cache_creation_tokens"):
+                        cache_creation_tokens = (
+                            prompt_details.cache_creation_tokens or 0
+                        )
 
-                # Store uncached tokens (prompt_tokens is total, subtract cached)
-                uncached_tokens = prompt_total - cached_tokens
+                # Store uncached tokens (prompt_tokens is total, subtract cached and cache_creation)
+                uncached_tokens = prompt_total - cached_tokens - cache_creation_tokens
                 usage_data_ref["prompt_tokens"] += uncached_tokens
 
                 # Store cached tokens separately
@@ -3000,9 +3039,38 @@ class UsageManager:
                         usage_data_ref.get("prompt_tokens_cached", 0) + cached_tokens
                     )
 
-                usage_data_ref["completion_tokens"] += getattr(
-                    usage, "completion_tokens", 0
-                )
+                # Store cache creation tokens separately (tokens used to create the cache)
+                if cache_creation_tokens > 0:
+                    usage_data_ref["prompt_tokens_cache_creation"] = (
+                        usage_data_ref.get("prompt_tokens_cache_creation", 0)
+                        + cache_creation_tokens
+                    )
+
+                # Extract thinking/reasoning tokens from various provider formats
+                thinking_tokens = 0
+                # Try Anthropic/OpenAI style: completion_tokens_details.reasoning_tokens
+                completion_details = getattr(usage, "completion_tokens_details", None)
+                if completion_details:
+                    if isinstance(completion_details, dict):
+                        thinking_tokens = (
+                            completion_details.get("reasoning_tokens", 0) or 0
+                        )
+                    elif hasattr(completion_details, "reasoning_tokens"):
+                        thinking_tokens = completion_details.reasoning_tokens or 0
+                # Try DeepSeek style: direct reasoning_tokens field
+                if thinking_tokens == 0:
+                    thinking_tokens = getattr(usage, "reasoning_tokens", 0) or 0
+
+                raw_completion_tokens = getattr(usage, "completion_tokens", 0)
+                # Effective completion tokens exclude thinking tokens (they are not charged)
+                effective_completion_tokens = raw_completion_tokens - thinking_tokens
+                usage_data_ref["completion_tokens"] += effective_completion_tokens
+
+                # Store thinking tokens separately if present
+                if thinking_tokens > 0:
+                    usage_data_ref["thinking_tokens"] = (
+                        usage_data_ref.get("thinking_tokens", 0) + thinking_tokens
+                    )
                 lib_logger.info(
                     f"Recorded usage from response object for key {mask_credential(key)}"
                 )
@@ -3019,15 +3087,20 @@ class UsageManager:
                     else:
                         # Suppress LiteLLM's direct print() statements for unknown providers
                         # LiteLLM prints "Provider List: https://..." spam for unknown models
-                        from .utils.suppress_litellm_warnings import suppress_litellm_prints
+                        from .utils.suppress_litellm_warnings import (
+                            suppress_litellm_prints,
+                        )
 
                         with suppress_litellm_prints():
-                            if isinstance(completion_response, litellm.EmbeddingResponse):
+                            if isinstance(
+                                completion_response, litellm.EmbeddingResponse
+                            ):
                                 model_info = litellm.get_model_info(model)
                                 input_cost = model_info.get("input_cost_per_token")
                                 if input_cost:
                                     cost = (
-                                        completion_response.usage.prompt_tokens * input_cost
+                                        completion_response.usage.prompt_tokens
+                                        * input_cost
                                     )
                                 else:
                                     cost = None
@@ -3039,9 +3112,7 @@ class UsageManager:
                         if cost is not None:
                             usage_data_ref["approx_cost"] += cost
                 except Exception as e:
-                    lib_logger.debug(
-                        f"Could not calculate cost for model {model}: {e}"
-                    )
+                    lib_logger.debug(f"Could not calculate cost for model {model}: {e}")
             elif isinstance(completion_response, asyncio.Future) or hasattr(
                 completion_response, "__aiter__"
             ):
@@ -3077,6 +3148,15 @@ class UsageManager:
             increment_consecutive_failures: Whether to increment the failure counter.
                 Set to False for provider-level errors that shouldn't count against the key.
         """
+        # Skip usage tracking for server errors (503) to prevent incorrect quota exhaustion
+        # These are transient provider issues, not actual consumed quota
+        if classified_error.status_code == 503:
+            lib_logger.debug(
+                f"Skipping usage tracking for 503 error on {mask_credential(key)} - "
+                f"transient server error, not a quota consumption"
+            )
+            return
+
         await self._lazy_init()
 
         # Normalize model name to public-facing name for consistent tracking
@@ -3155,6 +3235,7 @@ class UsageManager:
                             "prompt_tokens": 0,
                             "prompt_tokens_cached": 0,
                             "completion_tokens": 0,
+                            "thinking_tokens": 0,
                             "approx_cost": 0.0,
                         },
                     )
@@ -3189,6 +3270,7 @@ class UsageManager:
                                     "prompt_tokens": 0,
                                     "prompt_tokens_cached": 0,
                                     "completion_tokens": 0,
+                                    "thinking_tokens": 0,
                                     "approx_cost": 0.0,
                                 },
                             )
@@ -3323,7 +3405,9 @@ class UsageManager:
                         "request_count": 0,
                         "prompt_tokens": 0,
                         "prompt_tokens_cached": 0,
+                        "prompt_tokens_cache_creation": 0,
                         "completion_tokens": 0,
+                        "thinking_tokens": 0,
                         "approx_cost": 0.0,
                     },
                 )
@@ -3350,6 +3434,7 @@ class UsageManager:
                                         "prompt_tokens": 0,
                                         "prompt_tokens_cached": 0,
                                         "completion_tokens": 0,
+                                        "thinking_tokens": 0,
                                         "approx_cost": 0.0,
                                     },
                                 )
@@ -3434,6 +3519,7 @@ class UsageManager:
                     "prompt_tokens": 0,
                     "prompt_tokens_cached": 0,
                     "completion_tokens": 0,
+                    "thinking_tokens": 0,
                     "approx_cost": 0.0,
                     "baseline_remaining_fraction": None,
                     "baseline_fetched_at": None,
@@ -3574,6 +3660,7 @@ class UsageManager:
                                 "prompt_tokens": 0,
                                 "prompt_tokens_cached": 0,
                                 "completion_tokens": 0,
+                                "thinking_tokens": 0,
                                 "approx_cost": 0.0,
                             },
                         )
@@ -3810,6 +3897,7 @@ class UsageManager:
                 cred_tokens = {
                     "input_cached": 0,
                     "input_uncached": 0,
+                    "input_cache_creation": 0,
                     "output": 0,
                 }
                 cred_requests = 0
@@ -3819,6 +3907,7 @@ class UsageManager:
                 cred_global_tokens = {
                     "input_cached": 0,
                     "input_uncached": 0,
+                    "input_cache_creation": 0,
                     "output": 0,
                 }
                 cred_global_requests = 0
@@ -3840,6 +3929,9 @@ class UsageManager:
                         cred_tokens["input_cached"] += model_stats.get(
                             "prompt_tokens_cached", 0
                         )
+                        cred_tokens["input_cache_creation"] += model_stats.get(
+                            "prompt_tokens_cache_creation", 0
+                        )
                         cred_tokens["input_uncached"] += model_stats.get(
                             "prompt_tokens", 0
                         )
@@ -3856,6 +3948,9 @@ class UsageManager:
                     cred_tokens["input_cached"] += model_stats.get(
                         "prompt_tokens_cached", 0
                     )
+                    cred_tokens["input_cache_creation"] += model_stats.get(
+                        "prompt_tokens_cache_creation", 0
+                    )
                     cred_tokens["input_uncached"] += model_stats.get("prompt_tokens", 0)
                     cred_tokens["output"] += model_stats.get("completion_tokens", 0)
                     cred_cost += model_stats.get("approx_cost", 0.0)
@@ -3870,6 +3965,9 @@ class UsageManager:
                     cred_global_tokens["input_cached"] += model_stats.get(
                         "prompt_tokens_cached", 0
                     )
+                    cred_global_tokens["input_cache_creation"] += model_stats.get(
+                        "prompt_tokens_cache_creation", 0
+                    )
                     cred_global_tokens["input_uncached"] += model_stats.get(
                         "prompt_tokens", 0
                     )
@@ -3881,6 +3979,9 @@ class UsageManager:
                 # Add current period stats to global totals
                 cred_global_requests += cred_requests
                 cred_global_tokens["input_cached"] += cred_tokens["input_cached"]
+                cred_global_tokens["input_cache_creation"] += cred_tokens[
+                    "input_cache_creation"
+                ]
                 cred_global_tokens["input_uncached"] += cred_tokens["input_uncached"]
                 cred_global_tokens["output"] += cred_tokens["output"]
                 cred_global_cost += cred_cost
@@ -3930,13 +4031,16 @@ class UsageManager:
                         "requests": cred_global_requests,
                         "tokens": {
                             "input_cached": cred_global_tokens["input_cached"],
+                            "input_cache_creation": cred_global_tokens[
+                                "input_cache_creation"
+                            ],
                             "input_uncached": cred_global_tokens["input_uncached"],
                             "input_cache_pct": global_cache_pct,
                             "output": cred_global_tokens["output"],
                         },
-                        "approx_cost": cred_global_cost
-                        if cred_global_cost > 0
-                        else None,
+                        "approx_cost": (
+                            cred_global_cost if cred_global_cost > 0 else None
+                        ),
                     }
 
                 # Add model-specific data for providers with per-model tracking
@@ -3954,6 +4058,9 @@ class UsageManager:
                             "prompt_tokens": model_stats.get("prompt_tokens", 0),
                             "prompt_tokens_cached": model_stats.get(
                                 "prompt_tokens_cached", 0
+                            ),
+                            "prompt_tokens_cache_creation": model_stats.get(
+                                "prompt_tokens_cache_creation", 0
                             ),
                             "completion_tokens": model_stats.get(
                                 "completion_tokens", 0
@@ -3984,12 +4091,12 @@ class UsageManager:
 
                 # Aggregate to global provider totals
                 global_providers[provider]["total_requests"] += cred_global_requests
-                global_providers[provider]["tokens"]["input_cached"] += (
-                    cred_global_tokens["input_cached"]
-                )
-                global_providers[provider]["tokens"]["input_uncached"] += (
-                    cred_global_tokens["input_uncached"]
-                )
+                global_providers[provider]["tokens"][
+                    "input_cached"
+                ] += cred_global_tokens["input_cached"]
+                global_providers[provider]["tokens"][
+                    "input_uncached"
+                ] += cred_global_tokens["input_uncached"]
                 global_providers[provider]["tokens"]["output"] += cred_global_tokens[
                     "output"
                 ]
@@ -4097,9 +4204,9 @@ class UsageManager:
                     "input_cache_pct": global_input_cache_pct,
                     "output": global_total_output,
                 },
-                "approx_total_cost": global_total_cost
-                if global_total_cost > 0
-                else None,
+                "approx_total_cost": (
+                    global_total_cost if global_total_cost > 0 else None
+                ),
             }
 
         return result

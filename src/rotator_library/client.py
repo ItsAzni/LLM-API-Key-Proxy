@@ -584,6 +584,41 @@ class RotatingClient:
                 )
                 self.max_concurrent_requests_per_key[provider] = 1
 
+        # Track consecutive quota failures per credential for intelligent rotation
+        self._consecutive_quota_failures: Dict[str, int] = {}
+
+    def increment_quota_failures(self, credential_id: str) -> bool:
+        """
+        Increment consecutive quota failure counter for a credential.
+
+        Args:
+            credential_id: The credential identifier
+
+        Returns:
+            True if rotation is needed (>= 3 consecutive failures), False otherwise
+        """
+        self._consecutive_quota_failures[credential_id] = (
+            self._consecutive_quota_failures.get(credential_id, 0) + 1
+        )
+        count = self._consecutive_quota_failures[credential_id]
+        lib_logger.debug(
+            f"Quota failure increment for {mask_credential(credential_id)}: {count}/3"
+        )
+        return count >= 3
+
+    def reset_quota_failures(self, credential_id: str) -> None:
+        """
+        Reset consecutive quota failure counter for a credential on success.
+
+        Args:
+            credential_id: The credential identifier
+        """
+        if credential_id in self._consecutive_quota_failures:
+            del self._consecutive_quota_failures[credential_id]
+            lib_logger.debug(
+                f"Quota failure counter reset for {mask_credential(credential_id)}"
+            )
+
     def _is_client_usable(self, client: Optional[httpx.AsyncClient]) -> bool:
         """
         Check if an HTTP client is usable for requests.
@@ -1223,8 +1258,12 @@ class RotatingClient:
                     if isinstance(litellm_kwargs["headers"], dict):
                         # Update headers, but don't override Authorization if already set
                         for key, value in auth_headers.items():
-                            if key.lower() != "authorization" or "authorization" not in (
-                                h.lower() for h in litellm_kwargs["headers"].keys()
+                            if (
+                                key.lower() != "authorization"
+                                or "authorization"
+                                not in (
+                                    h.lower() for h in litellm_kwargs["headers"].keys()
+                                )
                             ):
                                 litellm_kwargs["headers"][key] = value
                         lib_logger.debug(
@@ -1482,7 +1521,23 @@ class RotatingClient:
                         lib_logger.info(
                             f"Stream ended with incomplete data in buffer: {json_buffer}"
                         )
+                    # Reset consecutive quota failures on successful stream completion
+                    self.reset_quota_failures(key)
                     if last_usage:
+                        # Log cache token details if present
+                        prompt_details = getattr(
+                            last_usage, "prompt_tokens_details", None
+                        )
+                        if prompt_details:
+                            cached = getattr(prompt_details, "cached_tokens", 0) or 0
+                            cache_creation = (
+                                getattr(prompt_details, "cache_creation_tokens", 0) or 0
+                            )
+                            if cached > 0 or cache_creation > 0:
+                                lib_logger.info(
+                                    f"Stream completed with cache tokens - cached: {cached}, "
+                                    f"cache_creation: {cache_creation} for key {mask_credential(key)}"
+                                )
                         # Create a dummy ModelResponse for recording (only usage matters)
                         dummy_response = litellm.ModelResponse(usage=last_usage)
                         await self.usage_manager.record_success(
@@ -1538,6 +1593,17 @@ class RotatingClient:
                     lib_logger.warning(
                         f"Caught a critical API error mid-stream: {type(e).__name__}. Signaling for credential rotation."
                     )
+
+                    # IMPROVED: Better classification for mid-stream failures
+                    error_str = str(e).lower()
+
+                    # Detect specific provider error patterns
+                    if "server had an error" in error_str:
+                        lib_logger.warning(
+                            f"Inception Labs server error mid-stream for model {model}. "
+                            f"This is a transient provider issue. Will retry with backoff."
+                        )
+
                     raise StreamedAPIError("Provider error received in stream", data=e)
 
                 except Exception as e:
@@ -2013,6 +2079,9 @@ class RotatingClient:
                                 )
                                 transaction_logger.log_response(response_data)
 
+                            # Reset consecutive quota failures on success
+                            self.reset_quota_failures(current_cred)
+
                             return response
 
                         except (
@@ -2087,6 +2156,17 @@ class RotatingClient:
                                     == ThrottleActionType.PROVIDER_COOLDOWN
                                 ):
                                     ip_throttle_detected = True
+
+                            # Track consecutive quota failures and force rotation if needed
+                            if classified_error.error_type == "quota_exceeded":
+                                if self.increment_quota_failures(current_cred):
+                                    lib_logger.error(
+                                        f"Cred {mask_credential(current_cred)} quota failure limit reached (3/3), forcing rotation."
+                                    )
+                                    await self.usage_manager.record_failure(
+                                        current_cred, model, classified_error
+                                    )
+                                    break  # Force rotation
 
                             await self.usage_manager.record_failure(
                                 current_cred, model, classified_error
@@ -2243,6 +2323,13 @@ class RotatingClient:
                         litellm_kwargs["custom_llm_provider"] = "nvidia_nim"
                         litellm_kwargs["model"] = model.split("/", 1)[1]
 
+                    # Inception Labs also requires model name without prefix
+                    # This MUST happen before convert_for_litellm and AllProviders routing
+                    # to avoid double prefixing (inception/mercury-2 → mercury-2 → openai/mercury-2)
+                    # Use rsplit to handle both "inception/mercury-2" and "openai/inception/mercury-2"
+                    if provider == "inception":
+                        litellm_kwargs["model"] = model.rsplit("/", 1)[1]
+
                     for attempt in range(self.max_retries):
                         try:
                             lib_logger.info(
@@ -2309,6 +2396,9 @@ class RotatingClient:
                                 )
                                 transaction_logger.log_response(response_data)
 
+                            # Reset consecutive quota failures on success
+                            self.reset_quota_failures(current_cred)
+
                             return response
 
                         except litellm.RateLimitError as e:
@@ -2358,6 +2448,17 @@ class RotatingClient:
                                 ):
                                     ip_throttle_detected = True
 
+                            # Track consecutive quota failures and force rotation if needed
+                            if classified_error.error_type == "quota_exceeded":
+                                if self.increment_quota_failures(current_cred):
+                                    lib_logger.error(
+                                        f"Cred {mask_credential(current_cred)} quota failure limit reached (3/3), forcing rotation."
+                                    )
+                                    await self.usage_manager.record_failure(
+                                        current_cred, model, classified_error
+                                    )
+                                    break  # Force rotation
+
                             await self.usage_manager.record_failure(
                                 current_cred, model, classified_error
                             )
@@ -2381,6 +2482,9 @@ class RotatingClient:
                             )
                             classified_error = classify_error(e, provider=provider)
                             error_message = str(e).split("\n")[0]
+
+                            # Reset quota failures on connection errors (not quota-related)
+                            self.reset_quota_failures(current_cred)
 
                             # Provider-level error: don't increment consecutive failures
                             await self.usage_manager.record_failure(

@@ -60,6 +60,22 @@ SUPPORTED_PARAMS = {
     "stop",
     "seed",
     "response_format",
+    "thinking",
+    "reasoning_effort",
+}
+
+# Models that support extended thinking/reasoning
+THINKING_SUPPORTED_MODELS = {
+    "deepseek-r1",
+    "kimi-k2-thinking",
+    "qwen3-235b-a22b-thinking-2507",
+}
+
+# Reasoning effort token budgets (for models that support it)
+REASONING_BUDGETS = {
+    "low": 4096,
+    "medium": 8192,
+    "high": 16384,
 }
 
 
@@ -218,6 +234,58 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
                 if "items" in prop_schema and isinstance(prop_schema["items"], dict):
                     self._clean_schema_properties({"item": prop_schema["items"]})
 
+    def _handle_thinking_parameter(self, payload: Dict[str, Any], model: str) -> None:
+        """
+        Handles thinking/reasoning parameters for iFlow models.
+
+        Supports two modes:
+        1. Explicit `thinking` parameter (OpenAI-style): {"type": "enabled", "budget_tokens": N}
+        2. `reasoning_effort` parameter: "low", "medium", "high" -> maps to token budgets
+
+        Only applies to models that support extended thinking.
+        """
+        model_id = model.split("/")[-1] if "/" in model else model
+
+        # Check if model supports thinking
+        if model_id not in THINKING_SUPPORTED_MODELS:
+            # Clean up reasoning params for non-thinking models
+            payload.pop("thinking", None)
+            payload.pop("reasoning_effort", None)
+            return
+
+        # If explicit thinking is already set, validate and keep it
+        if "thinking" in payload:
+            thinking = payload["thinking"]
+            if isinstance(thinking, dict):
+                # Ensure required fields
+                if thinking.get("type") != "enabled":
+                    thinking["type"] = "enabled"
+                # Validate budget_tokens
+                budget = thinking.get("budget_tokens")
+                if budget is not None and not isinstance(budget, int):
+                    try:
+                        thinking["budget_tokens"] = int(budget)
+                    except (ValueError, TypeError):
+                        thinking["budget_tokens"] = 8192  # Default
+            else:
+                # Convert to proper format
+                payload["thinking"] = {"type": "enabled", "budget_tokens": 8192}
+            # Remove reasoning_effort if thinking is explicitly set
+            payload.pop("reasoning_effort", None)
+            return
+
+        # Handle reasoning_effort -> thinking conversion
+        reasoning_effort = payload.get("reasoning_effort")
+        if reasoning_effort:
+            budget = REASONING_BUDGETS.get(reasoning_effort, 8192)
+            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            payload.pop("reasoning_effort", None)
+            lib_logger.debug(f"Converted reasoning_effort={reasoning_effort} to thinking budget={budget}")
+        else:
+            # Default thinking for supported models (auto-enable)
+            payload["thinking"] = {"type": "enabled", "budget_tokens": -1}  # -1 = auto
+            lib_logger.debug(f"Auto-enabled thinking for model {model_id}")
+
     def _build_request_payload(self, **kwargs) -> Dict[str, Any]:
         """
         Builds a clean request payload with only supported parameters.
@@ -254,7 +322,14 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
             ]
             lib_logger.debug("Injected placeholder tool for empty tools array")
 
+        # Handle thinking/reasoning parameters
+        model = kwargs.get("model", "")
+        self._handle_thinking_parameter(payload, model)
+
         return payload
+
+    # Marker for parsing reasoning content from <think> tags
+    REASONING_START_MARKER = "THINK||"
 
     def _convert_chunk_to_openai(self, chunk: Dict[str, Any], model_id: str):
         """
@@ -263,6 +338,9 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
 
         CRITICAL FIX: Handle chunks with BOTH usage and choices (final chunk)
         without early return to ensure finish_reason is properly processed.
+
+        Also handles reasoning content from models like DeepSeek-R1 that use
+        <think> tags to separate reasoning from final response.
         """
         if not isinstance(chunk, dict):
             return
@@ -270,25 +348,41 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
         # Get choices and usage data
         choices = chunk.get("choices", [])
         usage_data = chunk.get("usage")
+        chunk_id = chunk.get("id", f"chatcmpl-iflow-{time.time()}")
+        chunk_created = chunk.get("created", int(time.time()))
 
         # Handle chunks with BOTH choices and usage (typical for final chunk)
         # CRITICAL: Process choices FIRST to capture finish_reason, then yield usage
         if choices and usage_data:
-            # Yield the choice chunk first (contains finish_reason)
-            yield {
-                "choices": choices,
-                "model": model_id,
-                "object": "chat.completion.chunk",
-                "id": chunk.get("id", f"chatcmpl-iflow-{time.time()}"),
-                "created": chunk.get("created", int(time.time())),
-            }
+            choice = choices[0]
+            delta = choice.get("delta", {})
+            finish_reason = choice.get("finish_reason")
+
+            # Check for reasoning content in the delta
+            content = delta.get("content")
+            if content and ("<think>" in content or "</think>" in content):
+                # Parse thinking tags and yield multiple chunks
+                for parsed_chunk in self._parse_thinking_content(
+                    content, delta, finish_reason, model_id, chunk_id, chunk_created
+                ):
+                    yield parsed_chunk
+            else:
+                # Yield the choice chunk first (contains finish_reason)
+                yield {
+                    "choices": choices,
+                    "model": model_id,
+                    "object": "chat.completion.chunk",
+                    "id": chunk_id,
+                    "created": chunk_created,
+                }
+
             # Then yield the usage chunk
             yield {
                 "choices": [],
                 "model": model_id,
                 "object": "chat.completion.chunk",
-                "id": chunk.get("id", f"chatcmpl-iflow-{time.time()}"),
-                "created": chunk.get("created", int(time.time())),
+                "id": chunk_id,
+                "created": chunk_created,
                 "usage": {
                     "prompt_tokens": usage_data.get("prompt_tokens", 0),
                     "completion_tokens": usage_data.get("completion_tokens", 0),
@@ -303,8 +397,8 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
                 "choices": [],
                 "model": model_id,
                 "object": "chat.completion.chunk",
-                "id": chunk.get("id", f"chatcmpl-iflow-{time.time()}"),
-                "created": chunk.get("created", int(time.time())),
+                "id": chunk_id,
+                "created": chunk_created,
                 "usage": {
                     "prompt_tokens": usage_data.get("prompt_tokens", 0),
                     "completion_tokens": usage_data.get("completion_tokens", 0),
@@ -314,14 +408,71 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
             return
 
         # Handle content-only chunks
-        if choices:
-            # iFlow returns OpenAI-compatible format, so we can mostly pass through
+        if not choices:
+            return
+
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason")
+
+        # Handle <think> tags for reasoning content (e.g., DeepSeek-R1)
+        content = delta.get("content")
+        if content and ("<think>" in content or "</think>" in content):
+            for parsed_chunk in self._parse_thinking_content(
+                content, delta, finish_reason, model_id, chunk_id, chunk_created
+            ):
+                yield parsed_chunk
+        else:
+            # Standard content chunk - pass through
             yield {
                 "choices": choices,
                 "model": model_id,
                 "object": "chat.completion.chunk",
-                "id": chunk.get("id", f"chatcmpl-iflow-{time.time()}"),
-                "created": chunk.get("created", int(time.time())),
+                "id": chunk_id,
+                "created": chunk_created,
+            }
+
+    def _parse_thinking_content(
+        self, content: str, delta: Dict[str, Any], finish_reason: Any,
+        model_id: str, chunk_id: str, chunk_created: int
+    ):
+        """
+        Parses content with <think> tags and yields separate chunks for
+        reasoning_content and content.
+
+        Similar to Qwen Code implementation but adapted for iFlow.
+        """
+        parts = (
+            content.replace("<think>", f"||{self.REASONING_START_MARKER}")
+            .replace("</think>", f"||/{self.REASONING_START_MARKER}")
+            .split("||")
+        )
+
+        for part in parts:
+            if not part:
+                continue
+
+            new_delta = {}
+            if part.startswith(self.REASONING_START_MARKER):
+                # Reasoning content (inside <think> tags)
+                new_delta["reasoning_content"] = part.replace(
+                    self.REASONING_START_MARKER, ""
+                )
+            elif part.startswith(f"/{self.REASONING_START_MARKER}"):
+                # End of thinking - skip this marker
+                continue
+            else:
+                # Regular content (outside <think> tags)
+                new_delta["content"] = part
+
+            yield {
+                "choices": [
+                    {"index": 0, "delta": new_delta, "finish_reason": finish_reason}
+                ],
+                "model": model_id,
+                "object": "chat.completion.chunk",
+                "id": chunk_id,
+                "created": chunk_created,
             }
 
     def _stream_to_completion_response(

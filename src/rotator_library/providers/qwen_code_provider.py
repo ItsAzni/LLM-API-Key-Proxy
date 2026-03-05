@@ -238,7 +238,9 @@ class QwenCodeProvider(QwenAuthBase, ProviderInterface):
         Converts a raw Qwen SSE chunk to an OpenAI-compatible chunk.
 
         CRITICAL FIX: Handle chunks with BOTH usage and choices (final chunk)
-        without early return to ensure finish_reason is properly processed.
+        by combining them into a single chunk with both finish_reason and usage.
+        The client expects finish_reason and usage with completion_tokens > 0
+        to be in the same chunk to properly detect the final chunk.
         """
         if not isinstance(chunk, dict):
             return
@@ -250,25 +252,18 @@ class QwenCodeProvider(QwenAuthBase, ProviderInterface):
         chunk_created = chunk.get("created", int(time.time()))
 
         # Handle chunks with BOTH choices and usage (typical for final chunk)
-        # CRITICAL: Process choices FIRST to capture finish_reason, then yield usage
+        # CRITICAL: Combine into ONE chunk with both finish_reason and usage
+        # The client detects final chunk by usage.completion_tokens > 0 AND choices
         if choices and usage_data:
             choice = choices[0]
             delta = choice.get("delta", {})
             finish_reason = choice.get("finish_reason")
 
-            # Yield the choice chunk first (contains finish_reason)
+            # Yield a SINGLE combined chunk with both choices and usage
             yield {
                 "choices": [
                     {"index": 0, "delta": delta, "finish_reason": finish_reason}
                 ],
-                "model": model_id,
-                "object": "chat.completion.chunk",
-                "id": chunk_id,
-                "created": chunk_created,
-            }
-            # Then yield the usage chunk
-            yield {
-                "choices": [],
                 "model": model_id,
                 "object": "chat.completion.chunk",
                 "id": chunk_id,
@@ -281,7 +276,8 @@ class QwenCodeProvider(QwenAuthBase, ProviderInterface):
             }
             return
 
-        # Handle usage-only chunks
+        # Handle usage-only chunks (without choices)
+        # These cannot carry finish_reason since client requires choices to set it
         if usage_data:
             yield {
                 "choices": [],

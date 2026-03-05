@@ -15,6 +15,7 @@ Provides three main patterns:
 4. safe_log_write - For logs that can be dropped on failure.
 """
 
+import asyncio
 import atexit
 import json
 import os
@@ -677,3 +678,66 @@ def safe_mkdir(path: Union[str, Path], logger: logging.Logger) -> bool:
     except (OSError, PermissionError) as e:
         logger.warning(f"Failed to create directory {path}: {e}")
         return False
+
+
+# =============================================================================
+# ASYNC RESILIENT STATE WRITER
+# =============================================================================
+
+
+class AsyncResilientStateWriter:
+    """Надежный асинхронный записыватель state."""
+
+    def __init__(self, file_path: Path, flush_interval: float = 5.0):
+        self.file_path = Path(file_path)
+        self.flush_interval = flush_interval
+        self._pending: Optional[Dict[str, Any]] = None
+        self._lock = asyncio.Lock()
+        self._flush_task: Optional[asyncio.Task] = None
+
+    async def schedule_write(self, data: Dict[str, Any]) -> None:
+        """Запланировать запись."""
+        async with self._lock:
+            self._pending = data.copy()
+            if self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._delayed_flush())
+
+    async def _delayed_flush(self) -> None:
+        """Запись с задержкой."""
+        await asyncio.sleep(self.flush_interval)
+        await self.flush()
+
+    async def flush(self) -> None:
+        """Немедленная запись."""
+        async with self._lock:
+            if self._pending is None:
+                return
+
+            data = self._pending
+            self._pending = None
+
+            try:
+                # Atomic write: temp -> rename
+                temp_path = self.file_path.with_suffix('.tmp')
+                temp_path.write_text(
+                    json.dumps(data, indent=2, default=str),
+                    encoding='utf-8'
+                )
+                temp_path.replace(self.file_path)
+            except Exception:
+                # Recovery: recreate directory if deleted
+                self.file_path.parent.mkdir(parents=True, exist_ok=True)
+                self.file_path.write_text(
+                    json.dumps(data, indent=2, default=str),
+                    encoding='utf-8'
+                )
+
+    async def close(self) -> None:
+        """Flush on shutdown."""
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        await self.flush()

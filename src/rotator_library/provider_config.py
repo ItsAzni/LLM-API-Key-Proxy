@@ -760,6 +760,14 @@ class ProviderConfig:
 
         if provider in KNOWN_PROVIDERS:
             # Known provider - just add api_base override
+            # Special case: Inception Labs requires model name without provider prefix
+            # Their API expects "mercury-2" not "inception/mercury-2"
+            if provider == "inception":
+                model_name = model.split("/", 1)[1] if "/" in model else model
+                kwargs["model"] = model_name
+                lib_logger.debug(
+                    f"Stripping provider prefix for inception model: {model} -> {model_name}"
+                )
             kwargs["api_base"] = api_base
             lib_logger.debug(
                 f"Applying api_base override for known provider {provider}: {api_base}"
@@ -767,6 +775,12 @@ class ProviderConfig:
         else:
             # Custom provider - route through OpenAI-compatible endpoint
             model_name = model.split("/", 1)[1] if "/" in model else model
+
+            # Inception Labs requires just the model name without any prefix
+            # Their API expects "mercury-2" not "inception/mercury-2" or "openai/inception/mercury-2"
+            if provider == "inception" and "/" in model_name:
+                model_name = model_name.split("/", 1)[1]
+
             kwargs["model"] = f"openai/{model_name}"
             kwargs["api_base"] = api_base
             kwargs["custom_llm_provider"] = "openai"
