@@ -3504,6 +3504,20 @@ class RotatingClient:
 
                             else:
                                 consecutive_quota_failures = 0
+
+                                # For transient server errors (mid-stream), retry same key with backoff before rotating
+                                if should_retry_same_key(classified_error) and attempt < self.max_retries - 1:
+                                    backoff = get_retry_backoff(classified_error, attempt, provider)
+                                    remaining_budget = deadline - time.time()
+                                    if backoff <= remaining_budget:
+                                        lib_logger.warning(
+                                            f"Mid-stream {classified_error.error_type} for {mask_credential(current_cred)} "
+                                            f"(attempt {attempt + 1}/{self.max_retries}). Retrying same key in {backoff:.2f}s."
+                                        )
+                                        await asyncio.sleep(backoff)
+                                        await self._get_http_client_async(streaming=True)
+                                        continue  # Retry same key instead of rotating
+
                                 lib_logger.warning(
                                     f"Cred {mask_credential(current_cred)} {classified_error.error_type}. Rotating."
                                 )
