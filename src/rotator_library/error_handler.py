@@ -1050,6 +1050,19 @@ def _get_provider_backoff_config(provider: Optional[str]) -> Dict[str, float]:
             except ValueError:
                 pass
 
+    # Env var overrides for inception
+    if provider == 'inception':
+        if 'INCEPTION_BACKOFF_BASE' in os.environ:
+            try:
+                config['server_error_base'] = float(os.environ['INCEPTION_BACKOFF_BASE'])
+            except ValueError:
+                pass
+        if 'INCEPTION_MAX_BACKOFF' in os.environ:
+            try:
+                config['max_backoff'] = float(os.environ['INCEPTION_MAX_BACKOFF'])
+            except ValueError:
+                pass
+
     return config
 
 
@@ -1628,6 +1641,15 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
         )
 
     if isinstance(e, (APIConnectionError, Timeout)):
+        # Inception Labs server errors often manifest as connection errors with specific messages
+        error_str = str(e).lower()
+        if 'server had an error' in error_str or 'the server had an error' in error_str:
+            return ClassifiedError(
+                error_type='api_connection',
+                original_exception=e,
+                status_code=503,
+                retry_after=5,  # Inception needs ~5s to recover from transient overload
+            )
         return ClassifiedError(
             error_type="api_connection",
             original_exception=e,
