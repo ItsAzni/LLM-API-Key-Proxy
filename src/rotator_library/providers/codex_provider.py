@@ -3,7 +3,7 @@
 OpenAI Codex Provider
 
 Provider for OpenAI Codex models via the Responses API.
-Supports GPT-5, GPT-5.1, GPT-5.2, Codex, and Codex Mini models.
+Supports GPT-5, GPT-5.1, GPT-5.2, GPT-5.4, Codex, and Codex Mini models.
 
 Key Features:
 - OAuth-based authentication with PKCE
@@ -93,6 +93,7 @@ BASE_MODELS = [
     "gpt-5",
     "gpt-5.1",
     "gpt-5.2",
+    "gpt-5.4",
     # Codex models
     "gpt-5-codex",
     "gpt-5.1-codex",
@@ -112,6 +113,7 @@ REASONING_MODEL_EFFORTS = {
     "gpt-5": {"low", "medium", "high"},
     "gpt-5.1": {"low", "medium", "high"},
     "gpt-5.2": {"low", "medium", "high", "xhigh"},
+    "gpt-5.4": {"low", "medium", "high", "xhigh"},
     "gpt-5-codex": {"low", "medium", "high"},
     "gpt-5.1-codex": {"low", "medium", "high"},
     "gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
@@ -187,6 +189,8 @@ def _allowed_efforts_for_model(model: str) -> set:
 
     normalized = base.split(":")[0]
     if normalized.startswith("gpt-5.2"):
+        return {"low", "medium", "high", "xhigh"}
+    if normalized.startswith("gpt-5.4"):
         return {"low", "medium", "high", "xhigh"}
     if normalized.startswith("gpt-5.1-codex-max"):
         return {"low", "medium", "high", "xhigh"}
@@ -279,6 +283,7 @@ def _normalize_model_name(name: str) -> str:
         "gpt5.1": "gpt-5.1",
         "gpt5.2": "gpt-5.2",
         "gpt-5.2-latest": "gpt-5.2",
+        "gpt5.4": "gpt-5.4",
         "gpt5-codex": "gpt-5-codex",
         "gpt-5-codex-latest": "gpt-5-codex",
         "codex": "codex-mini",
