@@ -12,6 +12,9 @@ States:
 - CLOSED: Normal operation, requests flow through
 - OPEN: Provider is blocked, all requests fail fast
 - HALF_OPEN: Testing if provider has recovered with limited requests
+
+Uses per-provider sharded locks so parallel requests to different providers
+do not block each other.
 """
 
 import asyncio
@@ -58,6 +61,9 @@ class ProviderCircuitBreaker:
     When a provider's circuit opens, requests to that provider fail fast
     without attempting the actual API call.
 
+    Uses per-provider sharded locks: parallel requests to different providers
+    (e.g., NVIDIA and Gemini simultaneously) do not contend for the same lock.
+
     Configuration:
         failure_threshold: Number of failures before opening circuit
         recovery_timeout: Seconds to wait before attempting recovery
@@ -99,13 +105,31 @@ class ProviderCircuitBreaker:
         self._half_open_requests = half_open_requests
         self._provider_overrides = provider_overrides or {}
         self._circuits: Dict[str, CircuitInfo] = {}
-        self._lock = asyncio.Lock()
+
+        # Per-provider sharded locks (lazy init)
+        self._provider_locks: Dict[str, asyncio.Lock] = {}
+        # Protects the _provider_locks dict itself
+        self._locks_lock = asyncio.Lock()
 
         lib_logger.info(
             "Circuit breaker initialized: threshold=%d, timeout=%ds, half_open=%d, overrides=%s",
             failure_threshold, recovery_timeout, half_open_requests,
             list(self._provider_overrides.keys())
         )
+
+    async def _get_provider_lock(self, provider: str) -> asyncio.Lock:
+        """
+        Lazily create and return the lock for a given provider.
+        Uses a meta-lock to safely initialize new per-provider locks.
+        """
+        # Fast path: lock already exists
+        if provider in self._provider_locks:
+            return self._provider_locks[provider]
+        # Slow path: create lock under protection
+        async with self._locks_lock:
+            if provider not in self._provider_locks:
+                self._provider_locks[provider] = asyncio.Lock()
+            return self._provider_locks[provider]
 
     def _get_provider_threshold(self, provider: str) -> int:
         """Get failure threshold for a provider (with overrides)."""
@@ -132,7 +156,7 @@ class ProviderCircuitBreaker:
         return self._half_open_requests
 
     def _get_or_create_circuit(self, provider: str) -> CircuitInfo:
-        """Get or create circuit info for a provider."""
+        """Get or create circuit info for a provider (must be called under provider lock)."""
         if provider not in self._circuits:
             self._circuits[provider] = CircuitInfo()
         return self._circuits[provider]
@@ -152,7 +176,8 @@ class ProviderCircuitBreaker:
         Returns:
             True if request can be attempted, False otherwise
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
 
@@ -217,7 +242,8 @@ class ProviderCircuitBreaker:
         Args:
             provider: Provider name that succeeded
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
             circuit.last_success_time = current_time
@@ -243,7 +269,8 @@ class ProviderCircuitBreaker:
         Args:
             provider: Provider name that was throttled
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
             threshold = self._get_provider_threshold(provider)
@@ -291,7 +318,8 @@ class ProviderCircuitBreaker:
             reason: Reason for immediate opening (for logging)
             duration: Custom recovery timeout in seconds (e.g., from retry-after header)
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
 
@@ -328,7 +356,8 @@ class ProviderCircuitBreaker:
         Returns:
             Current CircuitState for the provider
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
 
             # Check for automatic transition from OPEN to HALF_OPEN
@@ -352,11 +381,17 @@ class ProviderCircuitBreaker:
         Returns:
             Dictionary mapping provider names to their CircuitState
         """
-        async with self._lock:
-            return {
-                provider: circuit.state
-                for provider, circuit in self._circuits.items()
-            }
+        # Acquire all existing provider locks to get a consistent snapshot
+        async with self._locks_lock:
+            providers = list(self._circuits.keys())
+
+        result = {}
+        for provider in providers:
+            lock = await self._get_provider_lock(provider)
+            async with lock:
+                if provider in self._circuits:
+                    result[provider] = self._circuits[provider].state
+        return result
 
     async def reset_provider(self, provider: str) -> None:
         """
@@ -365,17 +400,23 @@ class ProviderCircuitBreaker:
         Args:
             provider: Provider name to reset
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             if provider in self._circuits:
                 self._circuits[provider].reset()
                 lib_logger.info("Circuit for '%s' manually reset to CLOSED", provider)
 
     async def reset_all(self) -> None:
         """Reset all provider circuits to CLOSED state."""
-        async with self._lock:
-            for circuit in self._circuits.values():
-                circuit.reset()
-            lib_logger.info("All circuits reset to CLOSED")
+        async with self._locks_lock:
+            providers = list(self._circuits.keys())
+
+        for provider in providers:
+            lock = await self._get_provider_lock(provider)
+            async with lock:
+                if provider in self._circuits:
+                    self._circuits[provider].reset()
+        lib_logger.info("All circuits reset to CLOSED")
 
     async def get_provider_info(self, provider: str) -> Dict:
         """
@@ -387,7 +428,8 @@ class ProviderCircuitBreaker:
         Returns:
             Dictionary with circuit details
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
 
             info = {
@@ -420,7 +462,8 @@ class ProviderCircuitBreaker:
         Returns:
             Remaining cooldown time in seconds, or 0 if not cooling down
         """
-        async with self._lock:
+        lock = await self._get_provider_lock(provider)
+        async with lock:
             circuit = self._get_or_create_circuit(provider)
             if circuit.state == CircuitState.OPEN and circuit.last_failure_time:
                 elapsed = time.time() - circuit.last_failure_time
@@ -436,9 +479,13 @@ class ProviderCircuitBreaker:
         Returns:
             List of provider names with OPEN circuits
         """
-        async with self._lock:
-            open_circuits = []
-            for provider, circuit in self._circuits.items():
-                if circuit.state == CircuitState.OPEN:
+        async with self._locks_lock:
+            providers = list(self._circuits.keys())
+
+        open_circuits = []
+        for provider in providers:
+            lock = await self._get_provider_lock(provider)
+            async with lock:
+                if provider in self._circuits and self._circuits[provider].state == CircuitState.OPEN:
                     open_circuits.append(provider)
-            return open_circuits
+        return open_circuits

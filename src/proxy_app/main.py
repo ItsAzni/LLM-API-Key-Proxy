@@ -689,6 +689,12 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+
+# Add GZip compression for non-streaming JSON responses (minimum 1000 bytes)
+# NOTE: GZip middleware is streaming-safe — FastAPI/Starlette skips compression
+# for StreamingResponse, so SSE endpoints are unaffected.
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
@@ -1740,4 +1746,10 @@ if __name__ == "__main__":
 
         import uvicorn
 
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            limit_concurrency=1000,
+            backlog=2048,
+        )

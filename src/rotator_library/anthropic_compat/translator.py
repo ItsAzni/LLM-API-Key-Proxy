@@ -9,9 +9,30 @@ Anthropic's Messages API format and OpenAI's Chat Completions API format.
 This enables any OpenAI-compatible provider to work with Anthropic clients.
 """
 
-import json
 import uuid
 from typing import Any, Dict, List, Optional, Union
+
+# Try to import orjson for faster JSON handling (3-5x faster than stdlib json)
+try:
+    import orjson
+
+    def _json_dumps(obj) -> str:
+        return orjson.dumps(obj).decode('utf-8')
+
+    def _json_loads(s: str):
+        return orjson.loads(s)
+
+    _json_decode_error = orjson.JSONDecodeError
+except ImportError:
+    import json as _json_fallback
+
+    def _json_dumps(obj) -> str:
+        return _json_fallback.dumps(obj)
+
+    def _json_loads(s: str):
+        return _json_fallback.loads(s)
+
+    _json_decode_error = _json_fallback.JSONDecodeError
 
 from .models import AnthropicMessagesRequest
 
@@ -253,7 +274,7 @@ def anthropic_to_openai_messages(
                                 "type": "function",
                                 "function": {
                                     "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
+                                    "arguments": _json_dumps(block.get("input", {})),
                                 },
                             }
                         )
@@ -504,8 +525,8 @@ def openai_to_anthropic_response(openai_response: dict, original_model: str) -> 
     for tc in tool_calls:
         func = tc.get("function", {})
         try:
-            input_data = json.loads(func.get("arguments", "{}"))
-        except json.JSONDecodeError:
+            input_data = _json_loads(func.get("arguments", "{}"))
+        except _json_decode_error:
             input_data = {}
 
         content_blocks.append(

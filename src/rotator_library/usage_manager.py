@@ -158,8 +158,8 @@ class UsageManager:
         self._provider_locks: Dict[str, asyncio.Lock] = {}
         self._provider_locks_lock = asyncio.Lock()  # Protects _provider_locks dict
 
-        # Legacy global lock - kept for file I/O operations only
-        self._data_lock = asyncio.Lock()
+        # Read-write lock for usage data: allows parallel reads, exclusive writes
+        self._data_lock = ReadWriteLock()
         self._usage_data: Optional[Dict] = None
         self._initialized = asyncio.Event()
         self._init_lock = asyncio.Lock()
@@ -1505,7 +1505,7 @@ class UsageManager:
 
     async def _load_usage(self):
         """Loads usage data from the JSON file asynchronously with resilience."""
-        async with self._data_lock:
+        async with self._data_lock.write():
             if not os.path.exists(self.file_path):
                 self._usage_data = {}
                 return
@@ -1538,7 +1538,7 @@ class UsageManager:
         if self._usage_data is None:
             return
 
-        async with self._data_lock:
+        async with self._data_lock.write():
             # Add human-readable timestamp fields before saving
             self._add_readable_timestamps(self._usage_data)
 
@@ -1564,7 +1564,7 @@ class UsageManager:
             Copy of usage data dict (safe for reading without lock)
         """
         await self._lazy_init()
-        async with self._data_lock:
+        async with self._data_lock.read():
             return dict(self._usage_data) if self._usage_data else {}
 
     async def get_available_credentials_for_model(
@@ -1588,7 +1588,7 @@ class UsageManager:
         now = time.time()
         available = []
 
-        async with self._data_lock:
+        async with self._data_lock.read():
             for key in credentials:
                 key_data = self._usage_data.get(key, {})
 
@@ -1643,7 +1643,7 @@ class UsageManager:
         not_on_cooldown = []
 
         # First pass: check cooldowns
-        async with self._data_lock:
+        async with self._data_lock.read():
             for key in credentials:
                 key_data = self._usage_data.get(key, {})
 
@@ -1710,7 +1710,7 @@ class UsageManager:
         now = time.time()
         soonest_end = None
 
-        async with self._data_lock:
+        async with self._data_lock.read():
             for key in credentials:
                 key_data = self._usage_data.get(key, {})
                 normalized_model = self._normalize_model(key, model)
@@ -2302,7 +2302,7 @@ class UsageManager:
             if credential_priorities:
                 # Group keys by priority level
                 priority_groups = {}
-                async with self._data_lock:
+                async with self._data_lock.read():
                     for key in available_keys:
                         key_data = self._usage_data.get(key, {})
 
@@ -2553,7 +2553,7 @@ class UsageManager:
                 tier1_keys, tier2_keys = [], []
 
                 # First, filter the list of available keys to exclude any on cooldown.
-                async with self._data_lock:
+                async with self._data_lock.read():
                     for key in available_keys:
                         key_data = self._usage_data.get(key, {})
 
@@ -2821,7 +2821,7 @@ class UsageManager:
         # Normalize model name to public-facing name for consistent tracking
         model = self._normalize_model(key, model)
 
-        async with self._data_lock:
+        async with self._data_lock.write():
             now_ts = time.time()
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
 
@@ -3133,7 +3133,7 @@ class UsageManager:
         # Normalize model name to public-facing name for consistent tracking
         model = self._normalize_model(key, model)
 
-        async with self._data_lock:
+        async with self._data_lock.write():
             now_ts = time.time()
             today_utc_str = datetime.now(timezone.utc).date().isoformat()
 
@@ -3460,7 +3460,7 @@ class UsageManager:
             }
         """
         await self._lazy_init()
-        async with self._data_lock:
+        async with self._data_lock.write():
             now_ts = time.time()
 
             # Get or create key data structure
@@ -3744,7 +3744,7 @@ class UsageManager:
         # Track global stats separately
         global_providers: Dict[str, Dict[str, Any]] = {}
 
-        async with self._data_lock:
+        async with self._data_lock.read():
             if not self._usage_data:
                 return {
                     "providers": {},

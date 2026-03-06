@@ -2089,8 +2089,9 @@ class RotatingClient:
                                             f"Pre-request callback failed but abort_on_callback_error is False. Proceeding with request. Error: {e}"
                                         )
 
+                            http_client = await self._get_http_client_async(streaming=False)
                             response = await provider_plugin.acompletion(
-                                self.http_client, **litellm_kwargs
+                                http_client, **litellm_kwargs
                             )
 
                             # For non-streaming, success is immediate
@@ -2245,9 +2246,9 @@ class RotatingClient:
                                 )
                                 break
 
-                            wait_time = classified_error.retry_after or (
-                                2**attempt
-                            ) + random.uniform(0, 1)
+                            base_wait = classified_error.retry_after or (2**attempt)
+                            jitter = random.uniform(0, base_wait * 0.1)
+                            wait_time = base_wait + jitter
                             remaining_budget = deadline - time.time()
                             if wait_time > remaining_budget:
                                 error_accumulator.record_error(
@@ -2273,11 +2274,6 @@ class RotatingClient:
                             # Connection errors can leave the client in a closed state
                             await self._get_http_client_async(streaming=False)
                             continue
-
-                            await self.usage_manager.record_failure(
-                                current_cred, model, classified_error
-                            )
-                            break  # Rotate to next credential
 
                     # If the inner loop breaks, it means the key failed and we need to rotate.
                     # Continue to the next iteration of the outer while loop to pick a new key.
@@ -2538,9 +2534,9 @@ class RotatingClient:
                                 break  # Move to the next key
 
                             # For temporary errors, wait before retrying with the same key.
-                            wait_time = classified_error.retry_after or (
-                                2**attempt
-                            ) + random.uniform(0, 1)
+                            base_wait = classified_error.retry_after or (2**attempt)
+                            jitter = random.uniform(0, base_wait * 0.1)
+                            wait_time = base_wait + jitter
                             remaining_budget = deadline - time.time()
 
                             # If the required wait time exceeds the budget, don't wait; rotate to the next key immediately.
@@ -2649,9 +2645,9 @@ class RotatingClient:
                                 should_retry_same_key(classified_error)
                                 and attempt < self.max_retries - 1
                             ):
-                                wait_time = classified_error.retry_after or (
-                                    2**attempt
-                                ) + random.uniform(0, 1)
+                                base_wait = classified_error.retry_after or (2**attempt)
+                                jitter = random.uniform(0, base_wait * 0.1)
+                                wait_time = base_wait + jitter
                                 remaining_budget = deadline - time.time()
                                 if wait_time <= remaining_budget:
                                     lib_logger.warning(
@@ -2948,8 +2944,9 @@ class RotatingClient:
                                                 f"Pre-request callback failed but abort_on_callback_error is False. Proceeding with request. Error: {e}"
                                             )
 
+                                http_client = await self._get_http_client_async(streaming=True)
                                 response = await provider_plugin.acompletion(
-                                    self.http_client, **litellm_kwargs
+                                    http_client, **litellm_kwargs
                                 )
 
                                 lib_logger.info(
@@ -3106,9 +3103,9 @@ class RotatingClient:
                                 ) and "client has been closed" in str(e):
                                     self._reset_litellm_client_cache()
 
-                                wait_time = classified_error.retry_after or (
-                                    2**attempt
-                                ) + random.uniform(0, 1)
+                                base_wait = classified_error.retry_after or (2**attempt)
+                                jitter = random.uniform(0, base_wait * 0.1)
+                                wait_time = base_wait + jitter
                                 remaining_budget = deadline - time.time()
                                 if wait_time > remaining_budget:
                                     error_accumulator.record_error(
@@ -3587,9 +3584,9 @@ class RotatingClient:
                             ) and "client has been closed" in str(e):
                                 self._reset_litellm_client_cache()
 
-                            wait_time = classified_error.retry_after or (
-                                2**attempt
-                            ) + random.uniform(0, 1)
+                            base_wait = classified_error.retry_after or (2**attempt)
+                            jitter = random.uniform(0, base_wait * 0.1)
+                            wait_time = base_wait + jitter
                             remaining_budget = deadline - time.time()
                             if wait_time > remaining_budget:
                                 lib_logger.warning(
@@ -3876,7 +3873,7 @@ class RotatingClient:
                         f"Attempting to get models for {provider} with credential {cred_display}"
                     )
                     models = await provider_instance.get_models(
-                        credential, self.http_client
+                        credential, await self._get_http_client_async(streaming=False)
                     )
                     lib_logger.info(
                         f"Got {len(models)} models for provider: {provider}"

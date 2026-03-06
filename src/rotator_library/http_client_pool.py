@@ -25,8 +25,8 @@ lib_logger = logging.getLogger("rotator_library")
 
 
 # Configuration defaults (overridable via environment)
-DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 50  # Increased from 20 for high-throughput
-DEFAULT_MAX_CONNECTIONS = 200  # Increased from 100 for multiple providers
+DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 100  # Increased for high-throughput NVIDIA/OpenAI workloads
+DEFAULT_MAX_CONNECTIONS = 500  # Supports 100+ parallel NVIDIA requests
 DEFAULT_KEEPALIVE_EXPIRY = 60.0  # Seconds to keep idle connections alive
 DEFAULT_WARMUP_CONNECTIONS = 3  # Connections to pre-warm per provider
 DEFAULT_WARMUP_TIMEOUT = 10.0  # Max seconds for warmup
