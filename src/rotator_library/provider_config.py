@@ -103,6 +103,12 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
             ("OPENCODE_API_BASE", "API Base URL", "https://opencode.ai/zen/v1"),
         ],
     },
+    "trybons": {
+        "category": "popular",
+        "extra_vars": [
+            ("TRYBONS_API_BASE", "API Base URL", "https://go.trybons.ai"),
+        ],
+    },
     "minimax": {
         "category": "popular",
         "extra_vars": [
@@ -620,6 +626,9 @@ def _extract_api_key_prefix(api_key_var: str) -> Optional[str]:
 # Pre-computed set of known provider names
 KNOWN_PROVIDERS: Set[str] = _build_known_providers_set()
 
+# Manually add providers with custom plugins that aren't in scraped LiteLLM data
+KNOWN_PROVIDERS.add("trybons")
+
 
 def get_provider_ui_config(provider_key: str) -> Dict[str, Any]:
     """Get UI configuration for a provider.
@@ -750,6 +759,19 @@ class ProviderConfig:
         # Extract provider from model string (e.g., "openai/gpt-4" → "openai")
         provider = model.split("/")[0].lower()
         api_base = self._api_bases.get(provider)
+
+        # TryBons: Anthropic-compatible API, route through LiteLLM's anthropic support
+        if provider == "trybons":
+            trybons_base = api_base or "https://go.trybons.ai"
+            model_name = model.split("/", 1)[1] if "/" in model else model
+            kwargs = kwargs.copy()
+            kwargs["model"] = f"anthropic/{model_name}"
+            kwargs["api_base"] = trybons_base
+            lib_logger.debug(
+                f"Routing trybons model through anthropic: "
+                f"model={kwargs['model']}, api_base={trybons_base}"
+            )
+            return kwargs
 
         if not api_base:
             # No override configured for this provider

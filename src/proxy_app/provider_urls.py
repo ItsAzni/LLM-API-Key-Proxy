@@ -31,6 +31,7 @@ PROVIDER_URL_MAP = {
     "bedrock": "https://bedrock-runtime.us-east-1.amazonaws.com",
     "openrouter": "https://openrouter.ai/api/v1",
     "kilocode": "https://kilocode.ai/api/openrouter",
+    "trybons": "https://go.trybons.ai",
 }
 
 def get_provider_endpoint(provider: str, model_name: str, incoming_path: str) -> Optional[str]:
@@ -58,7 +59,7 @@ def get_provider_endpoint(provider: str, model_name: str, incoming_path: str) ->
         elif action == "embeddings":
             return f"{base_url}/models/{model_name}:embedContent"
     
-    elif provider == "anthropic":
+    elif provider in ("anthropic", "trybons"):
         if action == "chat/completions":
             return f"{base_url}/messages"
 
