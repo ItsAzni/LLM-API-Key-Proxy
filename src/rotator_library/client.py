@@ -1785,76 +1785,37 @@ class RotatingClient:
                         f"TransactionLogger: Failed to assemble/log final response: {e}"
                     )
 
-    async def _execute_with_retry(
+    async def _prepare_request_context(
         self,
-        api_call: callable,
-        request: Optional[Any],
-        pre_request_callback: Optional[callable] = None,
-        **kwargs,
-    ) -> Any:
-        """A generic retry mechanism for non-streaming API calls."""
-        model = self._normalize_model_string(kwargs.get("model"))
-        if not model:
-            raise ValueError("'model' is a required parameter.")
-        kwargs["model"] = model
+        model: str,
+        provider: str,
+        credentials_for_provider: list,
+        provider_plugin: Any,
+    ) -> dict:
+        """
+        Prepare common request context shared by streaming and non-streaming retry paths.
 
-        provider = self._extract_provider_from_model(model)
-        if not provider:
-            raise ValueError("'model' must be in 'provider/model' format.")
-        if provider not in self.all_credentials:
-            raise ValueError(
-                f"No API keys or OAuth credentials configured for provider: {provider}"
-            )
+        Handles:
+        - Model ID resolution
+        - Credential tier filtering (keep compatible/unknown, filter incompatible)
+        - Building credential priority cache
+        - Initializing RequestErrorAccumulator
+        - Circuit breaker check
 
-        # Extract internal logging parameters (not passed to API)
-        parent_log_dir = kwargs.pop("_parent_log_dir", None)
-
-        # Establish a global deadline for the entire request lifecycle.
-        deadline = time.time() + self.global_timeout
-
-        # Create transaction logger if request logging is enabled
-        transaction_logger = None
-        if self.enable_request_logging:
-            transaction_logger = TransactionLogger(
-                provider,
-                model,
-                enabled=True,
-                api_format="oai",
-                parent_dir=parent_log_dir,
-            )
-            transaction_logger.log_request(kwargs)
-
-        # Create a mutable copy of the keys and shuffle it to ensure
-        # that the key selection is randomized, which is crucial when
-        # multiple keys have the same usage stats.
-        credentials_for_provider = list(self.all_credentials[provider])
-        random.shuffle(credentials_for_provider)
-
-        # Filter out credentials that are unavailable (queued for re-auth)
-        provider_plugin = self._get_provider_instance(provider)
-        if provider_plugin and hasattr(provider_plugin, "is_credential_available"):
-            available_creds = [
-                cred
-                for cred in credentials_for_provider
-                if provider_plugin.is_credential_available(cred)
-            ]
-            if available_creds:
-                credentials_for_provider = available_creds
-            # If all credentials are unavailable, keep the original list
-            # (better to try unavailable creds than fail immediately)
-
-        tried_creds = set()
-        last_exception = None
-
-        # The main rotation loop. It continues as long as there are untried credentials and the global deadline has not been exceeded.
-
+        Returns:
+            dict with keys:
+                - model: resolved model string
+                - credentials: filtered credential list
+                - credential_priorities: priority map (may be None)
+                - credential_tier_names: tier names map
+                - error_accumulator: RequestErrorAccumulator instance
+        """
         # Resolve model ID early, before any credential operations
         # This ensures consistent model ID usage for acquisition, release, and tracking
         resolved_model = self._resolve_model_id(model, provider)
         if resolved_model != model:
             lib_logger.info(f"Resolved model '{model}' to '{resolved_model}'")
             model = resolved_model
-            kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
 
         # [NEW] Filter by model tier requirement and build priority map
         credential_priorities = None
@@ -1933,6 +1894,86 @@ class RotatingClient:
             raise NoAvailableKeysError(
                 f"Circuit breaker open for provider '{provider}'"
             )
+
+        return {
+            "model": model,
+            "credentials": credentials_for_provider,
+            "credential_priorities": credential_priorities,
+            "credential_tier_names": credential_tier_names,
+            "error_accumulator": error_accumulator,
+        }
+
+    async def _execute_with_retry(
+        self,
+        api_call: callable,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        """A generic retry mechanism for non-streaming API calls."""
+        model = self._normalize_model_string(kwargs.get("model"))
+        if not model:
+            raise ValueError("'model' is a required parameter.")
+        kwargs["model"] = model
+
+        provider = self._extract_provider_from_model(model)
+        if not provider:
+            raise ValueError("'model' must be in 'provider/model' format.")
+        if provider not in self.all_credentials:
+            raise ValueError(
+                f"No API keys or OAuth credentials configured for provider: {provider}"
+            )
+
+        # Extract internal logging parameters (not passed to API)
+        parent_log_dir = kwargs.pop("_parent_log_dir", None)
+
+        # Establish a global deadline for the entire request lifecycle.
+        deadline = time.time() + self.global_timeout
+
+        # Create transaction logger if request logging is enabled
+        transaction_logger = None
+        if self.enable_request_logging:
+            transaction_logger = TransactionLogger(
+                provider,
+                model,
+                enabled=True,
+                api_format="oai",
+                parent_dir=parent_log_dir,
+            )
+            transaction_logger.log_request(kwargs)
+
+        # Create a mutable copy of the keys and shuffle it to ensure
+        # that the key selection is randomized, which is crucial when
+        # multiple keys have the same usage stats.
+        credentials_for_provider = list(self.all_credentials[provider])
+        random.shuffle(credentials_for_provider)
+
+        # Filter out credentials that are unavailable (queued for re-auth)
+        provider_plugin = self._get_provider_instance(provider)
+        if provider_plugin and hasattr(provider_plugin, "is_credential_available"):
+            available_creds = [
+                cred
+                for cred in credentials_for_provider
+                if provider_plugin.is_credential_available(cred)
+            ]
+            if available_creds:
+                credentials_for_provider = available_creds
+            # If all credentials are unavailable, keep the original list
+            # (better to try unavailable creds than fail immediately)
+
+        tried_creds = set()
+        last_exception = None
+
+        # Prepare common request context (model resolution, tier filtering, priority cache, circuit breaker)
+        ctx = await self._prepare_request_context(
+            model, provider, credentials_for_provider, provider_plugin
+        )
+        model = ctx["model"]
+        kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
+        credentials_for_provider = ctx["credentials"]
+        credential_priorities = ctx["credential_priorities"]
+        credential_tier_names = ctx["credential_tier_names"]
+        error_accumulator = ctx["error_accumulator"]
 
         # Flag to stop rotation when IP-level throttle is detected
         ip_throttle_detected = False
@@ -2772,91 +2813,16 @@ class RotatingClient:
 
         consecutive_quota_failures = 0
 
-        # Resolve model ID early, before any credential operations
-        # This ensures consistent model ID usage for acquisition, release, and tracking
-        resolved_model = self._resolve_model_id(model, provider)
-        if resolved_model != model:
-            lib_logger.info(f"Resolved model '{model}' to '{resolved_model}'")
-            model = resolved_model
-            kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
-
-        # [NEW] Filter by model tier requirement and build priority map
-        credential_priorities = None
-        if provider_plugin and hasattr(provider_plugin, "get_model_tier_requirement"):
-            required_tier = provider_plugin.get_model_tier_requirement(model)
-            if required_tier is not None:
-                # Filter OUT only credentials we KNOW are too low priority
-                # Keep credentials with unknown priority (None) - they might be high priority
-                incompatible_creds = []
-                compatible_creds = []
-                unknown_creds = []
-
-                for cred in credentials_for_provider:
-                    if hasattr(provider_plugin, "get_credential_priority"):
-                        priority = provider_plugin.get_credential_priority(cred)
-                        if priority is None:
-                            # Unknown priority - keep it, will be discovered on first use
-                            unknown_creds.append(cred)
-                        elif priority <= required_tier:
-                            # Known compatible priority
-                            compatible_creds.append(cred)
-                        else:
-                            # Known incompatible priority (too low)
-                            incompatible_creds.append(cred)
-                    else:
-                        # Provider doesn't support priorities - keep all
-                        unknown_creds.append(cred)
-
-                # If we have any known-compatible or unknown credentials, use them
-                tier_compatible_creds = compatible_creds + unknown_creds
-                if tier_compatible_creds:
-                    credentials_for_provider = tier_compatible_creds
-                    if compatible_creds and unknown_creds:
-                        lib_logger.info(
-                            f"Model {model} requires priority <= {required_tier}. "
-                            f"Using {len(compatible_creds)} known-compatible + {len(unknown_creds)} unknown-tier credentials."
-                        )
-                    elif compatible_creds:
-                        lib_logger.info(
-                            f"Model {model} requires priority <= {required_tier}. "
-                            f"Using {len(compatible_creds)} known-compatible credentials."
-                        )
-                    else:
-                        lib_logger.info(
-                            f"Model {model} requires priority <= {required_tier}. "
-                            f"Using {len(unknown_creds)} unknown-tier credentials (will discover on use)."
-                        )
-                elif incompatible_creds:
-                    # Only known-incompatible credentials remain
-                    lib_logger.warning(
-                        f"Model {model} requires priority <= {required_tier} credentials, "
-                        f"but all {len(incompatible_creds)} known credentials have priority > {required_tier}. "
-                        f"Request will likely fail."
-                    )
-
-        # Build priority map and tier names map for usage_manager (using cache)
-        credential_priorities, credential_tier_names = (
-            self._build_credential_priority_cache(provider, credentials_for_provider)
+        # Prepare common request context (model resolution, tier filtering, priority cache, circuit breaker)
+        ctx = await self._prepare_request_context(
+            model, provider, credentials_for_provider, provider_plugin
         )
-
-        if credential_priorities:
-            lib_logger.debug(
-                f"Credential priorities for {provider}: {', '.join(f'P{p}={len([c for c in credentials_for_provider if credential_priorities.get(c) == p])}' for p in sorted(set(credential_priorities.values())))}"
-            )
-
-        # Initialize error accumulator for tracking errors across credential rotation
-        error_accumulator = RequestErrorAccumulator()
-        error_accumulator.model = model
-        error_accumulator.provider = provider
-
-        # Check circuit breaker state (handles IP-level throttling)
-        if not await self.circuit_breaker.can_attempt(provider):
-            lib_logger.warning(
-                f"Circuit breaker OPEN for provider '{provider}', skipping"
-            )
-            raise NoAvailableKeysError(
-                f"Circuit breaker open for provider '{provider}'"
-            )
+        model = ctx["model"]
+        kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
+        credentials_for_provider = ctx["credentials"]
+        credential_priorities = ctx["credential_priorities"]
+        credential_tier_names = ctx["credential_tier_names"]
+        error_accumulator = ctx["error_accumulator"]
 
         # Flag to stop rotation when IP-level throttle is detected
         ip_throttle_detected = False

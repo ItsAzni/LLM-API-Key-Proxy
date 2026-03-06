@@ -42,7 +42,7 @@ from .translator import (
     translate_anthropic_request,
 )
 
-from .streaming import anthropic_streaming_wrapper
+from .streaming_fast import anthropic_streaming_wrapper
 
 __all__ = [
     # Models

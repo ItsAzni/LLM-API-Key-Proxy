@@ -2,6 +2,9 @@
 # Copyright (c) 2026 Mirrowel
 
 """
+DEPRECATED: Use streaming_fast.py instead.
+This module is kept for backwards compatibility only.
+
 Streaming wrapper for converting OpenAI streaming format to Anthropic streaming format.
 
 This module provides a framework-agnostic streaming wrapper that converts

@@ -56,51 +56,12 @@ class QwenCredentialSetupResult:
     credentials: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
 
-class QwenAuthBase:
+from .base_token_manager import BaseTokenManager
+
+
+class QwenAuthBase(BaseTokenManager):
     def __init__(self):
-        self._credentials_cache: Dict[str, Dict[str, Any]] = {}
-        self._refresh_locks: Dict[str, asyncio.Lock] = {}
-        self._locks_lock = (
-            asyncio.Lock()
-        )  # Protects the locks dict from race conditions
-        # [BACKOFF TRACKING] Track consecutive failures per credential
-        self._refresh_failures: Dict[
-            str, int
-        ] = {}  # Track consecutive failures per credential
-        self._next_refresh_after: Dict[
-            str, float
-        ] = {}  # Track backoff timers (Unix timestamp)
-
-        # [QUEUE SYSTEM] Sequential refresh processing with two separate queues
-        # Normal refresh queue: for proactive token refresh (old token still valid)
-        self._refresh_queue: asyncio.Queue = asyncio.Queue()
-        self._queue_processor_task: Optional[asyncio.Task] = None
-
-        # Re-auth queue: for invalid refresh tokens (requires user interaction)
-        self._reauth_queue: asyncio.Queue = asyncio.Queue()
-        self._reauth_processor_task: Optional[asyncio.Task] = None
-
-        # Tracking sets/dicts
-        self._queued_credentials: set = set()  # Track credentials in either queue
-        # Only credentials in re-auth queue are marked unavailable (not normal refresh)
-        # TTL cleanup is defense-in-depth for edge cases where re-auth processor crashes
-        self._unavailable_credentials: Dict[
-            str, float
-        ] = {}  # Maps credential path -> timestamp when marked unavailable
-        # TTL should exceed reauth timeout (300s) to avoid premature cleanup
-        self._unavailable_ttl_seconds: int = 360  # 6 minutes TTL for stale entries
-        self._queue_tracking_lock = asyncio.Lock()  # Protects queue sets
-
-        # Retry tracking for normal refresh queue
-        self._queue_retry_count: Dict[
-            str, int
-        ] = {}  # Track retry attempts per credential
-
-        # Configuration constants
-        self._refresh_timeout_seconds: int = 15  # Max time for single refresh
-        self._refresh_interval_seconds: int = 30  # Delay between queue items
-        self._refresh_max_retries: int = 3  # Attempts before kicked out
-        self._reauth_timeout_seconds: int = 300  # Time for user to complete OAuth
+        super().__init__()
 
     def _parse_env_credential_path(self, path: str) -> Optional[str]:
         """
