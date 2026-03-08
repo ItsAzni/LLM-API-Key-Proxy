@@ -2432,6 +2432,28 @@ class UsageManager:
                     for key, usage in tier1_keys:
                         state = self.key_states[key]
                         async with state["lock"]:
+                            current_count = state["models_in_use"].get(model, 0)
+                            if (
+                                state["models_in_use"]
+                                and current_count < effective_max_concurrent
+                            ):
+                                state["models_in_use"][model] = current_count + 1
+                                tier_name = (
+                                    credential_tier_names.get(key, "unknown")
+                                    if credential_tier_names
+                                    else "unknown"
+                                )
+                                quota_display = self._get_quota_display(key, model)
+                                lib_logger.info(
+                                    f"Acquired key {mask_credential(key)} for model {model} "
+                                    f"(tier: {tier_name}, priority: {priority_level}, selection: {selection_method}, selection_source: reused-active, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
+                                )
+                                return key
+
+                    # Then try Tier 2
+                    for key, usage in tier2_keys:
+                        state = self.key_states[key]
+                        async with state["lock"]:
                             if not state["models_in_use"]:
                                 state["models_in_use"][model] = 1
                                 tier_name = (
@@ -2442,26 +2464,7 @@ class UsageManager:
                                 quota_display = self._get_quota_display(key, model)
                                 lib_logger.info(
                                     f"Acquired key {mask_credential(key)} for model {model} "
-                                    f"(tier: {tier_name}, priority: {priority_level}, selection: {selection_method}, {quota_display})"
-                                )
-                                return key
-
-                    # Then try Tier 2
-                    for key, usage in tier2_keys:
-                        state = self.key_states[key]
-                        async with state["lock"]:
-                            current_count = state["models_in_use"].get(model, 0)
-                            if current_count < effective_max_concurrent:
-                                state["models_in_use"][model] = current_count + 1
-                                tier_name = (
-                                    credential_tier_names.get(key, "unknown")
-                                    if credential_tier_names
-                                    else "unknown"
-                                )
-                                quota_display = self._get_quota_display(key, model)
-                                lib_logger.info(
-                                    f"Acquired key {mask_credential(key)} for model {model} "
-                                    f"(tier: {tier_name}, priority: {priority_level}, selection: {selection_method}, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
+                                    f"(tier: {tier_name}, priority: {priority_level}, selection: {selection_method}, selection_source: idle, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
                                 )
                                 return key
 
@@ -2660,6 +2663,29 @@ class UsageManager:
                 for key, usage in tier1_keys:
                     state = self.key_states[key]
                     async with state["lock"]:
+                        current_count = state["models_in_use"].get(model, 0)
+                        if (
+                            state["models_in_use"]
+                            and current_count < effective_max_concurrent
+                        ):
+                            state["models_in_use"][model] = current_count + 1
+                            tier_name = (
+                                credential_tier_names.get(key)
+                                if credential_tier_names
+                                else None
+                            )
+                            tier_info = f"tier: {tier_name}, " if tier_name else ""
+                            quota_display = self._get_quota_display(key, model)
+                            lib_logger.info(
+                                f"Acquired key {mask_credential(key)} for model {model} "
+                                f"({tier_info}selection: {selection_method}, selection_source: reused-active, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
+                            )
+                            return key
+
+                # If no Tier 1 keys are available, try Tier 2.
+                for key, usage in tier2_keys:
+                    state = self.key_states[key]
+                    async with state["lock"]:
                         if not state["models_in_use"]:
                             state["models_in_use"][model] = 1
                             tier_name = (
@@ -2671,27 +2697,7 @@ class UsageManager:
                             quota_display = self._get_quota_display(key, model)
                             lib_logger.info(
                                 f"Acquired key {mask_credential(key)} for model {model} "
-                                f"({tier_info}selection: {selection_method}, {quota_display})"
-                            )
-                            return key
-
-                # If no Tier 1 keys are available, try Tier 2.
-                for key, usage in tier2_keys:
-                    state = self.key_states[key]
-                    async with state["lock"]:
-                        current_count = state["models_in_use"].get(model, 0)
-                        if current_count < effective_max_concurrent:
-                            state["models_in_use"][model] = current_count + 1
-                            tier_name = (
-                                credential_tier_names.get(key)
-                                if credential_tier_names
-                                else None
-                            )
-                            tier_info = f"tier: {tier_name}, " if tier_name else ""
-                            quota_display = self._get_quota_display(key, model)
-                            lib_logger.info(
-                                f"Acquired key {mask_credential(key)} for model {model} "
-                                f"({tier_info}selection: {selection_method}, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
+                                f"({tier_info}selection: {selection_method}, selection_source: idle, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
                             )
                             return key
 
