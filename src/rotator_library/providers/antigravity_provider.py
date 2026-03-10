@@ -3641,14 +3641,12 @@ class AntigravityProvider(
         if effort == "auto":
             return {"thinkingBudget": -1, "include_thoughts": True}
 
-        # Claude 4.6 "max" effort: use thinkingBudget 62000 (tested working)
-        # thinkingLevel "max" was rejected by the backend (not a valid ThinkingLevel enum)
-        # 120k was also rejected (INVALID_ARGUMENT), 62000 is the highest confirmed working value
+        # Claude thinking maxes out at 31999 on Antigravity.
         if is_claude and effort == "max":
             lib_logger.info(
-                f"[Antigravity] Using max effort (thinkingBudget=62000) for Claude model {model}"
+                f"[Antigravity] Using max effort (thinkingBudget=31999) for Claude model {model}"
             )
-            return {"thinkingBudget": 62000, "include_thoughts": True}
+            return {"thinkingBudget": 31999, "include_thoughts": True}
 
         # Claude models: pass raw thinking_budget directly when available
         # This preserves the exact budget_tokens from the Anthropic request
@@ -5178,7 +5176,15 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         is_thinkinglevel_model = (
             internal_model.startswith("gemini-3-")
             or internal_model.startswith("gemini-3.1-")
-            or (self._is_claude(model) and ("4.6" in model or "4-6" in model or "4.6" in internal_model or "4-6" in internal_model))
+            or (
+                self._is_claude(model)
+                and (
+                    "4.6" in model
+                    or "4-6" in model
+                    or "4.6" in internal_model
+                    or "4-6" in internal_model
+                )
+            )
         )
         if not is_thinkinglevel_model:
             thinking_config = gen_config.get("thinkingConfig", {})
