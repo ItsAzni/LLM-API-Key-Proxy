@@ -636,12 +636,16 @@ async def lifespan(app: FastAPI):
             from proxy_app.auto_newaccount import AutoNewAccountManager
 
             provider = client._get_provider_instance("gitlab_duo")
-            if provider is not None and hasattr(provider, "set_credential_exhausted_callback"):
+            if provider is not None and hasattr(
+                provider, "set_credential_exhausted_callback"
+            ):
                 manager = AutoNewAccountManager(
                     proxy_port=args.port,
                     proxy_api_key=os.getenv("PROXY_API_KEY", ""),
                 )
-                provider.set_credential_exhausted_callback(manager.on_credential_exhausted)
+                provider.set_credential_exhausted_callback(
+                    manager.on_credential_exhausted
+                )
                 manager.start()
                 logging.info(
                     "✅ Auto-newaccount enabled for GitLab Duo (Telegram notifications active)"
@@ -653,7 +657,9 @@ async def lifespan(app: FastAPI):
         except Exception:
             logging.exception("Failed to initialise auto-newaccount manager")
     elif _auto_na_disabled:
-        logging.info("Auto-newaccount explicitly disabled (GITLAB_DUO_AUTO_NEWACCOUNT=false)")
+        logging.info(
+            "Auto-newaccount explicitly disabled (GITLAB_DUO_AUTO_NEWACCOUNT=false)"
+        )
 
     # Log loaded credentials summary (compact, always visible for deployment verification)
     # _api_summary = ', '.join([f"{p}:{len(c)}" for p, c in api_keys.items()]) if api_keys else "none"
@@ -1799,7 +1805,7 @@ async def token_count(
                 status_code=400, detail="'model' and 'messages' are required."
             )
 
-        count = client.token_count(**data)
+        count = await client.token_count_async(**data)
         return {"token_count": count}
 
     except Exception as e:
