@@ -248,8 +248,10 @@ AVAILABLE_MODELS = [
     # Claude models
     "claude-sonnet-4",
     "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
     "claude-opus-4",
     "claude-opus-4.5",
+    "claude-opus-4.6",
     "claude-opus-41",
     "claude-haiku-4.5",
     "claude-3.5-sonnet",
@@ -263,6 +265,46 @@ AVAILABLE_MODELS = [
     # Other models
     "grok-code-fast-1",
 ]
+
+# =============================================================================
+# MODEL NAME ALIASES
+# =============================================================================
+# Maps alternative model names (e.g. Anthropic dash-style versioning) to the
+# canonical names accepted by GitHub Copilot.
+#
+# Claude Code and the Anthropic SDK use dashes for version separators
+# (e.g. claude-opus-4-6), whereas GitHub Copilot uses dots (claude-opus-4.6).
+# This mapping transparently rewrites the model name before the API call.
+MODEL_ALIASES: Dict[str, str] = {
+    # Claude 4.5 aliases (Anthropic dash-style → Copilot dot-style)
+    "claude-sonnet-4-5": "claude-sonnet-4.5",
+    "claude-opus-4-5": "claude-opus-4.5",
+    "claude-haiku-4-5": "claude-haiku-4.5",
+    # Claude 4.6 aliases
+    "claude-sonnet-4-6": "claude-sonnet-4.6",
+    "claude-opus-4-6": "claude-opus-4.6",
+    # Claude 3.x aliases
+    "claude-3-5-sonnet": "claude-3.5-sonnet",
+    "claude-3-7-sonnet": "claude-3.7-sonnet",
+    "claude-3-7-sonnet-thought": "claude-3.7-sonnet-thought",
+    # GPT version aliases
+    "gpt-4-1": "gpt-4.1",
+    "gpt-5-1": "gpt-5.1",
+    "gpt-5-2": "gpt-5.2",
+    "gpt-5-1-codex": "gpt-5.1-codex",
+    "gpt-5-1-codex-mini": "gpt-5.1-codex-mini",
+    "gpt-5-1-codex-max": "gpt-5.1-codex-max",
+}
+
+
+def _normalize_model_name(model: str) -> str:
+    """Normalize a model name using the alias table.
+
+    If the model (after stripping provider prefix) matches an alias key,
+    the canonical name is returned.  Otherwise the input is returned unchanged.
+    """
+    clean = model.split("/")[-1] if "/" in model else model
+    return MODEL_ALIASES.get(clean, clean)
 
 
 def _is_responses_api_model(model: str) -> bool:
@@ -1085,9 +1127,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Never forward temperature for GitHub Copilot requests.
         kwargs.pop("temperature", None)
 
-        # Normalize model name (strip provider prefix)
+        # Normalize model name (strip provider prefix and apply aliases)
         if "/" in model:
             model = model.split("/", 1)[1]
+        model = _normalize_model_name(model)
 
         # =====================================================================
         # EARLY MESSAGE TRANSFORMATION
@@ -1938,6 +1981,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
     ) -> Dict[str, int]:
         """Count tokens for GitHub Copilot Claude models via Anthropic-compatible endpoint."""
         clean_model = model.split("/", 1)[1] if "/" in model else model
+        clean_model = _normalize_model_name(clean_model)
 
         if not _is_claude_model(clean_model):
             raise ValueError(

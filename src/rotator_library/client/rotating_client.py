@@ -498,6 +498,48 @@ class RotatingClient:
         """
         return self._token_count_local(**kwargs)
 
+    @staticmethod
+    def _map_model_for_tokenizer(model: str) -> str:
+        """Map provider-prefixed model names to LiteLLM-compatible names for tokenization.
+
+        Providers like github_copilot host models from multiple vendors (Claude,
+        GPT, Gemini, etc.) under a single provider prefix that LiteLLM doesn't
+        recognise.  This helper rewrites the model string so that LiteLLM can
+        select the correct tokenizer.
+        """
+        if "/" not in model:
+            return model
+
+        provider, model_name = model.split("/", 1)
+        model_lower = model_name.lower()
+
+        # Only remap providers whose prefix LiteLLM doesn't understand
+        if provider not in (
+            "github_copilot",
+            "antigravity",
+            "iflow",
+        ):
+            return model
+
+        # Claude models → anthropic/
+        if model_lower.startswith("claude"):
+            return f"anthropic/{model_name}"
+
+        # GPT / o-series models → openai/  (covers gpt-4o, gpt-5, o3, o4-mini …)
+        if model_lower.startswith(("gpt-", "o1", "o3", "o4")):
+            return f"openai/{model_name}"
+
+        # Gemini models → gemini/
+        if model_lower.startswith("gemini"):
+            return f"gemini/{model_name}"
+
+        # Grok models → approximate with openai tokenizer (best available)
+        if model_lower.startswith("grok"):
+            return f"openai/{model_name}"
+
+        # Fallback: strip unrecognised provider prefix and let LiteLLM guess
+        return model_name
+
     def _token_count_local(self, **kwargs) -> int:
         """Calculate token count locally using LiteLLM tokenization."""
         model = kwargs.get("model")
@@ -508,15 +550,20 @@ class RotatingClient:
         if not model:
             raise ValueError("'model' is required")
 
+        # Map provider-prefixed models to LiteLLM-compatible names so the
+        # correct tokenizer is selected (e.g. github_copilot/claude-sonnet-4
+        # → anthropic/claude-sonnet-4).
+        tokenizer_model = self._map_model_for_tokenizer(model)
+
         if messages:
-            base_count = token_counter(model=model, messages=messages)
+            base_count = token_counter(model=tokenizer_model, messages=messages)
         elif text:
-            base_count = token_counter(model=model, text=text)
+            base_count = token_counter(model=tokenizer_model, text=text)
         else:
             raise ValueError("Either 'text' or 'messages' must be provided")
 
         if tools:
-            base_count += token_counter(model=model, text=json.dumps(tools))
+            base_count += token_counter(model=tokenizer_model, text=json.dumps(tools))
 
         provider = model.split("/")[0] if "/" in model else ""
         if provider == "antigravity":
@@ -527,7 +574,7 @@ class RotatingClient:
 
                 preprompt_text = get_antigravity_preprompt_text()
                 if preprompt_text:
-                    preprompt_tokens = token_counter(model=model, text=preprompt_text)
+                    preprompt_tokens = token_counter(model=tokenizer_model, text=preprompt_text)
                     base_count += preprompt_tokens
             except ImportError:
                 pass
