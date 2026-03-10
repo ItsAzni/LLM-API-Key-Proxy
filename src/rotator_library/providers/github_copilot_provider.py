@@ -1970,67 +1970,11 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
 
         return response_obj
 
-    async def count_tokens(
-        self,
-        client: httpx.AsyncClient,
-        credential_path: str,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        litellm_params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, int]:
-        """Count tokens for GitHub Copilot Claude models via Anthropic-compatible endpoint."""
-        clean_model = model.split("/", 1)[1] if "/" in model else model
-        clean_model = _normalize_model_name(clean_model)
-
-        if not _is_claude_model(clean_model):
-            raise ValueError(
-                "GitHub Copilot native token counting is only available for Claude models"
-            )
-
-        transformed_messages = self._sanitize_messages(messages)
-        transformed_messages = self._transform_user_messages_to_tool_results(
-            transformed_messages
-        )
-        transformed_messages = self._transform_messages_for_reasoning(
-            transformed_messages
-        )
-
-        api_base = self._get_api_base(credential_path)
-        headers = await self._build_copilot_headers(
-            credential_path,
-            is_vision=self._detect_vision_content(transformed_messages),
-            is_agent=self._detect_agent_initiated(transformed_messages),
-        )
-        headers["anthropic-version"] = ANTHROPIC_VERSION
-        headers["anthropic-beta"] = COPILOT_ANTHROPIC_BETA
-
-        system, anthropic_messages = self._openai_messages_to_anthropic(
-            transformed_messages
-        )
-        payload: Dict[str, Any] = {
-            "model": clean_model,
-            "messages": anthropic_messages,
-        }
-        if system:
-            payload["system"] = system
-
-        anthropic_tools = self._openai_tools_to_anthropic(tools)
-        if anthropic_tools:
-            payload["tools"] = anthropic_tools
-
-        endpoint = f"{api_base}/messages/count_tokens"
-        response = await client.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=TimeoutConfig.non_streaming(),
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        total_tokens = data.get("input_tokens", 0)
-        return {"prompt_tokens": total_tokens, "total_tokens": total_tokens}
+    # NOTE: GitHub Copilot's API does NOT expose a /messages/count_tokens
+    # endpoint (returns 404).  We intentionally do NOT define a count_tokens()
+    # method here so that RotatingClient.token_count_async() skips the native
+    # call and falls back directly to the local LiteLLM tokenizer, which is
+    # fast and reliable.
 
     async def _stream_anthropic_messages(
         self,

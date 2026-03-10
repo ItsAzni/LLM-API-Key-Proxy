@@ -1394,6 +1394,11 @@ async def anthropic_count_tokens(
     try:
         # Use the library method to handle the request
         result = await client.anthropic_count_tokens(body)
+        logging.getLogger("rotator_library").info(
+            "[/v1/messages/count_tokens] model=%s result=%s",
+            body.model,
+            result,
+        )
         return JSONResponse(content=result)
 
     except (

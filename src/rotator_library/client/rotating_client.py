@@ -623,7 +623,14 @@ class RotatingClient:
                         exc,
                     )
 
-        return self._token_count_local(**kwargs)
+        local_result = self._token_count_local(**kwargs)
+        lib_logger.info(
+            "[token_count_async] Local tokenizer for %s → %d tokens (tokenizer_model=%s)",
+            model,
+            local_result,
+            self._map_model_for_tokenizer(model),
+        )
+        return local_result
 
     async def get_available_models(self, provider: str) -> List[str]:
         """Get available models for a provider with caching."""
