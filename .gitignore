@@ -130,7 +130,7 @@ cache/antigravity/thought_signatures.json
 /cache/
 *.env
 
-/oauth_creds/
+/oauth_creds*
 /oauth_creds_bak/
 
 /usage/

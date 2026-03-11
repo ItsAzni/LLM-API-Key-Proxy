@@ -333,17 +333,20 @@ QUOTA_DELAY_RETRY_JITTER_MS = max(
 
 # Per-model rate limiter configuration (ported from ZeroGravity rate_limiter.rs)
 # When consecutive 429s occur, enter cooldown with incremental backoff:
-#   1 → 5s,  2 → 15s,  3 → 30s,  4 → 60s,  5+ → 120s
+#   1 → 30s,  2 → 60s,  3 → 180s,  4 → 600s,  5+ → 1800s
 MODEL_RATE_LIMIT_ENABLED = env_bool("ANTIGRAVITY_MODEL_RATE_LIMIT_ENABLED", True)
-MODEL_RATE_LIMIT_BACKOFF_SCHEDULE = [5, 15, 30, 60, 120]
+MODEL_RATE_LIMIT_BACKOFF_SCHEDULE = [30, 60, 180, 600, 1800]
 
 # Warmup/heartbeat configuration (ported from ZeroGravity warmup.rs)
 WARMUP_ENABLED = env_bool("ANTIGRAVITY_WARMUP_ENABLED", True)
 WARMUP_TIMEOUT = env_int("ANTIGRAVITY_WARMUP_TIMEOUT", 5)
-HEARTBEAT_ENABLED = env_bool("ANTIGRAVITY_HEARTBEAT_ENABLED", True)
-# Real AG extension uses setInterval(1000) — 1s interval, not 30s (1576b66 stealth overhaul)
-HEARTBEAT_INTERVAL_SECONDS = env_int("ANTIGRAVITY_HEARTBEAT_INTERVAL", 1)
+HEARTBEAT_ENABLED = env_bool("ANTIGRAVITY_HEARTBEAT_ENABLED", False)
+HEARTBEAT_INTERVAL_SECONDS = env_int("ANTIGRAVITY_HEARTBEAT_INTERVAL", 30)
 HEARTBEAT_JITTER_MS = env_int("ANTIGRAVITY_HEARTBEAT_JITTER_MS", 50)
+ENDPOINT_FALLBACK_DELAYS = [1.0, 3.0, 5.0]
+ENDPOINT_FALLBACK_JITTER_MS = env_int(
+    "ANTIGRAVITY_ENDPOINT_FALLBACK_JITTER_MS", 500
+)
 
 # Stealth/TLS fingerprinting configuration
 STEALTH_ENABLED = env_bool("ANTIGRAVITY_STEALTH_ENABLED", True)
@@ -573,6 +576,71 @@ class BanSignalDetector:
         # Debounce: prevent logging the same ban signal every request
         self._last_logged: Dict[str, float] = {}
         self._log_debounce_seconds = 300  # Only re-log same credential ban every 5 min
+        self._project_failures = {}
+        self._banned_projects = {}
+        self._credential_to_project = {}
+        self._project_failure_window_seconds = 300
+        self._project_ban_threshold = 3
+
+    async def register_credential_project(self, cred_id, project_id):
+        if not cred_id or not project_id:
+            return
+
+        async with self._lock:
+            self._credential_to_project[cred_id] = project_id
+
+    async def _record_project_failure(self, cred_id, status_code):
+        if not cred_id or status_code not in (401, 403):
+            return
+
+        async with self._lock:
+            project_id = self._credential_to_project.get(cred_id)
+            if not project_id:
+                return
+
+            now = time.time()
+            ban_info = self._banned_projects.get(project_id)
+            if ban_info:
+                elapsed = now - ban_info["banned_at"]
+                if elapsed < BAN_COOLDOWN_SECONDS:
+                    return
+                del self._banned_projects[project_id]
+
+            failures = self._project_failures.get(project_id, [])
+            failures.append(
+                {
+                    "credential_id": cred_id,
+                    "status_code": status_code,
+                    "failed_at": now,
+                }
+            )
+            cutoff = now - self._project_failure_window_seconds
+            failures = [entry for entry in failures if entry["failed_at"] >= cutoff]
+            self._project_failures[project_id] = failures
+
+            unique_credentials = sorted(
+                {entry["credential_id"] for entry in failures if entry["credential_id"]}
+            )
+            if len(unique_credentials) < self._project_ban_threshold:
+                return
+
+            self._banned_projects[project_id] = {
+                "banned_at": now,
+                "credential_ids": unique_credentials,
+                "status_code": status_code,
+            }
+            self._project_failures.pop(project_id, None)
+
+            log_key = f"project:{project_id}"
+            last = self._last_logged.get(log_key, 0)
+            if (now - last) > self._log_debounce_seconds:
+                self._last_logged[log_key] = now
+                lib_logger.warning(
+                    f"🚫 PROJECT BAN DETECTED for project {project_id}: "
+                    f"{len(unique_credentials)} credentials hit 401/403 within "
+                    f"{self._project_failure_window_seconds}s. "
+                    f"Cooldown: {BAN_COOLDOWN_SECONDS}s"
+                )
 
     async def check_response_for_ban(
         self,
@@ -725,6 +793,23 @@ class BanSignalDetector:
 
             # Cooldown expired — remove from tracked bans
             del self._banned_credentials[credential_id]
+            return False
+
+    async def is_project_banned(self, cred_id) -> bool:
+        async with self._lock:
+            project_id = self._credential_to_project.get(cred_id)
+            if not project_id:
+                return False
+
+            ban_info = self._banned_projects.get(project_id)
+            if not ban_info:
+                return False
+
+            elapsed = time.time() - ban_info["banned_at"]
+            if elapsed < BAN_COOLDOWN_SECONDS:
+                return True
+
+            del self._banned_projects[project_id]
             return False
 
     async def clear_ban(self, credential_id: str) -> None:
@@ -2656,6 +2741,38 @@ class AntigravityProvider(
         self._base_url_index = 0
         self._current_base_url = BASE_URLS[0]
 
+    async def _wait_before_endpoint_fallback(self, fallback_attempt, error):
+        delay = ENDPOINT_FALLBACK_DELAYS[
+            min(fallback_attempt, len(ENDPOINT_FALLBACK_DELAYS) - 1)
+        ]
+        jitter_ms = (
+            random.randint(0, ENDPOINT_FALLBACK_JITTER_MS)
+            if ENDPOINT_FALLBACK_JITTER_MS > 0
+            else 0
+        )
+        wait_seconds = delay + (jitter_ms / 1000.0)
+        lib_logger.warning(
+            f"Retrying with fallback URL after {wait_seconds:.2f}s: {error}"
+        )
+        await asyncio.sleep(wait_seconds)
+
+    async def _ensure_project_not_banned(
+        self, credential_path, project_id, model_name="antigravity"
+    ):
+        if not credential_path:
+            return
+
+        if await get_ban_detector().is_project_banned(credential_path):
+            raise TransientQuotaError(
+                provider="antigravity",
+                model=model_name,
+                message=(
+                    f"Project {project_id} temporarily suspended after repeated "
+                    f"401/403 failures across credentials. "
+                    f"Cooldown: {BAN_COOLDOWN_SECONDS}s"
+                ),
+            )
+
     async def _ensure_warmed_up(
         self, credential_path: str, token: str, base_url: str
     ) -> None:
@@ -3842,6 +3959,9 @@ class AntigravityProvider(
             if not project_id:
                 lib_logger.warning("[PDF Extract] Failed to get project ID for Gemini")
                 return None
+            await self._ensure_project_not_banned(
+                credential_path, project_id, extraction_model
+            )
 
             # Build extraction request
             extraction_payload = {
@@ -5786,15 +5906,16 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Get access token first (needed for project discovery)
         token = await self.get_valid_token(credential_path)
 
-        # Trigger warmup + heartbeat on first use of this credential (non-blocking)
-        asyncio.ensure_future(
-            self._ensure_warmed_up(credential_path, token, self._get_base_url())
-        )
-
         # Discover real project ID
         litellm_params = kwargs.get("litellm_params", {}) or {}
         project_id = await self._discover_project_id(
             credential_path, token, litellm_params
+        )
+        await self._ensure_project_not_banned(credential_path, project_id, model)
+
+        # Trigger warmup + heartbeat on first use of this credential (non-blocking)
+        asyncio.ensure_future(
+            self._ensure_warmed_up(credential_path, token, self._get_base_url())
         )
 
         # Transform to Antigravity format with real project ID
@@ -5843,6 +5964,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # URL fallback loop - handles HTTP errors (except 429) and network errors
         # by switching to fallback URLs. Empty response retry is handled inside
         # _streaming_with_retry.
+        fallback_attempt = 0
         while True:
             try:
                 # Always use streaming internally - _streaming_with_retry handles
@@ -5892,6 +6014,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                         )
                     except Exception:
                         pass
+                    if credential_path and not error_body:
+                        await get_ban_detector()._record_project_failure(
+                            credential_path, e.response.status_code
+                        )
                     if error_body:
                         ban_result = await get_ban_detector().check_response_for_ban(
                             credential_path, e.response.status_code, error_body
@@ -5908,7 +6034,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
                 # Other HTTP errors (403, 500, etc.) - try fallback URL
                 if self._try_next_base_url():
-                    lib_logger.warning(f"Retrying with fallback URL: {e}")
+                    await self._wait_before_endpoint_fallback(fallback_attempt, e)
+                    fallback_attempt += 1
                     url = f"{self._get_base_url()}{endpoint}?alt=sse"
                     continue  # Retry with new URL
                 raise  # No more fallback URLs
@@ -5920,7 +6047,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             except Exception as e:
                 # Non-HTTP errors (network issues, timeouts, etc.) - try fallback URL
                 if self._try_next_base_url():
-                    lib_logger.warning(f"Retrying with fallback URL: {e}")
+                    await self._wait_before_endpoint_fallback(fallback_attempt, e)
+                    fallback_attempt += 1
                     url = f"{self._get_base_url()}{endpoint}?alt=sse"
                     continue  # Retry with new URL
                 raise  # No more fallback URLs
@@ -6608,6 +6736,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     except Exception:
                         pass
                     if error_body and credential_path:
+                        if e.response.status_code in (401, 403):
+                            await get_ban_detector()._record_project_failure(
+                                credential_path, e.response.status_code
+                            )
                         ban_result = await get_ban_detector().check_response_for_ban(
                             credential_path, e.response.status_code, error_body
                         )
@@ -6661,6 +6793,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             project_id = await self._discover_project_id(
                 credential_path, token, litellm_params or {}
             )
+            await self._ensure_project_not_banned(credential_path, project_id, model)
 
             system_instruction, contents = self._transform_messages(
                 messages, internal_model

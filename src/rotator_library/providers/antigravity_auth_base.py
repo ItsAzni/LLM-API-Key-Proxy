@@ -93,6 +93,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
     ENV_PREFIX = "ANTIGRAVITY"
     CALLBACK_PORT = 51121
     CALLBACK_PATH = "/oauthcallback"
+    PROACTIVE_REFRESH_ENABLED = os.getenv(
+        "ANTIGRAVITY_PROACTIVE_REFRESH", ""
+    ).lower() in ("1", "true", "yes", "on")
 
     def __init__(self):
         super().__init__()
@@ -101,6 +104,21 @@ class AntigravityAuthBase(GoogleOAuthBase):
         self.project_tier_cache: Dict[str, str] = {}
         self.tier_full_cache: Dict[str, str] = {}  # Full tier names for display
         self.tier_full_cache: Dict[str, str] = {}  # Full tier names for display
+
+    async def _register_project_for_ban_detection(self, credential_path, project_id):
+        if not credential_path or not project_id:
+            return
+
+        try:
+            from .antigravity_provider import get_ban_detector
+
+            await get_ban_detector().register_credential_project(
+                credential_path, project_id
+            )
+        except Exception as e:
+            lib_logger.debug(
+                f"Failed to register project for ban detection on {credential_path}: {e}"
+            )
 
     # =========================================================================
     # POST-AUTH DISCOVERY HOOK
@@ -311,6 +329,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
         # Check in-memory cache first
         if credential_path in self.project_id_cache:
             cached_project = self.project_id_cache[credential_path]
+            await self._register_project_for_ban_detection(
+                credential_path, cached_project
+            )
             lib_logger.debug(f"Using cached project ID: {cached_project}")
             return cached_project
 
@@ -336,6 +357,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
             self.tier_full_cache,
         )
         if persisted_project_id:
+            await self._register_project_for_ban_detection(
+                credential_path, persisted_project_id
+            )
             return persisted_project_id
 
         lib_logger.debug(
@@ -473,6 +497,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
                         project_id,
                         discovered_tier,
                         discovered_tier_full,
+                    )
+                    await self._register_project_for_ban_detection(
+                        credential_path, project_id
                     )
 
                     return project_id
@@ -637,6 +664,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
                 await self._persist_project_metadata(
                     credential_path, project_id, discovered_tier, discovered_tier_full
                 )
+                await self._register_project_for_ban_detection(
+                    credential_path, project_id
+                )
 
                 return project_id
 
@@ -715,6 +745,9 @@ class AntigravityAuthBase(GoogleOAuthBase):
                     # Persist to credential file (no tier info from resource manager)
                     await self._persist_project_metadata(
                         credential_path, project_id, None
+                    )
+                    await self._register_project_for_ban_detection(
+                        credential_path, project_id
                     )
 
                     return project_id

@@ -27,7 +27,7 @@ from ..types import (
     UsageUpdate,
     FAIR_CYCLE_GLOBAL_KEY,
 )
-from ..config import WindowDefinition, ProviderUsageConfig
+from ..config import WindowDefinition, ProviderUsageConfig, FAILURE_COUNTER_EXPIRY
 from .windows import WindowManager
 from ...error_handler import mask_credential
 from ...error_handler import mask_credential
@@ -600,18 +600,26 @@ class TrackingEngine:
         # Check for existing cooldown
         existing = state.cooldowns.get(key)
         backoff_count = 0
+        started_at = now
+        if existing:
+            last_failure_at = getattr(existing, "last_failure_at", existing.started_at)
+            failure_history_expired = (
+                FAILURE_COUNTER_EXPIRY > 0
+                and last_failure_at is not None
+                and (now - last_failure_at) > FAILURE_COUNTER_EXPIRY
+            )
+            if not failure_history_expired:
+                backoff_count = existing.backoff_count + 1
+
         if existing and existing.is_active:
             # Preserve original reason/source/started_at - cooldown reason should
             # reflect why it was originally set, not subsequent updates
             # Time (until) is updated to the new value as API is authoritative
-            backoff_count = existing.backoff_count + 1
             reason = existing.reason
             source = existing.source
             started_at = existing.started_at
-        else:
-            started_at = now
 
-        state.cooldowns[key] = CooldownInfo(
+        cooldown = CooldownInfo(
             reason=reason,
             until=cooldown_until,
             started_at=started_at,
@@ -619,6 +627,8 @@ class TrackingEngine:
             model_or_group=model_or_group,
             backoff_count=backoff_count,
         )
+        cooldown.last_failure_at = now
+        state.cooldowns[key] = cooldown
 
         # Check if cooldown qualifies as exhaustion
         cooldown_duration = cooldown_until - now
