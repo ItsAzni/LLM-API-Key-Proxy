@@ -60,6 +60,7 @@ DEFAULT_MAX_REQUESTS: Dict[str, Dict[str, int]] = {
         # Pro group (verified: 0.4% per request = 250 requests)
         "gemini-2.5-pro": 250,
         "gemini-3-pro-preview": 250,
+        "gemini-3.1-pro-preview": 250,
         # Flash group - 2.5 (verified: ~0.0667% per request = 1500 requests)
         # gemini-2.0-flash shares quota with 2.5-flash models
         "gemini-2.0-flash": 1500,
@@ -72,6 +73,7 @@ DEFAULT_MAX_REQUESTS: Dict[str, Dict[str, int]] = {
         # Pro group (verified: 1.0% per request = 100 requests)
         "gemini-2.5-pro": 100,
         "gemini-3-pro-preview": 100,
+        "gemini-3.1-pro-preview": 100,
         # Flash group - 2.5 (verified: 0.1% per request = 1000 requests)
         "gemini-2.0-flash": 1000,
         "gemini-2.5-flash": 1000,
