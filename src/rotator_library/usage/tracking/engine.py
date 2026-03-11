@@ -27,7 +27,8 @@ from ..types import (
     UsageUpdate,
     FAIR_CYCLE_GLOBAL_KEY,
 )
-from ..config import WindowDefinition, ProviderUsageConfig, FAILURE_COUNTER_EXPIRY
+from ..config import WindowDefinition, ProviderUsageConfig
+from ...config import FAILURE_COUNTER_EXPIRY
 from .windows import WindowManager
 from ...error_handler import mask_credential
 from ...error_handler import mask_credential

@@ -26,7 +26,7 @@ from ..types import (
     GlobalFairCycleState,
     StorageSchema,
 )
-from ..config import FAILURE_COUNTER_EXPIRY
+from ...config import FAILURE_COUNTER_EXPIRY
 from ...utils.resilient_io import ResilientStateWriter, safe_read_json
 from ...error_handler import mask_credential
 
