@@ -496,24 +496,75 @@ class RotatingClient:
         that get injected during actual API calls (agent instruction + identity override).
         This ensures token counts match actual usage.
         """
+        return self._token_count_local(**kwargs)
+
+    @staticmethod
+    def _map_model_for_tokenizer(model: str) -> str:
+        """Map provider-prefixed model names to LiteLLM-compatible names for tokenization.
+
+        Providers like github_copilot host models from multiple vendors (Claude,
+        GPT, Gemini, etc.) under a single provider prefix that LiteLLM doesn't
+        recognise.  This helper rewrites the model string so that LiteLLM can
+        select the correct tokenizer.
+        """
+        if "/" not in model:
+            return model
+
+        provider, model_name = model.split("/", 1)
+        model_lower = model_name.lower()
+
+        # Only remap providers whose prefix LiteLLM doesn't understand
+        if provider not in (
+            "github_copilot",
+            "antigravity",
+            "iflow",
+        ):
+            return model
+
+        # Claude models → anthropic/
+        if model_lower.startswith("claude"):
+            return f"anthropic/{model_name}"
+
+        # GPT / o-series models → openai/  (covers gpt-4o, gpt-5, o3, o4-mini …)
+        if model_lower.startswith(("gpt-", "o1", "o3", "o4")):
+            return f"openai/{model_name}"
+
+        # Gemini models → gemini/
+        if model_lower.startswith("gemini"):
+            return f"gemini/{model_name}"
+
+        # Grok models → approximate with openai tokenizer (best available)
+        if model_lower.startswith("grok"):
+            return f"openai/{model_name}"
+
+        # Fallback: strip unrecognised provider prefix and let LiteLLM guess
+        return model_name
+
+    def _token_count_local(self, **kwargs) -> int:
+        """Calculate token count locally using LiteLLM tokenization."""
         model = kwargs.get("model")
         text = kwargs.get("text")
         messages = kwargs.get("messages")
+        tools = kwargs.get("tools")
 
         if not model:
             raise ValueError("'model' is required")
 
-        # Calculate base token count
+        # Map provider-prefixed models to LiteLLM-compatible names so the
+        # correct tokenizer is selected (e.g. github_copilot/claude-sonnet-4
+        # → anthropic/claude-sonnet-4).
+        tokenizer_model = self._map_model_for_tokenizer(model)
+
         if messages:
-            base_count = token_counter(model=model, messages=messages)
+            base_count = token_counter(model=tokenizer_model, messages=messages)
         elif text:
-            base_count = token_counter(model=model, text=text)
+            base_count = token_counter(model=tokenizer_model, text=text)
         else:
             raise ValueError("Either 'text' or 'messages' must be provided")
 
-        # Add preprompt tokens for Antigravity provider
-        # The Antigravity provider injects system instructions during actual API calls,
-        # so we need to account for those tokens in the count
+        if tools:
+            base_count += token_counter(model=tokenizer_model, text=json.dumps(tools))
+
         provider = model.split("/")[0] if "/" in model else ""
         if provider == "antigravity":
             try:
@@ -523,13 +574,63 @@ class RotatingClient:
 
                 preprompt_text = get_antigravity_preprompt_text()
                 if preprompt_text:
-                    preprompt_tokens = token_counter(model=model, text=preprompt_text)
+                    preprompt_tokens = token_counter(model=tokenizer_model, text=preprompt_text)
                     base_count += preprompt_tokens
             except ImportError:
-                # Provider not available, skip preprompt token counting
                 pass
 
         return base_count
+
+    async def token_count_async(self, **kwargs) -> int:
+        """Calculate token count, preferring provider-native endpoints when available."""
+        model = kwargs.get("model")
+        messages = kwargs.get("messages")
+
+        if not model:
+            raise ValueError("'model' is required")
+
+        provider = model.split("/")[0] if "/" in model else ""
+        plugin = self._get_provider_instance(provider)
+
+        if plugin and hasattr(plugin, "count_tokens") and messages:
+            credentials = self.all_credentials.get(provider, [])
+            credential_path = kwargs.get("credential_identifier") or kwargs.get(
+                "credential_path"
+            )
+            if not credential_path and credentials:
+                credential_path = credentials[0]
+
+            if credential_path:
+                try:
+                    result = await plugin.count_tokens(
+                        client=self.http_client,
+                        credential_path=credential_path,
+                        model=model,
+                        messages=messages,
+                        tools=kwargs.get("tools"),
+                        litellm_params=kwargs.get("litellm_params"),
+                    )
+                    if isinstance(result, dict):
+                        total_tokens = result.get("total_tokens")
+                        if total_tokens is None:
+                            total_tokens = result.get("prompt_tokens")
+                        if total_tokens is not None:
+                            return int(total_tokens)
+                except Exception as exc:
+                    lib_logger.warning(
+                        "Provider-native token counting failed for %s, falling back to local tokenizer: %s",
+                        model,
+                        exc,
+                    )
+
+        local_result = self._token_count_local(**kwargs)
+        lib_logger.info(
+            "[token_count_async] Local tokenizer for %s → %d tokens (tokenizer_model=%s)",
+            model,
+            local_result,
+            self._map_model_for_tokenizer(model),
+        )
+        return local_result
 
     async def get_available_models(self, provider: str) -> List[str]:
         """Get available models for a provider with caching."""

@@ -904,24 +904,11 @@ class RequestExecutor:
                                         cred, classified, str(original)[:150]
                                     )
 
-                                    # Track consecutive quota failures
+                                    # Track quota streaks for diagnostics only.
+                                    # Do not fail fast here; continue rotating through
+                                    # all eligible credentials first.
                                     if classified.error_type == "quota_exceeded":
                                         retry_state.increment_quota_failures()
-                                        if retry_state.consecutive_quota_failures >= 3:
-                                            lib_logger.error(
-                                                "3 consecutive quota errors in streaming - "
-                                                "request may be too large"
-                                            )
-                                            cred_context.mark_failure(classified)
-                                            error_data = {
-                                                "error": {
-                                                    "message": "Request exceeds quota for all credentials",
-                                                    "type": "quota_exhausted",
-                                                }
-                                            }
-                                            yield f"data: {json.dumps(error_data)}\n\n"
-                                            yield "data: [DONE]\n\n"
-                                            return
                                     else:
                                         retry_state.reset_quota_failures()
 
@@ -946,24 +933,11 @@ class RequestExecutor:
                                         cred, classified, str(e)[:150]
                                     )
 
-                                    # Track consecutive quota failures
+                                    # Track quota streaks for diagnostics only.
+                                    # Do not fail fast here; continue rotating through
+                                    # all eligible credentials first.
                                     if classified.error_type == "quota_exceeded":
                                         retry_state.increment_quota_failures()
-                                        if retry_state.consecutive_quota_failures >= 3:
-                                            lib_logger.error(
-                                                "3 consecutive quota errors in streaming - "
-                                                "request may be too large"
-                                            )
-                                            cred_context.mark_failure(classified)
-                                            error_data = {
-                                                "error": {
-                                                    "message": "Request exceeds quota for all credentials",
-                                                    "type": "quota_exhausted",
-                                                }
-                                            }
-                                            yield f"data: {json.dumps(error_data)}\n\n"
-                                            yield "data: [DONE]\n\n"
-                                            return
                                     else:
                                         retry_state.reset_quota_failures()
 
@@ -1170,17 +1144,11 @@ class RequestExecutor:
             request_headers=request_headers,
         )
 
-        # Check for quota errors
+        # Track quota streaks for diagnostics only.
+        # Do not fail fast here; continue rotating through all eligible credentials
+        # and let normal exhaustion handling produce the final response.
         if classified.error_type == "quota_exceeded":
             retry_state.increment_quota_failures()
-            if retry_state.consecutive_quota_failures >= 3:
-                # Likely request is too large
-                lib_logger.error(
-                    f"3 consecutive quota errors - request may be too large"
-                )
-                error_accumulator.record_error(credential, classified, error_message)
-                cred_context.mark_failure(classified)
-                return ErrorAction.FAIL
         else:
             retry_state.reset_quota_failures()
 

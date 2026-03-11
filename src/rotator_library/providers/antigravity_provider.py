@@ -1724,7 +1724,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
                     # It's an enum pattern - merge into single enum
                     result = {k: v for k, v in schema.items() if k != union_key}
                     result["type"] = "string"
-                    result["enum"] = merged_enum
+                    result["enum"] = [str(v) for v in merged_enum]
                     if parent_desc:
                         result["description"] = parent_desc
                     return _clean_claude_schema(result, for_gemini)
@@ -1773,7 +1773,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # Also add 'type' if not present, since enum requires type: "string"
     if "const" in schema:
         const_value = schema["const"]
-        cleaned["enum"] = [const_value]
+        cleaned["enum"] = [str(const_value)]
         # Gemini requires type when using enum - infer from const value or default to string
         if "type" not in schema:
             if isinstance(const_value, bool):
@@ -1844,12 +1844,16 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         elif isinstance(value, dict):
             cleaned[key] = _clean_claude_schema(value, for_gemini)
         elif isinstance(value, list):
-            cleaned[key] = [
-                _clean_claude_schema(item, for_gemini)
-                if isinstance(item, dict)
-                else item
-                for item in value
-            ]
+            if key == "enum":
+                # Google's Proto-based API requires all enum values to be strings
+                cleaned[key] = [str(item) for item in value]
+            else:
+                cleaned[key] = [
+                    _clean_claude_schema(item, for_gemini)
+                    if isinstance(item, dict)
+                    else item
+                    for item in value
+                ]
         else:
             cleaned[key] = value
 
@@ -2315,6 +2319,10 @@ class AntigravityProvider(
         self._initial_quota_fetch_done: bool = (
             False  # Track if initial full fetch completed
         )
+
+        # Ultra tier periodic quota verification state
+        self._ultra_claude_counts: Dict[str, int] = {}  # credential -> request count
+        self._usage_manager_ref = None  # Set by _store_baselines_to_usage_manager
 
         # Feature flags
         self._preserve_signatures_in_client = env_bool(
@@ -3633,14 +3641,12 @@ class AntigravityProvider(
         if effort == "auto":
             return {"thinkingBudget": -1, "include_thoughts": True}
 
-        # Claude 4.6 "max" effort: use thinkingBudget 62000 (tested working)
-        # thinkingLevel "max" was rejected by the backend (not a valid ThinkingLevel enum)
-        # 120k was also rejected (INVALID_ARGUMENT), 62000 is the highest confirmed working value
+        # Claude thinking maxes out at 31999 on Antigravity.
         if is_claude and effort == "max":
             lib_logger.info(
-                f"[Antigravity] Using max effort (thinkingBudget=62000) for Claude model {model}"
+                f"[Antigravity] Using max effort (thinkingBudget=31999) for Claude model {model}"
             )
-            return {"thinkingBudget": 62000, "include_thoughts": True}
+            return {"thinkingBudget": 31999, "include_thoughts": True}
 
         # Claude models: pass raw thinking_budget directly when available
         # This preserves the exact budget_tokens from the Anthropic request
@@ -5170,7 +5176,15 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         is_thinkinglevel_model = (
             internal_model.startswith("gemini-3-")
             or internal_model.startswith("gemini-3.1-")
-            or (self._is_claude(model) and ("4.6" in model or "4-6" in model or "4.6" in internal_model or "4-6" in internal_model))
+            or (
+                self._is_claude(model)
+                and (
+                    "4.6" in model
+                    or "4-6" in model
+                    or "4.6" in internal_model
+                    or "4-6" in internal_model
+                )
+            )
         )
         if not is_thinkinglevel_model:
             thinking_config = gen_config.get("thinkingConfig", {})
@@ -6708,6 +6722,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         Reports the actual number of API calls made, including internal retries
         for empty responses, bare 429s, and malformed function calls.
 
+        Also tracks Ultra tier Claude requests and triggers periodic quota
+        verification every 200 requests to prevent premature exhaustion.
+
         This uses the ContextVar pattern for thread-safe retry counting:
         - _internal_attempt_count is set to 1 at start of _streaming_with_retry
         - Incremented before each retry
@@ -6722,6 +6739,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             RequestCompleteResult with count_override set to actual attempt count
         """
         from ..core.types import RequestCompleteResult
+        from .utilities.antigravity_quota_tracker import ULTRA_CLAUDE_VERIFY_INTERVAL
 
         # Get the attempt count for this request
         attempt_count = _internal_attempt_count.get()
@@ -6736,4 +6754,35 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 f"(includes internal retries)"
             )
 
+        # Ultra tier Claude periodic quota verification
+        if success and self._is_claude_model(model):
+            tier = self.project_tier_cache.get(credential)
+            if tier == "ULTRA":
+                count = self._ultra_claude_counts.get(credential, 0) + attempt_count
+                self._ultra_claude_counts[credential] = count
+
+                if count >= ULTRA_CLAUDE_VERIFY_INTERVAL:
+                    self._ultra_claude_counts[credential] = 0
+                    # Schedule background verification (non-blocking)
+                    try:
+                        asyncio.create_task(
+                            self._run_ultra_quota_check(credential),
+                            name=f"ultra_verify_{credential[-20:]}",
+                        )
+                    except RuntimeError:
+                        # No event loop running (shouldn't happen in async context)
+                        pass
+
         return RequestCompleteResult(count_override=attempt_count)
+
+    async def _run_ultra_quota_check(self, credential: str) -> None:
+        """Background task to verify Ultra tier Claude quota from API."""
+        try:
+            result = await self.verify_ultra_claude_quota(credential)
+            if result:
+                lib_logger.info(
+                    f"[Ultra verify] Quota check passed for "
+                    f"{credential[-30:]}, baselines refreshed"
+                )
+        except Exception as e:
+            lib_logger.debug(f"[Ultra verify] Background check failed: {e}")

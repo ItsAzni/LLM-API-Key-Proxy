@@ -2,7 +2,7 @@
 Unified Search Service with fallback support.
 
 Provides a unified interface for web search that tries providers in order.
-Default priority: Exa → Tavily → Brave
+Default priority: SearXNG → Exa → Tavily → Brave
 Configurable via WEB_SEARCH_PRIORITY environment variable.
 """
 
@@ -13,15 +13,16 @@ from typing import Dict, Any, Optional, List
 from .exa_service import get_exa_service
 from .tavily_service import get_tavily_service
 from .brave_service import get_brave_service
+from .searxng_service import get_searxng_service
 
 logger = logging.getLogger("rotator_library.web_search")
 
 
 # Valid provider names
-VALID_PROVIDERS = {"exa", "tavily", "brave"}
+VALID_PROVIDERS = {"searxng", "exa", "tavily", "brave"}
 
 # Default priority order
-DEFAULT_PRIORITY = ["exa", "tavily", "brave"]
+DEFAULT_PRIORITY = ["searxng", "exa", "tavily", "brave"]
 
 
 def get_search_priority() -> List[str]:
@@ -80,20 +81,22 @@ class SearchService:
     Unified search service with automatic fallback.
 
     Priority order is configurable via WEB_SEARCH_PRIORITY environment variable.
-    Default: Exa → Tavily → Brave
+    Default: SearXNG → Exa → Tavily → Brave
 
-    Example: WEB_SEARCH_PRIORITY=tavily,brave,exa
+    Example: WEB_SEARCH_PRIORITY=tavily,searxng,brave,exa
     """
 
     _instance: Optional["SearchService"] = None
 
     def __init__(self):
+        self.searxng = get_searxng_service()
         self.exa = get_exa_service()
         self.tavily = get_tavily_service()
         self.brave = get_brave_service()
 
         # Map provider names to service instances
         self._providers = {
+            "searxng": self.searxng,
             "exa": self.exa,
             "tavily": self.tavily,
             "brave": self.brave,
@@ -114,7 +117,9 @@ class SearchService:
         """Get list of configured provider names in priority order."""
         providers = []
         for name in self._priority:
-            if name == "exa":
+            if name == "searxng" and self.searxng.is_configured:
+                providers.append("searxng")
+            elif name == "exa":
                 providers.append("exa")  # Exa is always available
             elif name == "tavily" and self.tavily.is_configured:
                 providers.append("tavily")
@@ -134,7 +139,24 @@ class SearchService:
 
         Returns result dict on success, None on failure.
         """
-        if provider_name == "exa":
+        if provider_name == "searxng":
+            if not self.searxng.is_configured:
+                return None
+
+            logger.debug(f"Attempting SearXNG search for: {query} (freshness={freshness})")
+            result = await self.searxng.search(
+                query,
+                max_results=max_results,
+                freshness=freshness,
+            )
+
+            if "error" not in result or result.get("results"):
+                result["provider"] = "searxng"
+                logger.info(f"SearXNG search successful for: {query}")
+                return result
+            return None
+
+        elif provider_name == "exa":
             logger.debug(f"Attempting Exa MCP search for: {query}")
             result = await self.exa.search(query, max_results=max_results)
 

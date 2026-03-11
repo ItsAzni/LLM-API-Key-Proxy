@@ -248,8 +248,10 @@ AVAILABLE_MODELS = [
     # Claude models
     "claude-sonnet-4",
     "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
     "claude-opus-4",
     "claude-opus-4.5",
+    "claude-opus-4.6",
     "claude-opus-41",
     "claude-haiku-4.5",
     "claude-3.5-sonnet",
@@ -263,6 +265,46 @@ AVAILABLE_MODELS = [
     # Other models
     "grok-code-fast-1",
 ]
+
+# =============================================================================
+# MODEL NAME ALIASES
+# =============================================================================
+# Maps alternative model names (e.g. Anthropic dash-style versioning) to the
+# canonical names accepted by GitHub Copilot.
+#
+# Claude Code and the Anthropic SDK use dashes for version separators
+# (e.g. claude-opus-4-6), whereas GitHub Copilot uses dots (claude-opus-4.6).
+# This mapping transparently rewrites the model name before the API call.
+MODEL_ALIASES: Dict[str, str] = {
+    # Claude 4.5 aliases (Anthropic dash-style → Copilot dot-style)
+    "claude-sonnet-4-5": "claude-sonnet-4.5",
+    "claude-opus-4-5": "claude-opus-4.5",
+    "claude-haiku-4-5": "claude-haiku-4.5",
+    # Claude 4.6 aliases
+    "claude-sonnet-4-6": "claude-sonnet-4.6",
+    "claude-opus-4-6": "claude-opus-4.6",
+    # Claude 3.x aliases
+    "claude-3-5-sonnet": "claude-3.5-sonnet",
+    "claude-3-7-sonnet": "claude-3.7-sonnet",
+    "claude-3-7-sonnet-thought": "claude-3.7-sonnet-thought",
+    # GPT version aliases
+    "gpt-4-1": "gpt-4.1",
+    "gpt-5-1": "gpt-5.1",
+    "gpt-5-2": "gpt-5.2",
+    "gpt-5-1-codex": "gpt-5.1-codex",
+    "gpt-5-1-codex-mini": "gpt-5.1-codex-mini",
+    "gpt-5-1-codex-max": "gpt-5.1-codex-max",
+}
+
+
+def _normalize_model_name(model: str) -> str:
+    """Normalize a model name using the alias table.
+
+    If the model (after stripping provider prefix) matches an alias key,
+    the canonical name is returned.  Otherwise the input is returned unchanged.
+    """
+    clean = model.split("/")[-1] if "/" in model else model
+    return MODEL_ALIASES.get(clean, clean)
 
 
 def _is_responses_api_model(model: str) -> bool:
@@ -302,6 +344,20 @@ def _is_claude_model(model: str) -> bool:
     """Check if model is a Claude model."""
     clean = model.split("/")[-1].lower() if "/" in model else model.lower()
     return clean.startswith("claude")
+
+
+def _claude_supports_thinking(model: str) -> bool:
+    """Check if a Claude model supports extended thinking.
+
+    Only Sonnet 3.7+, Sonnet 4+, and Opus models support thinking.
+    Haiku and older models do not.
+    """
+    clean = model.split("/")[-1].lower() if "/" in model else model.lower()
+    if "haiku" in clean:
+        return False
+    if "3.5" in clean:
+        return False
+    return True
 
 
 def _is_gemini_model(model: str) -> bool:
@@ -876,8 +932,8 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                                 "id": call_id,
                                 "type": "function",
                                 "function": {
-                                    "name": "AskUserQuestion",
-                                    "arguments": json.dumps({"question": "User input"}),
+                                    "name": "_relay_user_input",
+                                    "arguments": "{}",
                                 },
                             }
                         ],
@@ -902,6 +958,33 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                 user_msgs_kept,
                 ratio,
             )
+
+        # Ensure the first non-system message is role "user".
+        # The Copilot backend converts to Anthropic format for Claude,
+        # which requires conversations to start with a user message.
+        # When all user messages are transformed, the first non-system
+        # message becomes "assistant" (tool_use), causing the backend
+        # to reject the tool_result for lacking a prior tool_use.
+        if user_msgs_transformed > 0:
+            first_non_system = next(
+                (
+                    i
+                    for i, m in enumerate(transformed)
+                    if m.get("role") not in ("system", "developer")
+                ),
+                None,
+            )
+            if (
+                first_non_system is not None
+                and transformed[first_non_system].get("role") != "user"
+            ):
+                transformed.insert(
+                    first_non_system,
+                    {
+                        "role": "user",
+                        "content": "Respond to the user's message provided via the tool result below.",
+                    },
+                )
 
         return transformed
 
@@ -1044,9 +1127,10 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         # Never forward temperature for GitHub Copilot requests.
         kwargs.pop("temperature", None)
 
-        # Normalize model name (strip provider prefix)
+        # Normalize model name (strip provider prefix and apply aliases)
         if "/" in model:
             model = model.split("/", 1)[1]
+        model = _normalize_model_name(model)
 
         # =====================================================================
         # EARLY MESSAGE TRANSFORMATION
@@ -1209,7 +1293,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "reasoningSummary"
         )
 
-        if _is_claude_model(model):
+        if _is_claude_model(model) and _claude_supports_thinking(model):
             # Check if tool_choice forces use - if so, skip thinking
             # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
             tools = kwargs.get("tools") or payload.get("tools")
@@ -1240,14 +1324,25 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     # OpenCode parity: use flat thinking_budget at top level
                     # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
                     payload["thinking_budget"] = final_thinking_budget
+                    # Ensure max_tokens > thinking_budget (Anthropic requirement)
+                    current_max = payload.get("max_tokens") or 0
+                    if current_max <= final_thinking_budget:
+                        payload["max_tokens"] = final_thinking_budget + 4096
                     lib_logger.info(
-                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s, max_tokens: %s%s",
                         model,
                         final_thinking_budget,
+                        payload["max_tokens"],
                         f" (from reasoning_effort={reasoning_effort})"
                         if reasoning_effort and not thinking_budget
                         else "",
                     )
+        elif _is_claude_model(model):
+            # Claude models that don't support thinking (e.g. haiku, 3.5)
+            lib_logger.debug(
+                "[GitHubCopilot] Skipping thinking_budget for %s (model does not support extended thinking)",
+                model,
+            )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
@@ -1450,7 +1545,7 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             "reasoningSummary"
         )
 
-        if _is_claude_model(model):
+        if _is_claude_model(model) and _claude_supports_thinking(model):
             # Check if tool_choice forces use - if so, skip thinking
             # (Anthropic API: "Thinking may not be enabled when tool_choice forces tool use")
             tools = kwargs.get("tools") or payload.get("tools")
@@ -1481,14 +1576,25 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
                     # OpenCode parity: use flat thinking_budget at top level
                     # See: opencode/packages/opencode/src/provider/sdk/copilot/chat/openai-compatible-chat-language-model.ts
                     payload["thinking_budget"] = final_thinking_budget
+                    # Ensure max_tokens > thinking_budget (Anthropic requirement)
+                    current_max = payload.get("max_tokens") or 0
+                    if current_max <= final_thinking_budget:
+                        payload["max_tokens"] = final_thinking_budget + 4096
                     lib_logger.info(
-                        "[GitHubCopilot] Final request thinking_budget for %s: %s%s",
+                        "[GitHubCopilot] Final request thinking_budget for %s: %s, max_tokens: %s%s",
                         model,
                         final_thinking_budget,
+                        payload["max_tokens"],
                         f" (from reasoning_effort={reasoning_effort})"
                         if reasoning_effort and not thinking_budget
                         else "",
                     )
+        elif _is_claude_model(model):
+            # Claude models that don't support thinking (e.g. haiku, 3.5)
+            lib_logger.debug(
+                "[GitHubCopilot] Skipping thinking_budget for %s (model does not support extended thinking)",
+                model,
+            )
         elif _is_gpt5_or_o_series(model):
             # GPT-5/o-series: use reasoning.effort + reasoning.summary
             if reasoning_effort is not None:
@@ -1863,6 +1969,12 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
         }
 
         return response_obj
+
+    # NOTE: GitHub Copilot's API does NOT expose a /messages/count_tokens
+    # endpoint (returns 404).  We intentionally do NOT define a count_tokens()
+    # method here so that RotatingClient.token_count_async() skips the native
+    # call and falls back directly to the local LiteLLM tokenizer, which is
+    # fast and reliable.
 
     async def _stream_anthropic_messages(
         self,
@@ -2260,7 +2372,9 @@ class GitHubCopilotProvider(GitHubCopilotAuthBase, ProviderInterface):
             if "reasoning_text" in message:
                 choices[i]["message"]["reasoning_text"] = message["reasoning_text"]
                 if "reasoning_content" not in message:
-                    choices[i]["message"]["reasoning_content"] = message["reasoning_text"]
+                    choices[i]["message"]["reasoning_content"] = message[
+                        "reasoning_text"
+                    ]
             if "reasoning_opaque" in message:
                 choices[i]["message"]["reasoning_opaque"] = message["reasoning_opaque"]
 

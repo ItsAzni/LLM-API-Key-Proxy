@@ -141,17 +141,22 @@ class AnthropicHandler:
 
         model_lower = request.model.lower()
         is_46_model = "4.6" in model_lower or "4-6" in model_lower
+        is_opus_model = "opus" in model_lower
 
         # For Claude 4.6 models: default to "high" if no effort specified
         # (matches Anthropic's default for adaptive thinking)
-        if is_46_model and effort is None and request.thinking and request.thinking.type != "disabled":
+        if (
+            is_46_model
+            and effort is None
+            and request.thinking
+            and request.thinking.type != "disabled"
+        ):
             effort = "high"
 
         if effort:
-            # Shift effort levels up for Claude 4.6 models so Claude Code users
-            # get "max" by default: high→max, medium→high
+            # Keep the 4.6 high→max upgrade, but preserve medium as medium.
             if is_46_model:
-                effort_upgrade = {"high": "max", "medium": "high"}
+                effort_upgrade = {"high": "max"}
                 original = effort
                 effort = effort_upgrade.get(effort, effort)
                 if effort != original:
@@ -240,28 +245,16 @@ class AnthropicHandler:
             anthropic_request.get("messages", []), anthropic_request.get("system")
         )
 
-        # Count tokens for messages
-        message_tokens = self._client.token_count(
-            model=request.model,
-            messages=openai_messages,
-        )
-
-        # Count tokens for tools if present
-        tool_tokens = 0
+        openai_tools = None
         if request.tools:
-            # Tools add tokens based on their definitions
-            # Convert to JSON string and count tokens for tool definitions
             openai_tools = anthropic_to_openai_tools(
                 [tool.model_dump() for tool in request.tools]
             )
-            if openai_tools:
-                # Serialize tools to count their token contribution
-                tools_text = json.dumps(openai_tools)
-                tool_tokens = self._client.token_count(
-                    model=request.model,
-                    text=tools_text,
-                )
 
-        total_tokens = message_tokens + tool_tokens
+        total_tokens = await self._client.token_count_async(
+            model=request.model,
+            messages=openai_messages,
+            tools=openai_tools,
+        )
 
         return {"input_tokens": total_tokens}
