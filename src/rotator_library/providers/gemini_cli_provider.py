@@ -68,6 +68,7 @@ AVAILABLE_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
 ]
 
@@ -461,9 +462,9 @@ class GeminiCliProvider(
     # =========================================================================
 
     def _is_gemini_3(self, model: str) -> bool:
-        """Check if model is Gemini 3 (requires special handling)."""
+        """Check if model is Gemini 3 family (3.0/3.1+, requires special handling)."""
         model_name = model.split("/")[-1].replace(":thinking", "")
-        return model_name.startswith("gemini-3-")
+        return model_name.startswith("gemini-3-") or model_name.startswith("gemini-3.")
 
     def _generate_user_prompt_id(self) -> str:
         """
