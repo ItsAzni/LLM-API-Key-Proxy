@@ -130,18 +130,22 @@ DEFAULT_CUSTOM_CAP_COOLDOWN_VALUE: int = 0
 # Escalating backoff tiers for consecutive failures (seconds)
 # Key = failure count, Value = cooldown duration
 COOLDOWN_BACKOFF_TIERS: Dict[int, int] = {
-    1: 10,  # 1st failure: 10 seconds
-    2: 30,  # 2nd failure: 30 seconds
-    3: 60,  # 3rd failure: 1 minute
-    4: 120,  # 4th failure: 2 minutes
+    1: 60,  # 1st failure: 1 minute
+    2: 180,  # 2nd failure: 3 minutes
+    3: 600,  # 3rd failure: 10 minutes
+    4: 1800,  # 4th failure: 30 minutes
 }
 
 # Maximum backoff for 5+ consecutive failures (seconds)
-COOLDOWN_BACKOFF_MAX: int = 300  # 5 minutes
+COOLDOWN_BACKOFF_MAX: int = 1800  # 30 minutes
 
 # Authentication error lockout duration (seconds)
 # Applied when 401/403 received - credential assumed revoked
-COOLDOWN_AUTH_ERROR: int = 300  # 5 minutes
+COOLDOWN_AUTH_ERROR: int = 600  # 10 minutes
+
+# How long consecutive failure history is kept after the last cooldown-triggering error.
+# Set to 0 to disable expiry and preserve backoff counters indefinitely.
+FAILURE_COUNTER_EXPIRY = int(os.getenv("FAILURE_COUNTER_EXPIRY", "3600"))
 
 # Transient/provider-level error cooldown (seconds)
 # Applied for errors that don't count against credential health

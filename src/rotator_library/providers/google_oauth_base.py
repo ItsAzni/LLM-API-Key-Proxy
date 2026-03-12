@@ -95,6 +95,7 @@ class GoogleOAuthBase:
     CALLBACK_PORT: int = DEFAULT_OAUTH_CALLBACK_PORT
     CALLBACK_PATH: str = DEFAULT_OAUTH_CALLBACK_PATH
     REFRESH_EXPIRY_BUFFER_SECONDS: int = DEFAULT_REFRESH_EXPIRY_BUFFER
+    PROACTIVE_REFRESH_ENABLED = True
 
     # =========================================================================
     # PKCE (Proof Key for Code Exchange) SUPPORT
@@ -616,6 +617,8 @@ class GoogleOAuthBase:
 
     async def proactively_refresh(self, credential_path: str):
         """Proactively refresh a credential by queueing it for refresh."""
+        if not self.PROACTIVE_REFRESH_ENABLED:
+            return
         creds = await self._load_credentials(credential_path)
         if self._is_token_expired(creds):
             # lib_logger.info(f"Proactive refresh triggered for '{Path(credential_path).name}'")

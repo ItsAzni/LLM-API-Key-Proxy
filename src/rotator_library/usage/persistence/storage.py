@@ -26,6 +26,7 @@ from ..types import (
     GlobalFairCycleState,
     StorageSchema,
 )
+from ...config import FAILURE_COUNTER_EXPIRY
 from ...utils.resilient_io import ResilientStateWriter, safe_read_json
 from ...error_handler import mask_credential
 
@@ -398,7 +399,7 @@ class UsageStorage:
             # Parse cooldowns
             cooldowns = {}
             for key, cdata in data.get("cooldowns", {}).items():
-                cooldowns[key] = CooldownInfo(
+                cooldown = CooldownInfo(
                     reason=cdata.get("reason", "unknown"),
                     until=cdata.get("until", 0),
                     started_at=cdata.get("started_at", 0),
@@ -406,6 +407,8 @@ class UsageStorage:
                     model_or_group=cdata.get("model_or_group"),
                     backoff_count=cdata.get("backoff_count", 0),
                 )
+                cooldown.last_failure_at = cdata.get("last_failure_at")
+                cooldowns[key] = cooldown
 
             # Parse fair cycle
             fair_cycle = {}
@@ -448,7 +451,19 @@ class UsageStorage:
         now = time.time()
         cooldowns = {}
         for key, cd in state.cooldowns.items():
-            if cd.until > now:  # Only save active cooldowns
+            last_failure_at = getattr(cd, "last_failure_at", cd.started_at)
+            should_persist = cd.until > now
+            if (
+                not should_persist
+                and last_failure_at is not None
+                and (
+                    FAILURE_COUNTER_EXPIRY <= 0
+                    or (now - last_failure_at) <= FAILURE_COUNTER_EXPIRY
+                )
+            ):
+                should_persist = True
+
+            if should_persist:
                 cooldowns[key] = {
                     "reason": cd.reason,
                     "until": cd.until,
@@ -458,6 +473,8 @@ class UsageStorage:
                     "source": cd.source,
                     "model_or_group": cd.model_or_group,
                     "backoff_count": cd.backoff_count,
+                    "last_failure_at": last_failure_at,
+                    "last_failure_at_human": _format_timestamp(last_failure_at),
                 }
 
         # Serialize fair cycle

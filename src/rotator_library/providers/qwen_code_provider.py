@@ -24,7 +24,11 @@ from datetime import datetime
 lib_logger = logging.getLogger("rotator_library")
 
 
-HARDCODED_MODELS = ["qwen3-coder-plus", "qwen3-coder-flash"]
+# Hardcoded model IDs for Qwen Code provider
+# - qwen3-coder-plus: Qwen3 Coder Plus
+# - qwen3-coder-flash: Qwen3 Coder Flash
+# - coder-model: Qwen 3.5 Plus (efficient hybrid model with leading coding performance)
+HARDCODED_MODELS = ["qwen3-coder-plus", "qwen3-coder-flash", "coder-model"]
 
 # OpenAI-compatible parameters supported by Qwen Code API
 SUPPORTED_PARAMS = {
