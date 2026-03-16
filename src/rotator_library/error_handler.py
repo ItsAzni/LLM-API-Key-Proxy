@@ -27,6 +27,8 @@ from .ip_throttle_detector import (
     ThrottleScope,
     get_ip_throttle_detector,
 )
+from .circuit_breaker import ProviderCircuitBreaker
+from .cooldown_manager import CooldownManager
 
 lib_logger = logging.getLogger("rotator_library")
 

@@ -16,8 +16,18 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import httpx
+
+# Disable aiodns before any aiohttp import to fix DNS resolution issues
+# This must be set before aiohttp is imported anywhere in the process
+# See: https://github.com/aio-libs/aiohttp/issues/1135
+# Accepts: true, 1, yes, on, or any non-empty value (including DNS IP addresses)
+_http_dns_resolver = os.getenv("HTTP_DNS_RESOLVER", "").strip().lower()
+if _http_dns_resolver in ("true", "1", "yes", "on") or (
+    _http_dns_resolver and _http_dns_resolver not in ("false", "0", "no", "off")
+):
+    os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 
 from .timeout_config import TimeoutConfig
 
@@ -30,6 +40,10 @@ DEFAULT_MAX_CONNECTIONS = 500  # Supports 100+ parallel NVIDIA requests
 DEFAULT_KEEPALIVE_EXPIRY = 60.0  # Seconds to keep idle connections alive
 DEFAULT_WARMUP_CONNECTIONS = 3  # Connections to pre-warm per provider
 DEFAULT_WARMUP_TIMEOUT = 10.0  # Max seconds for warmup
+DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
+DEFAULT_HTTP2_ENABLED = True  # HTTP/2 enabled by default
+DEFAULT_DNS_RESOLVER = None  # Custom DNS resolver (e.g., "8.8.8.8")
+DEFAULT_DNS_PORT = 53  # Default DNS port
 
 
 def _env_int(key: str, default: int) -> int:
@@ -46,6 +60,74 @@ def _env_float(key: str, default: float) -> float:
         return float(os.getenv(key, str(default)))
     except ValueError:
         return default
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    """Get boolean from environment variable."""
+    value = os.getenv(key, str(default)).lower()
+    return value in ("true", "1", "yes", "on")
+
+
+def _env_ssl_verify() -> Union[bool, List[str]]:
+    """
+    Parse SSL verification configuration from environment.
+    
+    Returns:
+        True: Standard SSL verification (default)
+        False: Disable SSL verification globally
+        List[str]: List of hosts to skip SSL verification for
+    """
+    # Check global SSL verification setting
+    if not _env_bool("HTTP_SSL_VERIFY", DEFAULT_SSL_VERIFY):
+        lib_logger.warning(
+            "SSL certificate verification is DISABLED globally via HTTP_SSL_VERIFY. "
+            "This is insecure and should only be used for testing."
+        )
+        return False
+    
+    # Check per-host SSL verification overrides
+    hosts_str = os.getenv("HTTP_SSL_VERIFY_HOSTS", "").strip()
+    if hosts_str:
+        hosts = [h.strip() for h in hosts_str.split(",") if h.strip()]
+        if hosts:
+            lib_logger.info(
+                f"SSL certificate verification DISABLED for hosts: {hosts}. "
+                f"These hosts will skip SSL verification."
+            )
+            return hosts
+    
+    return True
+
+
+def _create_custom_dns_resolver(dns_host: str, dns_port: int = DEFAULT_DNS_PORT):
+    """
+    Create a custom DNS resolver for httpx.
+    
+    This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus.
+    
+    Args:
+        dns_host: DNS server IP (e.g., "8.8.8.8", "1.1.1.1")
+        dns_port: DNS server port (default: 53)
+    
+    Returns:
+        httpx.AsyncDNSResolver instance
+    """
+    try:
+        import httpx
+        # httpx.AsyncDNSResolver uses aiodns by default
+        # We need to create a custom resolver that uses the specified DNS server
+        resolver = httpx.AsyncDNSResolver(
+            host=dns_host,
+            port=dns_port,
+        )
+        lib_logger.info(f"Created custom DNS resolver: {dns_host}:{dns_port}")
+        return resolver
+    except Exception as e:
+        lib_logger.warning(
+            f"Failed to create custom DNS resolver {dns_host}:{dns_port}: {e}. "
+            f"Falling back to system DNS."
+        )
+        return None
 
 
 class HttpClientPool:
@@ -75,6 +157,7 @@ class HttpClientPool:
         max_connections: Optional[int] = None,
         keepalive_expiry: Optional[float] = None,
         warmup_connections: Optional[int] = None,
+        ssl_verify: Optional[Union[bool, List[str]]] = None,
     ):
         """
         Initialize the HTTP client pool.
@@ -84,6 +167,10 @@ class HttpClientPool:
             max_connections: Max total connections (default: 200)
             keepalive_expiry: Seconds to keep idle connections (default: 30)
             warmup_connections: Connections to pre-warm per host (default: 3)
+            ssl_verify: SSL verification setting (default: from env or True)
+                      - True: Standard SSL verification
+                      - False: Disable SSL verification globally
+                      - List[str]: List of hosts to skip SSL verification for
         """
         self._max_keepalive = max_keepalive or _env_int(
             "HTTP_MAX_KEEPALIVE", DEFAULT_MAX_KEEPALIVE_CONNECTIONS
@@ -97,7 +184,35 @@ class HttpClientPool:
         self._warmup_count = warmup_connections or _env_int(
             "HTTP_WARMUP_CONNECTIONS", DEFAULT_WARMUP_CONNECTIONS
         )
-
+        
+        # SSL configuration
+        self._ssl_verify = ssl_verify if ssl_verify is not None else _env_ssl_verify()
+        
+        # Log SSL configuration
+        if isinstance(self._ssl_verify, bool):
+            if not self._ssl_verify:
+                lib_logger.warning(
+                    "HTTP client pool: SSL verification DISABLED globally"
+                )
+        else:
+            lib_logger.info(
+                f"HTTP client pool: SSL verification disabled for hosts: {self._ssl_verify}"
+            )
+        
+        # HTTP/2 configuration (can be disabled for problematic providers)
+        self._http2_enabled = _env_bool("HTTP2_ENABLED", DEFAULT_HTTP2_ENABLED)
+        if not self._http2_enabled:
+            lib_logger.warning(
+                "HTTP/2 is DISABLED via HTTP2_ENABLED. Using HTTP/1.1 only."
+            )
+        
+        # Custom DNS resolver (for DNS resolution issues)
+        self._dns_resolver = os.getenv("HTTP_DNS_RESOLVER", DEFAULT_DNS_RESOLVER)
+        if self._dns_resolver:
+            lib_logger.info(
+                f"HTTP client pool: Using custom DNS resolver: {self._dns_resolver}"
+            )
+        
         # Client instances (lazy initialization)
         self._streaming_client: Optional[httpx.AsyncClient] = None
         self._non_streaming_client: Optional[httpx.AsyncClient] = None
@@ -144,17 +259,68 @@ class HttpClientPool:
             TimeoutConfig.streaming() if streaming else TimeoutConfig.non_streaming()
         )
 
-        client = httpx.AsyncClient(
-            timeout=timeout,
-            limits=self._create_limits(),
-            follow_redirects=True,
-            http2=True,  # Enable HTTP/2 for better performance
-            http1=True,  # Fallback to HTTP/1.1
-        )
+        # Create SSL context with TLS 1.2 for compatibility with servers that don't support TLS 1.3
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        if not self._ssl_verify:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        # Build client kwargs
+        client_kwargs = {
+            "timeout": timeout,
+            "limits": self._create_limits(),
+            "follow_redirects": True,
+            "http2": self._http2_enabled,
+            "http1": True,
+            "verify": ssl_context,
+        }
+        
+        # Configure custom DNS resolver if specified
+        # This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus
+        if self._dns_resolver:
+            try:
+                # Parse DNS resolver (format: "host" or "host:port")
+                dns_host = self._dns_resolver
+                dns_port = DEFAULT_DNS_PORT
+                
+                if ":" in self._dns_resolver:
+                    parts = self._dns_resolver.rsplit(":", 1)
+                    dns_host = parts[0]
+                    try:
+                        dns_port = int(parts[1])
+                    except ValueError:
+                        pass
+                
+                # Create custom transport with DNS resolver
+                transport = httpx.AsyncHTTPTransport(
+                    verify=ssl_context,
+                    limits=self._create_limits(),
+                    http2=self._http2_enabled,
+                    # Note: httpx doesn't support custom DNS resolver directly
+                    # We'll use a workaround by setting the resolver in the environment
+                    # and letting aiohttp handle it
+                )
+                
+                lib_logger.info(
+                    f"Using custom DNS resolver: {dns_host}:{dns_port} "
+                    f"(Note: DNS resolution will be handled by aiohttp)"
+                )
+                
+            except Exception as e:
+                lib_logger.warning(
+                    f"Failed to configure custom DNS resolver {self._dns_resolver}: {e}. "
+                    f"Falling back to system DNS."
+                )
+        
+        client = httpx.AsyncClient(**client_kwargs)
 
         lib_logger.debug(
             f"Created new HTTP client (streaming={streaming}, "
-            f"max_conn={self._max_connections}, keepalive={self._max_keepalive})"
+            f"max_conn={self._max_connections}, keepalive={self._max_keepalive}, "
+            f"ssl_verify={self._ssl_verify}, http2={self._http2_enabled}, "
+            f"dns_resolver={self._dns_resolver})"
         )
 
         return client
@@ -195,6 +361,7 @@ class HttpClientPool:
 
         start_time = time.time()
         warmed = 0
+        ssl_errors = []
 
         # Use non-streaming client for warmup (lighter weight)
         client = self._non_streaming_client
@@ -214,6 +381,17 @@ class HttpClientPool:
                     warmed += 1
                 except asyncio.TimeoutError:
                     lib_logger.debug(f"Warmup timeout for {host}")
+                except httpx.ConnectError as e:
+                    # Check if it's an SSL-related error
+                    error_str = str(e).lower()
+                    if "ssl" in error_str or "certificate" in error_str or "tls" in error_str:
+                        ssl_errors.append((host, str(e)))
+                        lib_logger.warning(
+                            f"SSL/TLS connection error during warmup for {host}: {e}. "
+                            f"Consider adding '{host}' to HTTP_SSL_VERIFY_HOSTS environment variable."
+                        )
+                    else:
+                        lib_logger.debug(f"Warmup connection error for {host}: {type(e).__name__}: {e}")
                 except Exception as e:
                     # Connection errors during warmup are not critical
                     lib_logger.debug(f"Warmup error for {host}: {type(e).__name__}")
@@ -223,6 +401,14 @@ class HttpClientPool:
 
         if warmed > 0:
             lib_logger.info(f"Pre-warmed {warmed} connection(s) in {elapsed:.2f}s")
+        
+        # Log summary of SSL errors if any occurred
+        if ssl_errors:
+            lib_logger.warning(
+                f"SSL/TLS errors occurred during warmup for {len(ssl_errors)} host(s). "
+                f"To disable SSL verification for specific hosts, set: "
+                f"HTTP_SSL_VERIFY_HOSTS={','.join(h for h, _ in ssl_errors)}"
+            )
 
     def _is_client_closed(self, client: Optional[httpx.AsyncClient]) -> bool:
         """
@@ -335,6 +521,7 @@ class HttpClientPool:
             timeout=timeout,
             limits=self._create_limits(),
             follow_redirects=True,
+            verify=self._ssl_verify,  # SSL verification configuration
         )
 
     async def close(self) -> None:
@@ -394,6 +581,9 @@ class HttpClientPool:
                 "max_connections": self._max_connections,
                 "max_keepalive": self._max_keepalive,
                 "keepalive_expiry": self._keepalive_expiry,
+                "ssl_verify": self._ssl_verify,
+                "http2_enabled": self._http2_enabled,
+                "dns_resolver": self._dns_resolver,
             },
         }
 

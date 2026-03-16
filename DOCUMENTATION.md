@@ -1654,6 +1654,117 @@ QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
 *   **Thinking Parameter**: Automatically handles the `thinking` parameter transformation required for Gemini 2.5 models (`thinking` -> `gemini-2.5-pro` reasoning parameter).
 *   **Safety Settings**: Ensures default safety settings (blocking nothing) are applied if not provided, preventing over-sensitive refusals.
 
+### 3.5. NVIDIA NIM (`nvidia_provider.py`)
+
+The NVIDIA NIM provider implements OpenAI-compatible API access to NVIDIA's inference microservices with enhanced quota tracking and thinking support.
+
+#### Architecture
+
+```
+NVIDIA NIM Provider
+├── Quota Tracking (NvidiaQuotaTracker)
+│   ├── Sliding window counters
+│   ├── Model quota groups
+│   └── Background synchronization
+├── Thinking Support
+│   ├── DeepSeek models (thinking parameter)
+│   └── Qwen models (enable_thinking parameter)
+└── Error Handling
+    ├── Rate limit detection (429)
+    ├── Quota exhaustion (402)
+    └── IP-level throttling
+```
+
+#### Quota Tracking Implementation
+
+Since NVIDIA NIM doesn't provide public quota monitoring APIs, the provider uses request counting with sliding windows:
+
+```python
+class NvidiaQuotaTracker:
+    """Track NVIDIA NIM rate limits via request counting."""
+    
+    RATE_LIMITS = {
+        "free": {"rpm": 40, "tpm": 200000},
+        "paid": {"rpm": 500, "tpm": 2000000},
+    }
+    
+    def __init__(self):
+        self._windows: Dict[str, Dict[str, RateLimitWindow]] = {}
+        self._credential_tiers: Dict[str, str] = {}
+        self._model_quota_groups: Dict[str, List[str]] = {
+            "deepseek": ["deepseek-ai/deepseek-v3.1", ...],
+            "qwen": ["qwen/qwen3.5-397b-a17b", ...],
+        }
+```
+
+**Key Features:**
+- **Sliding Window**: 60-second window for accurate rate limit tracking
+- **Model Groups**: Models that share quota are grouped together
+- **Tier Detection**: Supports free and paid tiers with different limits
+- **Automatic Cleanup**: Old windows are cleaned up every 10 minutes
+- **Background Sync**: Periodic synchronization job maintains accuracy
+
+#### Thinking Support
+
+The provider handles thinking/reasoning parameters differently for DeepSeek and Qwen models:
+
+**DeepSeek Models:**
+```python
+if model_name in _NVIDIA_DEEPSEEK_THINKING_MODELS:
+    if reasoning_effort in ("low", "medium", "high"):
+        payload["extra_body"]["chat_template_kwargs"]["thinking"] = True
+```
+
+**Qwen Models:**
+```python
+elif model_name in _QWEN_THINKING_MODELS:
+    if reasoning_effort:
+        payload["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+```
+
+#### Error Handling
+
+The provider integrates with the error handler to classify NVIDIA-specific errors:
+
+```python
+NVIDIA_ERROR_PATTERNS = {
+    "rate_limit": ["429", "too many requests", "rate limit exceeded"],
+    "quota_exhausted": ["402", "payment required", "cloud credits expired"],
+    "auth_error": ["401", "unauthorized", "invalid api key"],
+}
+```
+
+#### Configuration
+
+```env
+# Required
+NVIDIA_API_KEY_1="your-api-key"
+
+# Optional: Credential tier
+NVIDIA_CREDENTIAL_TIER_1="free"  # or "paid"
+
+# Optional: Rate limits
+NVIDIA_RATE_LIMIT_FREE_RPM=40
+NVIDIA_RATE_LIMIT_PAID_RPM=500
+
+# Optional: Quota refresh interval (seconds)
+NVIDIA_QUOTA_REFRESH_INTERVAL=600
+```
+
+#### Performance Characteristics
+
+Based on benchmarks:
+- `track_request()`: ~0.87ms per call
+- `can_make_request()`: ~0.01ms per call
+- Memory usage: ~1.39 MB for 10,000 tracked requests
+- Concurrent tracking: ~0.02ms per request
+
+#### Limitations
+
+1. **No Public Quota API**: NVIDIA doesn't provide API endpoints for quota monitoring, so tracking is based on request counting
+2. **IP-level Throttling**: Rate limits may apply at IP level, not just API key level
+3. **Estimation Only**: Quota tracking is an estimation, not authoritative
+
 ---
 
 ## 4. Logging & Debugging

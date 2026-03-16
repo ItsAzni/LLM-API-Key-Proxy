@@ -9,6 +9,9 @@ echo.
 
 cd /d "%~dp0"
 
+REM Disable aiodns to fix "Domain name not found" errors when ping works
+REM This must be set BEFORE Python imports aiohttp
+set AIOHTTP_NO_EXTENSIONS=1
 
 echo.
 echo Запуск прокси-сервера на http://127.0.0.1:8000

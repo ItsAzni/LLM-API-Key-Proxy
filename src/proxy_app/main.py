@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Mirrowel
 
+# Disable aiodns BEFORE any aiohttp/litellm imports to fix DNS resolution issues
+# This must be set before aiohttp is imported anywhere in the process
+# See: https://github.com/aio-libs/aiohttp/issues/1135
+# When aiodns is installed, aiohttp uses it by default but it may fail to resolve
+# domains that work fine with system DNS (ping works but aiohttp fails)
+import os
+
+# Always disable aiodns to use system DNS resolver
+os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
+
 import time
 import uuid
 
 # Phase 1: Minimal imports for arg parsing and TUI
 import asyncio
-import os
 from pathlib import Path
 import sys
 import argparse
@@ -694,6 +703,7 @@ app.add_middleware(
 # NOTE: GZip middleware is streaming-safe — FastAPI/Starlette skips compression
 # for StreamingResponse, so SSE endpoints are unaffected.
 from fastapi.middleware.gzip import GZipMiddleware
+
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 

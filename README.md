@@ -437,6 +437,8 @@ The proxy includes a powerful text-based UI for configuration and management.
 
 - Dynamic model discovery
 - DeepSeek thinking support
+- Quota tracking (sliding window)
+- Qwen thinking support
 
 </details>
 
@@ -784,6 +786,82 @@ Customize OAuth callback ports if defaults conflict:
 | iFlow       | 11451        | `IFLOW_OAUTH_PORT`       |
 
 </details>
+
+---
+
+## NVIDIA NIM Provider Enhancements
+
+The NVIDIA NIM provider has been enhanced with comprehensive quota tracking and expanded thinking support.
+
+### Quota Tracking
+
+NVIDIA NIM doesn't provide a public API for quota monitoring, so the provider now includes a `NvidiaQuotaTracker` that uses request counting to estimate rate limit usage.
+
+**Features:**
+- Sliding window tracking (60-second window)
+- Rate limits: 40 RPM (free tier), 500 RPM (paid tier)
+- Model quota groups: DeepSeek models share quota, Qwen models share quota
+- Automatic cleanup of old windows (every 10 minutes)
+- Background synchronization job
+
+**Usage:**
+```python
+from rotator_library.providers.nvidia_provider import NvidiaProvider
+
+provider = NvidiaProvider()
+
+# Track a request
+await provider.track_request("credential_id", "nvidia_nim/deepseek-ai/deepseek-v3.1")
+
+# Check if can make request
+can_make = provider.can_make_request("credential_id", "nvidia_nim/deepseek-ai/deepseek-v3.1")
+
+# Get wait time if at limit
+wait_time = provider.get_wait_time("credential_id", "nvidia_nim/deepseek-ai/deepseek-v3.1")
+
+# Get quota info
+quota_info = provider.get_quota_info("credential_id", "nvidia_nim/deepseek-ai/deepseek-v3.1")
+```
+
+### Thinking/Reasoning Support
+
+The provider now supports native thinking for both DeepSeek and Qwen models.
+
+**DeepSeek Models:**
+- Models: `deepseek-ai/deepseek-v3.1`, `deepseek-ai/deepseek-v3.1-terminus`, `deepseek-ai/deepseek-v3.2`
+- Parameter: `extra_body.chat_template_kwargs.thinking = True`
+- Trigger: When `reasoning_effort` is set to "low", "medium", or "high"
+
+**Qwen Models:**
+- Models: `qwen/qwen3.5-397b-a17b`, `qwen/qwen3-coder-480b-a35b-instruct`
+- Parameter: `extra_body.chat_template_kwargs.enable_thinking = True`
+- Trigger: When `reasoning_effort` is set (any value)
+
+**Example:**
+```python
+payload = {
+    "model": "nvidia_nim/deepseek-ai/deepseek-v3.1",
+    "messages": [{"role": "user", "content": "Solve this math problem"}],
+    "reasoning_effort": "high",  # Enables thinking
+}
+
+provider.handle_thinking_parameter(payload, "nvidia_nim/deepseek-ai/deepseek-v3.1")
+# payload now contains extra_body.chat_template_kwargs.thinking = True
+```
+
+### Configuration
+
+```env
+# NVIDIA NIM provider configuration
+NVIDIA_API_KEY_1="your-nvidia-api-key"
+
+# Optional: Set credential tier (free or paid)
+NVIDIA_CREDENTIAL_TIER_1="free"  # or "paid"
+
+# Optional: Override default rate limits
+NVIDIA_RATE_LIMIT_FREE_RPM=40
+NVIDIA_RATE_LIMIT_PAID_RPM=500
+```
 
 ---
 

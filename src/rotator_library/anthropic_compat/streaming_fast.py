@@ -15,6 +15,7 @@ Performance optimizations:
 """
 
 import logging
+import time
 import uuid
 from typing import AsyncGenerator, Callable, Optional, Awaitable, Any, TYPE_CHECKING
 
@@ -48,6 +49,54 @@ except ImportError:
     HAS_ORJSON = False
 
 logger = logging.getLogger("rotator_library.anthropic_compat")
+
+
+class ChunkBatcher:
+    """
+    Batch SSE events for improved throughput.
+    
+    Buffers small events and flushes when:
+    - Buffer size exceeds max_size
+    - Time since last flush exceeds max_delay_ms
+    """
+    
+    def __init__(self, max_size: int = 4096, max_delay_ms: int = 10):
+        self.buffer = []
+        self.current_size = 0
+        self.max_size = max_size
+        self.max_delay_ms = max_delay_ms
+        self.last_flush = time.time()
+    
+    def add(self, event: str) -> Optional[str]:
+        """
+        Add event to buffer.
+        
+        Returns:
+            Flushed buffer if threshold reached, None otherwise
+        """
+        self.buffer.append(event)
+        self.current_size += len(event)
+        
+        if self.current_size >= self.max_size:
+            return self.flush()
+        
+        # Check time-based flush
+        elapsed_ms = (time.time() - self.last_flush) * 1000
+        if elapsed_ms >= self.max_delay_ms:
+            return self.flush()
+        
+        return None
+    
+    def flush(self) -> str:
+        """Flush buffer and return concatenated events."""
+        if not self.buffer:
+            return ""
+        
+        result = "".join(self.buffer)
+        self.buffer.clear()
+        self.current_size = 0
+        self.last_flush = time.time()
+        return result
 
 
 # Pre-built event templates for common operations (reduces allocations)
@@ -210,6 +259,13 @@ async def anthropic_streaming_wrapper_fast(
     accumulated_text = ""
     accumulated_thinking = ""
     stop_reason_final = "end_turn"
+    
+    # Initialize chunk batcher for improved throughput
+    batcher = ChunkBatcher(max_size=4096, max_delay_ms=10)
+    
+    # Heartbeat tracking to prevent connection timeouts
+    last_event_time = time.time()
+    HEARTBEAT_INTERVAL = 30  # seconds
 
     try:
         async for chunk_str in openai_stream:
@@ -223,37 +279,59 @@ async def anthropic_streaming_wrapper_fast(
 
             data_content = chunk_str[5:].strip()  # Skip "data:" prefix
 
+            # Send heartbeat if no events for a while
+            current_time = time.time()
+            if current_time - last_event_time > HEARTBEAT_INTERVAL:
+                yield ": heartbeat\n\n"
+                last_event_time = current_time
+            
             # Handle stream end
             if data_content == "[DONE]":
                 # CRITICAL: Send message_start if we haven't yet
                 if not message_started:
-                    yield _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                    event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                    if event := batcher.add(event_str):
+                        yield event
                     message_started = True
 
                 # Close any open thinking block
                 if thinking_block_started:
-                    yield _make_content_block_stop_event(current_block_index)
+                    event_str = _make_content_block_stop_event(current_block_index)
+                    if event := batcher.add(event_str):
+                        yield event
                     current_block_index += 1
                     thinking_block_started = False
 
                 # Close any open text block
                 if content_block_started:
-                    yield _make_content_block_stop_event(current_block_index)
+                    event_str = _make_content_block_stop_event(current_block_index)
+                    if event := batcher.add(event_str):
+                        yield event
                     current_block_index += 1
                     content_block_started = False
 
                 # Close all open tool_use blocks
                 for tc_index in sorted(tool_block_indices.keys()):
                     block_idx = tool_block_indices[tc_index]
-                    yield _make_content_block_stop_event(block_idx)
+                    event_str = _make_content_block_stop_event(block_idx)
+                    if event := batcher.add(event_str):
+                        yield event
 
                 # Determine stop_reason
                 stop_reason = "tool_use" if tool_calls_by_index else "end_turn"
                 stop_reason_final = stop_reason
 
                 # Send final events
-                yield _make_message_delta_event(stop_reason, output_tokens, cached_tokens)
-                yield _make_message_stop_event()
+                event_str = _make_message_delta_event(stop_reason, output_tokens, cached_tokens)
+                if event := batcher.add(event_str):
+                    yield event
+                event_str = _make_message_stop_event()
+                if event := batcher.add(event_str):
+                    yield event
+                
+                # Flush any remaining events
+                if remaining := batcher.flush():
+                    yield remaining
 
                 # Log if needed
                 if transaction_logger:
@@ -287,8 +365,11 @@ async def anthropic_streaming_wrapper_fast(
 
             # Send message_start on first chunk
             if not message_started:
-                yield _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                if event := batcher.add(event_str):
+                    yield event
                 message_started = True
+                last_event_time = current_time
 
             choices = chunk.get("choices") or []
             if not choices:
@@ -300,27 +381,39 @@ async def anthropic_streaming_wrapper_fast(
             reasoning_content = delta.get("reasoning_content")
             if reasoning_content:
                 if not thinking_block_started:
-                    yield _make_content_block_start_event(current_block_index, "thinking")
+                    event_str = _make_content_block_start_event(current_block_index, "thinking")
+                    if event := batcher.add(event_str):
+                        yield event
                     thinking_block_started = True
 
-                yield _make_thinking_delta_event(current_block_index, reasoning_content)
+                event_str = _make_thinking_delta_event(current_block_index, reasoning_content)
+                if event := batcher.add(event_str):
+                    yield event
                 accumulated_thinking += reasoning_content
+                last_event_time = current_time
 
             # Handle text content
             content = delta.get("content")
             if content:
                 # Close thinking block if we were in one
                 if thinking_block_started and not content_block_started:
-                    yield _make_content_block_stop_event(current_block_index)
+                    event_str = _make_content_block_stop_event(current_block_index)
+                    if event := batcher.add(event_str):
+                        yield event
                     current_block_index += 1
                     thinking_block_started = False
 
                 if not content_block_started:
-                    yield _make_content_block_start_event(current_block_index, "text")
+                    event_str = _make_content_block_start_event(current_block_index, "text")
+                    if event := batcher.add(event_str):
+                        yield event
                     content_block_started = True
 
-                yield _make_text_delta_event(current_block_index, content)
+                event_str = _make_text_delta_event(current_block_index, content)
+                if event := batcher.add(event_str):
+                    yield event
                 accumulated_text += content
+                last_event_time = current_time
 
             # Handle tool calls
             tool_calls = delta.get("tool_calls") or []
@@ -330,12 +423,16 @@ async def anthropic_streaming_wrapper_fast(
                 if tc_index not in tool_calls_by_index:
                     # Close previous blocks
                     if thinking_block_started:
-                        yield _make_content_block_stop_event(current_block_index)
+                        event_str = _make_content_block_stop_event(current_block_index)
+                        if event := batcher.add(event_str):
+                            yield event
                         current_block_index += 1
                         thinking_block_started = False
 
                     if content_block_started:
-                        yield _make_content_block_stop_event(current_block_index)
+                        event_str = _make_content_block_stop_event(current_block_index)
+                        if event := batcher.add(event_str):
+                            yield event
                         current_block_index += 1
                         content_block_started = False
 
@@ -347,13 +444,15 @@ async def anthropic_streaming_wrapper_fast(
                     }
                     tool_block_indices[tc_index] = current_block_index
 
-                    yield _make_content_block_start_event(
+                    event_str = _make_content_block_start_event(
                         current_block_index,
                         "tool_use",
                         id=tool_calls_by_index[tc_index]["id"],
                         name=tool_calls_by_index[tc_index]["name"],
                         input={},
                     )
+                    if event := batcher.add(event_str):
+                        yield event
                     current_block_index += 1
 
                 # Accumulate arguments
@@ -362,23 +461,42 @@ async def anthropic_streaming_wrapper_fast(
                     tool_calls_by_index[tc_index]["name"] = func["name"]
                 if func.get("arguments"):
                     tool_calls_by_index[tc_index]["arguments"] += func["arguments"]
-                    yield _make_input_json_delta_event(
+                    event_str = _make_input_json_delta_event(
                         tool_block_indices[tc_index], func["arguments"]
                     )
+                    if event := batcher.add(event_str):
+                        yield event
+                    last_event_time = current_time
 
     except Exception as e:
         logger.error(f"Error in Anthropic streaming wrapper: {e}")
 
         # Send error as visible text
         if not message_started:
-            yield _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+            event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+            if event := batcher.add(event_str):
+                yield event
 
         error_message = f"Error: {str(e)}"
-        yield _make_content_block_start_event(current_block_index, "text")
-        yield _make_text_delta_event(current_block_index, error_message)
-        yield _make_content_block_stop_event(current_block_index)
-        yield _make_message_delta_event("end_turn", 0, cached_tokens)
-        yield _make_message_stop_event()
+        event_str = _make_content_block_start_event(current_block_index, "text")
+        if event := batcher.add(event_str):
+            yield event
+        event_str = _make_text_delta_event(current_block_index, error_message)
+        if event := batcher.add(event_str):
+            yield event
+        event_str = _make_content_block_stop_event(current_block_index)
+        if event := batcher.add(event_str):
+            yield event
+        event_str = _make_message_delta_event("end_turn", 0, cached_tokens)
+        if event := batcher.add(event_str):
+            yield event
+        event_str = _make_message_stop_event()
+        if event := batcher.add(event_str):
+            yield event
+        
+        # Flush any remaining events
+        if remaining := batcher.flush():
+            yield remaining
 
         # Send formal error event
         error_event = {
@@ -386,6 +504,17 @@ async def anthropic_streaming_wrapper_fast(
             "error": {"type": "api_error", "message": str(e)},
         }
         yield f"event: error\ndata: {json_dumps(error_event)}\n\n"
+        
+        # Memory cleanup after error
+        del accumulated_text
+        del accumulated_thinking
+    
+    finally:
+        # Memory cleanup after successful completion
+        if 'accumulated_text' in locals():
+            del accumulated_text
+        if 'accumulated_thinking' in locals():
+            del accumulated_thinking
 
 
 def _log_anthropic_response(

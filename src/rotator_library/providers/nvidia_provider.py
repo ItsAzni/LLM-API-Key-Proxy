@@ -6,6 +6,7 @@ import logging
 from typing import List, Dict, Any
 import litellm
 from .provider_interface import ProviderInterface
+from .utilities.nvidia_quota_tracker import NvidiaQuotaTracker
 
 lib_logger = logging.getLogger('rotator_library')
 
@@ -14,6 +15,12 @@ _NVIDIA_DEEPSEEK_THINKING_MODELS = frozenset([
     "deepseek-ai/deepseek-v3.1",
     "deepseek-ai/deepseek-v3.1-terminus",
     "deepseek-ai/deepseek-v3.2",
+])
+
+# Qwen models that support thinking via enable_thinking parameter
+_QWEN_THINKING_MODELS = frozenset([
+    "qwen/qwen3.5-397b-a17b",
+    "qwen/qwen3-coder-480b-a35b-instruct",
 ])
 
 # Top-level payload fields that are Anthropic-specific and not supported by NVIDIA NIM
@@ -31,6 +38,13 @@ class NvidiaProvider(ProviderInterface):
     Handles translation of Anthropic-format requests (as sent by Claude Code)
     into NVIDIA-compatible OpenAI-format requests.
     """
+
+    # Provider name for env var lookups
+    provider_env_name = "NVIDIA_NIM"
+
+    def __init__(self):
+        super().__init__()
+        self._quota_tracker = NvidiaQuotaTracker()
 
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """
@@ -137,7 +151,12 @@ class NvidiaProvider(ProviderInterface):
               via 'extra_body.chat_template_kwargs.thinking = True'.
             - Strips the Anthropic 'thinking' field regardless.
 
-        All other models (Qwen, Llama, Mistral, etc.):
+        Qwen models (qwen3.5, qwen3-coder, etc.):
+            - When 'reasoning_effort' is set, enables native thinking
+              via 'extra_body.chat_template_kwargs.enable_thinking = True'.
+            - Strips the Anthropic 'thinking' field regardless.
+
+        All other models (Llama, Mistral, etc.):
             - Strips 'thinking' field entirely (not supported by NVIDIA NIM for these models).
             - Strips 'cache_control' from all content blocks (Anthropic prompt caching).
             - Collapses list-format system messages into plain strings.
@@ -160,9 +179,10 @@ class NvidiaProvider(ProviderInterface):
         # --- Step 2: Strip cache_control and normalize messages ---
         self._sanitize_messages(payload)
 
-        # --- Step 3: Handle reasoning/thinking for DeepSeek models ---
+        # --- Step 3: Handle reasoning/thinking for supported models ---
         reasoning_effort = payload.get("reasoning_effort")
 
+        # DeepSeek models
         if model_name in _NVIDIA_DEEPSEEK_THINKING_MODELS:
             if reasoning_effort in ("low", "medium", "high"):
                 payload.setdefault("extra_body", {})
@@ -177,10 +197,119 @@ class NvidiaProvider(ProviderInterface):
                     f"[NvidiaProvider] DeepSeek model '{model_name}' without reasoning_effort; "
                     f"thinking not enabled."
                 )
+        
+        # Qwen models
+        elif model_name in _QWEN_THINKING_MODELS:
+            if reasoning_effort:
+                payload.setdefault("extra_body", {})
+                payload["extra_body"].setdefault("chat_template_kwargs", {})
+                payload["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+                lib_logger.info(
+                    f"[NvidiaProvider] Enabled native thinking for Qwen model "
+                    f"'{model_name}' (reasoning_effort='{reasoning_effort}')."
+                )
+            else:
+                lib_logger.debug(
+                    f"[NvidiaProvider] Qwen model '{model_name}' without reasoning_effort; "
+                    f"thinking not enabled."
+                )
+        
+        # Other models
         else:
-            # Non-DeepSeek models: log if reasoning_effort was present but not actionable
+            # Non-DeepSeek/Qwen models: log if reasoning_effort was present but not actionable
             if reasoning_effort:
                 lib_logger.debug(
                     f"[NvidiaProvider] Model '{model_name}' does not support native thinking; "
                     f"reasoning_effort='{reasoning_effort}' will be left for litellm to handle or ignore."
                 )
+
+    # =========================================================================
+    # QUOTA TRACKING METHODS
+    # =========================================================================
+
+    async def track_request(self, credential: str, model: str) -> None:
+        """
+        Track a request for rate limit enforcement.
+
+        Args:
+            credential: Credential identifier
+            model: Model name (e.g., "nvidia_nim/deepseek-ai/deepseek-v3.1")
+        """
+        await self._quota_tracker.track_request(credential, model)
+
+    def can_make_request(self, credential: str, model: str) -> bool:
+        """
+        Check if request is within rate limits.
+
+        Args:
+            credential: Credential identifier
+            model: Model name
+
+        Returns:
+            True if request is allowed, False otherwise
+        """
+        return self._quota_tracker.can_make_request(credential, model)
+
+    def get_wait_time(self, credential: str, model: str) -> float:
+        """
+        Get seconds to wait before next request.
+
+        Args:
+            credential: Credential identifier
+            model: Model name
+
+        Returns:
+            Seconds to wait (0.0 if can proceed immediately)
+        """
+        return self._quota_tracker.get_wait_time(credential, model)
+
+    def get_quota_info(self, credential: str, model: str) -> Dict:
+        """
+        Get quota information for credential and model.
+
+        Args:
+            credential: Credential identifier
+            model: Model name
+
+        Returns:
+            Dictionary with quota information
+        """
+        return self._quota_tracker.get_usage_stats(credential, model)
+
+    # =========================================================================
+    # BACKGROUND JOB FOR QUOTA SYNC
+    # =========================================================================
+
+    def get_background_job_config(self) -> Dict[str, Any]:
+        """
+        Get background job configuration for NVIDIA quota sync.
+
+        Returns:
+            Dictionary with job configuration or None if no job needed
+        """
+        return {
+            "name": "nvidia_quota_sync",
+            "interval": 600,  # Run every 10 minutes
+            "run_on_start": False,
+        }
+
+    async def run_background_job(
+        self, usage_manager: Any, credentials: List[str]
+    ) -> None:
+        """
+        Background job to sync NVIDIA quota windows.
+
+        Cleans up old rate limit windows to prevent memory leaks.
+
+        Args:
+            usage_manager: UsageManager instance (not used for NVIDIA)
+            credentials: List of credential paths (not used for NVIDIA)
+        """
+        try:
+            cleaned = self._quota_tracker.cleanup_old_windows()
+            if cleaned > 0:
+                lib_logger.debug(
+                    f"NVIDIA quota sync: cleaned {cleaned} old windows"
+                )
+        except Exception as e:
+            lib_logger.error(f"Error in NVIDIA quota sync job: {e}")

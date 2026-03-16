@@ -6,8 +6,12 @@ Interactive TUI launcher for the LLM API Key Proxy.
 Provides a beautiful Rich-based interface for configuration and execution.
 """
 
-import json
+# Disable aiodns BEFORE any aiohttp/litellm imports to fix DNS resolution issues
+# This must be set before aiohttp is imported anywhere in the process
 import os
+os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
+
+import json
 import sys
 from pathlib import Path
 from rich.console import Console
