@@ -29,7 +29,9 @@ import struct
 import random
 import json
 import ssl
-from typing import List, Tuple, Optional
+import time
+import asyncio
+from typing import List, Tuple, Optional, Dict
 
 # Try to use httpx for DoH, fallback to urllib
 try:
@@ -49,6 +51,96 @@ except ImportError:
 
 # Original getaddrinfo function
 _original_getaddrinfo = socket.getaddrinfo
+
+# =============================================================================
+# DNS CACHE WITH TTL
+# =============================================================================
+# Cache structure: hostname -> (list of IPs, expiry timestamp)
+_dns_cache: Dict[str, Tuple[List[str], float]] = {}
+
+
+def get_dns_cache_ttl() -> int:
+    """Get DNS cache TTL from config."""
+    try:
+        from .config.defaults import DNS_CACHE_TTL
+        return DNS_CACHE_TTL
+    except ImportError:
+        return 300  # 5 minutes fallback
+
+
+def _get_cached_ips(hostname: str) -> Optional[List[str]]:
+    """Get cached IPs if still valid."""
+    if hostname in _dns_cache:
+        ips, expiry = _dns_cache[hostname]
+        if time.time() < expiry:
+            return ips
+        else:
+            # Expired, remove from cache
+            del _dns_cache[hostname]
+    return None
+
+
+def _cache_ips(hostname: str, ips: List[str]) -> None:
+    """Cache IPs with TTL."""
+    if ips:
+        ttl = get_dns_cache_ttl()
+        _dns_cache[hostname] = (ips, time.time() + ttl)
+
+
+async def resolve_dns_async(hostname: str) -> List[str]:
+    """
+    Async DNS resolution with caching.
+    
+    Args:
+        hostname: Hostname to resolve
+        
+    Returns:
+        List of IP addresses
+        
+    Raises:
+        Exception: If DNS resolution fails and no cached value available
+    """
+    # Check cache first
+    cached = _get_cached_ips(hostname)
+    if cached is not None:
+        return cached
+    
+    # Use asyncio executor for blocking getaddrinfo
+    loop = asyncio.get_event_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: socket.getaddrinfo(hostname, None)),
+            timeout=10.0
+        )
+        ips = list(set(r[4][0] for r in result if r[0] == socket.AF_INET))
+        if ips:
+            _cache_ips(hostname, ips)
+        return ips
+    except Exception:
+        # Fallback to cached value even if expired
+        if hostname in _dns_cache:
+            return _dns_cache[hostname][0]
+        raise
+
+
+def clear_dns_cache() -> None:
+    """Clear all cached DNS entries."""
+    global _dns_cache
+    _dns_cache = {}
+
+
+def get_dns_cache_stats() -> Dict[str, any]:
+    """Get DNS cache statistics."""
+    now = time.time()
+    valid_entries = sum(1 for ips, expiry in _dns_cache.values() if now < expiry)
+    expired_entries = len(_dns_cache) - valid_entries
+    return {
+        "total_entries": len(_dns_cache),
+        "valid_entries": valid_entries,
+        "expired_entries": expired_entries,
+        "hostnames": list(_dns_cache.keys())
+    }
+
 
 # List of hosts that should use custom DNS
 # Format: hostname -> IP address (if known) or None (to use DNS resolver)
@@ -159,7 +251,7 @@ def _dns_query(host: str, dns_host: str, dns_port: int = 53) -> Optional[str]:
             return ip
         else:
             return None
-            
+        
     except Exception as e:
         print(f"[DNS-FIX] Error querying DNS: {e}")
         return None

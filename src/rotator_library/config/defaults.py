@@ -16,6 +16,7 @@ Environment variables can override at runtime.
 See DOCUMENTATION.md for detailed descriptions of each setting.
 """
 
+import os
 from typing import Dict, Optional
 
 # =============================================================================
@@ -78,13 +79,13 @@ DEFAULT_FAIR_CYCLE_CROSS_TIER: bool = False
 
 # Cycle duration in seconds (how long before cycle auto-resets)
 # Override: FAIR_CYCLE_DURATION_{PROVIDER}=<seconds>
-DEFAULT_FAIR_CYCLE_DURATION: int = 604800  # 7 days
+DEFAULT_FAIR_CYCLE_DURATION: int = 604800 # 7 days
 
 # Exhaustion cooldown threshold in seconds
 # Cooldowns longer than this mark credential as "exhausted" for fair cycle
 # Override: EXHAUSTION_COOLDOWN_THRESHOLD_{PROVIDER}=<seconds>
 # Global fallback: EXHAUSTION_COOLDOWN_THRESHOLD=<seconds>
-DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD: int = 300  # 5 minutes
+DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD: int = 300 # 5 minutes
 
 # =============================================================================
 # CUSTOM CAPS DEFAULTS
@@ -106,18 +107,18 @@ DEFAULT_CUSTOM_CAP_COOLDOWN_VALUE: int = 0
 # Escalating backoff tiers for consecutive failures (seconds)
 # Key = failure count, Value = cooldown duration
 COOLDOWN_BACKOFF_TIERS: Dict[int, int] = {
-    1: 10,  # 1st failure: 10 seconds
-    2: 30,  # 2nd failure: 30 seconds
-    3: 60,  # 3rd failure: 1 minute
-    4: 120,  # 4th failure: 2 minutes
+  1: 10, # 1st failure: 10 seconds
+  2: 30, # 2nd failure: 30 seconds
+  3: 60, # 3rd failure: 1 minute
+  4: 120, # 4th failure: 2 minutes
 }
 
 # Maximum backoff for 5+ consecutive failures (seconds)
-COOLDOWN_BACKOFF_MAX: int = 300  # 5 minutes
+COOLDOWN_BACKOFF_MAX: int = 300 # 5 minutes
 
 # Authentication error lockout duration (seconds)
 # Applied when 401/403 received - credential assumed revoked
-COOLDOWN_AUTH_ERROR: int = 300  # 5 minutes
+COOLDOWN_AUTH_ERROR: int = 300 # 5 minutes
 
 # Transient/provider-level error cooldown (seconds)
 # Applied for errors that don't count against credential health
@@ -125,6 +126,67 @@ COOLDOWN_TRANSIENT_ERROR: int = 30
 
 # Default rate limit cooldown when retry_after not provided (seconds)
 COOLDOWN_RATE_LIMIT_DEFAULT: int = 60
+
+# =============================================================================
+# HTTP TIMEOUT DEFAULTS
+# =============================================================================
+# HTTP client timeout configuration with environment variable overrides.
+
+# Connection timeout in seconds
+# Override: HTTP_CONNECT_TIMEOUT=<seconds>
+HTTP_CONNECT_TIMEOUT: int = int(os.getenv("HTTP_CONNECT_TIMEOUT", "30"))
+
+# Read timeout in seconds (time to receive response)
+# Override: HTTP_READ_TIMEOUT=<seconds>
+HTTP_READ_TIMEOUT: int = int(os.getenv("HTTP_READ_TIMEOUT", "120"))
+
+# Write timeout in seconds (time to send request body for streaming)
+# Override: HTTP_WRITE_TIMEOUT=<seconds>
+HTTP_WRITE_TIMEOUT: int = int(os.getenv("HTTP_WRITE_TIMEOUT", "300"))
+
+# =============================================================================
+# OAUTH QUEUE TIMEOUT DEFAULTS
+# =============================================================================
+# OAuth queue and authentication timeouts with environment variable overrides.
+
+# OAuth queue wait timeout in seconds
+# Override: OAUTH_QUEUE_TIMEOUT=<seconds>
+OAUTH_QUEUE_TIMEOUT: int = int(os.getenv("OAUTH_QUEUE_TIMEOUT", "120"))
+
+# OAuth authentication timeout in seconds
+# Override: OAUTH_AUTH_TIMEOUT=<seconds>
+OAUTH_AUTH_TIMEOUT: int = int(os.getenv("OAUTH_AUTH_TIMEOUT", "90"))
+
+# =============================================================================
+# RETRY CONFIGURATION DEFAULTS
+# =============================================================================
+# Retry timing configuration with jitter for thundering herd prevention.
+
+# Base delay for exponential backoff in seconds
+# Override: RETRY_BASE_DELAY=<seconds>
+RETRY_BASE_DELAY: float = float(os.getenv("RETRY_BASE_DELAY", "1.0"))
+
+# Maximum delay cap for exponential backoff in seconds
+# Override: RETRY_MAX_DELAY=<seconds>
+RETRY_MAX_DELAY: float = float(os.getenv("RETRY_MAX_DELAY", "60.0"))
+
+# Jitter factor for retry delay randomization (0.0-1.0)
+# Helps prevent thundering herd on coordinated retries
+# Override: RETRY_JITTER_FACTOR=<factor>
+RETRY_JITTER_FACTOR: float = float(os.getenv("RETRY_JITTER_FACTOR", "0.1"))
+
+# =============================================================================
+# DNS CONFIGURATION DEFAULTS
+# =============================================================================
+# DNS caching and query timeout settings.
+
+# DNS cache TTL in seconds
+# Override: DNS_CACHE_TTL=<seconds>
+DNS_CACHE_TTL: int = int(os.getenv("DNS_CACHE_TTL", "300"))
+
+# DNS query timeout in seconds
+# Override: DNS_QUERY_TIMEOUT=<seconds>
+DNS_QUERY_TIMEOUT: int = int(os.getenv("DNS_QUERY_TIMEOUT", "10"))
 
 # =============================================================================
 # CIRCUIT BREAKER DEFAULTS
@@ -152,16 +214,21 @@ CIRCUIT_BREAKER_DISABLED: bool = False
 # These providers route to multiple backends and need different settings
 # Keys: failure_threshold, recovery_timeout, half_open_requests
 CIRCUIT_BREAKER_PROVIDER_OVERRIDES: Dict[str, Dict[str, int]] = {
-    "kilocode": {
-        "failure_threshold": 5,      # More tolerant (routes to multiple backends)
-        "recovery_timeout": 30,      # Faster recovery
-        "half_open_requests": 3,     # More test requests
-    },
-    "openrouter": {
-        "failure_threshold": 5,
-        "recovery_timeout": 30,
-        "half_open_requests": 3,
-    },
+ "kilocode": {
+ "failure_threshold": 5, # More tolerant (routes to multiple backends)
+ "recovery_timeout": 30, # Faster recovery
+ "half_open_requests": 3, # More test requests
+ },
+ "openrouter": {
+ "failure_threshold": 5,
+ "recovery_timeout": 30,
+ "half_open_requests": 3,
+ },
+ "nvidia": {
+ "failure_threshold": 10, # Higher tolerance for NIM endpoints
+ "recovery_timeout": 30, # Faster recovery
+ "half_open_requests": 5, # Increased for concurrent recovery
+ },
 }
 
 # =============================================================================
@@ -192,29 +259,27 @@ IP_THROTTLE_DETECTION_DISABLED: bool = False
 
 # Kilocode provider backoff settings
 # Override via environment: KILOCODE_BACKOFF_BASE, KILOCODE_MAX_BACKOFF
-KILOCODE_BACKOFF_BASE: float = 1.0  # Base multiplier for server errors
-KILOCODE_MAX_BACKOFF: float = 30.0  # Maximum backoff in seconds
+KILOCODE_BACKOFF_BASE: float = 1.0 # Base multiplier for server errors
+KILOCODE_MAX_BACKOFF: float = 30.0 # Maximum backoff in seconds
 
 # =============================================================================
 # COOLDOWN DISABLE FLAGS (from theblazehen fork)
 # =============================================================================
 # Allows disabling cooldowns per-provider for debugging/emergency purposes.
 
-import os
-
 
 def is_cooldown_disabled(provider: str) -> bool:
-    """
-    Check if cooldown is disabled for a provider via env var.
+ """
+ Check if cooldown is disabled for a provider via env var.
 
-    Args:
-        provider: Provider name (e.g., "openai", "anthropic")
+ Args:
+ provider: Provider name (e.g., "openai", "anthropic")
 
-    Returns:
-        True if DISABLE_COOLDOWN_<PROVIDER>=true is set
+ Returns:
+ True if DISABLE_COOLDOWN_<PROVIDER>=true is set
 
-    Example:
-        DISABLE_COOLDOWN_OPENAI=true  # Disables cooldowns for OpenAI
-        DISABLE_COOLDOWN_ANTHROPIC=true  # Disables cooldowns for Anthropic
-    """
-    return os.environ.get(f"DISABLE_COOLDOWN_{provider.upper()}", "false").lower() == "true"
+ Example:
+ DISABLE_COOLDOWN_OPENAI=true # Disables cooldowns for OpenAI
+ DISABLE_COOLDOWN_ANTHROPIC=true # Disables cooldowns for Anthropic
+ """
+ return os.environ.get(f"DISABLE_COOLDOWN_{provider.upper()}", "false").lower() == "true"
