@@ -15,6 +15,10 @@ States:
 
 Uses per-provider sharded locks so parallel requests to different providers
 do not block each other.
+
+FIX: Implements in-flight request tracking to properly handle concurrent
+requests in HALF_OPEN state. Uses half_open_active counter for requests
+currently being executed, incremented on start and decremented on completion.
 """
 
 import asyncio
@@ -29,9 +33,9 @@ lib_logger = logging.getLogger("rotator_library")
 
 class CircuitState(Enum):
     """Circuit breaker states."""
-    CLOSED = "closed"      # Normal operation
-    OPEN = "open"          # Provider blocked, fail fast
-    HALF_OPEN = "half_open"  # Testing recovery
+    CLOSED = "closed" # Normal operation
+    OPEN = "open" # Provider blocked, fail fast
+    HALF_OPEN = "half_open" # Testing recovery
 
 
 @dataclass
@@ -41,8 +45,9 @@ class CircuitInfo:
     failure_count: int = 0
     last_failure_time: Optional[float] = None
     last_success_time: Optional[float] = None
-    half_open_attempts: int = 0
-    custom_recovery_timeout: Optional[int] = None  # Per-circuit timeout (e.g., from IP throttle duration)
+    half_open_attempts: int = 0  # Total attempts made (for logging/metrics)
+    half_open_active: int = 0    # Currently in-flight requests in HALF_OPEN state
+    custom_recovery_timeout: Optional[int] = None # Per-circuit timeout (e.g., from IP throttle duration)
 
     def reset(self) -> None:
         """Reset circuit to initial state."""
@@ -50,6 +55,7 @@ class CircuitInfo:
         self.failure_count = 0
         self.last_failure_time = None
         self.half_open_attempts = 0
+        self.half_open_active = 0
         self.custom_recovery_timeout = None
 
 
@@ -65,40 +71,40 @@ class ProviderCircuitBreaker:
     (e.g., NVIDIA and Gemini simultaneously) do not contend for the same lock.
 
     Configuration:
-        failure_threshold: Number of failures before opening circuit
-        recovery_timeout: Seconds to wait before attempting recovery
-        half_open_requests: Number of test requests in half-open state
+    failure_threshold: Number of failures before opening circuit
+    recovery_timeout: Seconds to wait before attempting recovery
+    half_open_requests: Number of test requests in half-open state
 
     Usage:
-        circuit = ProviderCircuitBreaker()
+    circuit = ProviderCircuitBreaker()
 
-        if circuit.can_attempt("openai"):
-            try:
-                result = await make_request()
-                circuit.record_success("openai")
-            except IPThrottleError:
-                circuit.record_ip_throttle("openai")
-                raise
-        else:
-            raise CircuitOpenError("Provider temporarily unavailable")
+    if circuit.can_attempt("openai"):
+    try:
+    result = await make_request()
+    circuit.record_success("openai")
+    except IPThrottleError:
+    circuit.record_ip_throttle("openai")
+    raise
+    else:
+    raise CircuitOpenError("Provider temporarily unavailable")
     """
 
     def __init__(
         self,
         failure_threshold: int = 3,
         recovery_timeout: int = 60,
-        half_open_requests: int = 1,
+        half_open_requests: int = 5,  # FIX: Increased from 1 to 5 to handle concurrent requests
         provider_overrides: Optional[Dict[str, Dict[str, int]]] = None,
     ):
         """
         Initialize the circuit breaker.
 
         Args:
-            failure_threshold: Number of consecutive failures before opening
-            recovery_timeout: Seconds to wait before attempting recovery
-            half_open_requests: Max test requests in half-open state
-            provider_overrides: Per-provider settings dict, e.g.:
-                {"kilocode": {"failure_threshold": 5, "recovery_timeout": 30}}
+        failure_threshold: Number of consecutive failures before opening
+        recovery_timeout: Seconds to wait before attempting recovery
+        half_open_requests: Max concurrent test requests in half-open state
+        provider_overrides: Per-provider settings dict, e.g.:
+        {"kilocode": {"failure_threshold": 5, "recovery_timeout": 30}}
         """
         self._failure_threshold = failure_threshold
         self._recovery_timeout = recovery_timeout
@@ -167,14 +173,17 @@ class ProviderCircuitBreaker:
 
         In CLOSED state: Always returns True
         In OPEN state: Returns False until recovery timeout passes,
-                       then transitions to HALF_OPEN
-        In HALF_OPEN state: Returns True up to half_open_requests times
+        then transitions to HALF_OPEN
+        In HALF_OPEN state: Returns True up to half_open_requests concurrent requests
+
+        FIX: Uses half_open_active counter instead of half_open_attempts,
+        properly tracking in-flight requests with increment/decrement semantics.
 
         Args:
-            provider: Provider name to check
+        provider: Provider name to check
 
         Returns:
-            True if request can be attempted, False otherwise
+        True if request can be attempted, False otherwise
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -198,39 +207,44 @@ class ProviderCircuitBreaker:
                     # Transition to half-open
                     circuit.state = CircuitState.HALF_OPEN
                     circuit.half_open_attempts = 0
+                    circuit.half_open_active = 0
                     lib_logger.info(
                         "Circuit for '%s' transitioned OPEN -> HALF_OPEN after %.1fs (timeout was %ds)",
                         provider, elapsed, recovery_timeout
                     )
-                    return True
+                    # Continue to HALF_OPEN check below - don't return yet
 
-                # Still in cooldown
-                remaining = recovery_timeout - elapsed
-                lib_logger.debug(
-                    "Circuit for '%s' is OPEN, %.1fs until recovery attempt (timeout: %ds)",
-                    provider, remaining, recovery_timeout
-                )
-                return False
+                else:
+                    # Still in cooldown
+                    remaining = recovery_timeout - elapsed
+                    lib_logger.debug(
+                        "Circuit for '%s' is OPEN, %.1fs until recovery attempt (timeout: %ds)",
+                        provider, remaining, recovery_timeout
+                    )
+                    return False
 
             if circuit.state == CircuitState.HALF_OPEN:
-                # Allow limited requests in half-open state
+                # FIX: Use half_open_active for concurrent request tracking
+                # This allows multiple concurrent requests up to the limit
                 half_open_max = self._get_provider_half_open(provider)
-                if circuit.half_open_attempts < half_open_max:
-                    circuit.half_open_attempts += 1
+                if circuit.half_open_active < half_open_max:
+                    # Increment active counter - will be decremented on completion
+                    circuit.half_open_active += 1
+                    circuit.half_open_attempts += 1  # Keep for metrics/logging
                     lib_logger.debug(
-                        "Circuit for '%s' in HALF_OPEN, attempt %d/%d",
-                        provider, circuit.half_open_attempts, half_open_max
+                        "Circuit for '%s' in HALF_OPEN, active %d/%d (total attempts: %d)",
+                        provider, circuit.half_open_active, half_open_max, circuit.half_open_attempts
                     )
                     return True
 
-                # Exceeded half-open attempts, stay blocked
+                # Exceeded half-open concurrent requests, stay blocked
                 lib_logger.debug(
-                    "Circuit for '%s' in HALF_OPEN, max attempts reached",
-                    provider
+                    "Circuit for '%s' in HALF_OPEN, max concurrent requests reached (%d/%d)",
+                    provider, circuit.half_open_active, half_open_max
                 )
                 return False
 
-            return True  # Should never reach here
+        return True # Should never reach here
 
     async def record_success(self, provider: str) -> None:
         """
@@ -239,8 +253,10 @@ class ProviderCircuitBreaker:
         If the circuit was in HALF_OPEN state, a success transitions it
         back to CLOSED (normal operation).
 
+        FIX: Decrements half_open_active counter to release slot for other requests.
+
         Args:
-            provider: Provider name that succeeded
+        provider: Provider name that succeeded
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -249,12 +265,24 @@ class ProviderCircuitBreaker:
             circuit.last_success_time = current_time
 
             if circuit.state == CircuitState.HALF_OPEN:
-                # Recovery successful, close the circuit
-                circuit.reset()
-                lib_logger.info(
-                    "Circuit for '%s' recovered: HALF_OPEN -> CLOSED",
-                    provider
-                )
+                # FIX: Decrement active counter
+                circuit.half_open_active = max(0, circuit.half_open_active - 1)
+
+                # Only close circuit if this was the last active request
+                # or if we've had enough successful recoveries
+                if circuit.half_open_active == 0:
+                    # Recovery successful, close the circuit
+                    circuit.reset()
+                    lib_logger.info(
+                        "Circuit for '%s' recovered: HALF_OPEN -> CLOSED",
+                        provider
+                    )
+                else:
+                    lib_logger.debug(
+                        "Circuit for '%s' in HALF_OPEN, request succeeded, %d active requests remaining",
+                        provider, circuit.half_open_active
+                    )
+
             elif circuit.state == CircuitState.CLOSED:
                 # Reset failure count on success
                 circuit.failure_count = 0
@@ -266,8 +294,10 @@ class ProviderCircuitBreaker:
         Increments failure count and opens circuit if threshold is reached.
         In HALF_OPEN state, immediately reopens the circuit.
 
+        FIX: Decrements half_open_active counter to release slot for other requests.
+
         Args:
-            provider: Provider name that was throttled
+        provider: Provider name that was throttled
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -279,13 +309,18 @@ class ProviderCircuitBreaker:
             circuit.last_failure_time = current_time
 
             if circuit.state == CircuitState.HALF_OPEN:
+                # FIX: Decrement active counter
+                circuit.half_open_active = max(0, circuit.half_open_active - 1)
+
                 # Failed during recovery, reopen circuit
                 circuit.state = CircuitState.OPEN
                 circuit.half_open_attempts = 0
+                circuit.half_open_active = 0
                 lib_logger.warning(
                     "Circuit for '%s' reopened: HALF_OPEN -> OPEN (failure during recovery)",
                     provider
                 )
+
             elif circuit.state == CircuitState.CLOSED:
                 if circuit.failure_count >= threshold:
                     # Threshold reached, open circuit
@@ -314,9 +349,9 @@ class ProviderCircuitBreaker:
         the failure count.
 
         Args:
-            provider: Provider name to block
-            reason: Reason for immediate opening (for logging)
-            duration: Custom recovery timeout in seconds (e.g., from retry-after header)
+        provider: Provider name to block
+        reason: Reason for immediate opening (for logging)
+        duration: Custom recovery timeout in seconds (e.g., from retry-after header)
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -336,6 +371,8 @@ class ProviderCircuitBreaker:
             circuit.state = CircuitState.OPEN
             circuit.last_failure_time = current_time
             circuit.failure_count += 1
+            # FIX: Reset active counter when circuit opens
+            circuit.half_open_active = 0
             if duration is not None:
                 circuit.custom_recovery_timeout = duration
             lib_logger.warning(
@@ -351,10 +388,10 @@ class ProviderCircuitBreaker:
         - OPEN circuits may transition to HALF_OPEN if timeout passed
 
         Args:
-            provider: Provider name to check
+        provider: Provider name to check
 
         Returns:
-            Current CircuitState for the provider
+        Current CircuitState for the provider
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -367,6 +404,7 @@ class ProviderCircuitBreaker:
                 if elapsed >= recovery_timeout:
                     circuit.state = CircuitState.HALF_OPEN
                     circuit.half_open_attempts = 0
+                    circuit.half_open_active = 0
                     lib_logger.info(
                         "Circuit for '%s' auto-transitioned OPEN -> HALF_OPEN (timeout was %ds)",
                         provider, recovery_timeout
@@ -379,7 +417,7 @@ class ProviderCircuitBreaker:
         Get the current state of all provider circuits.
 
         Returns:
-            Dictionary mapping provider names to their CircuitState
+        Dictionary mapping provider names to their CircuitState
         """
         # Acquire all existing provider locks to get a consistent snapshot
         async with self._locks_lock:
@@ -398,13 +436,13 @@ class ProviderCircuitBreaker:
         Manually reset a provider's circuit to CLOSED state.
 
         Args:
-            provider: Provider name to reset
+        provider: Provider name to reset
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
             if provider in self._circuits:
                 self._circuits[provider].reset()
-                lib_logger.info("Circuit for '%s' manually reset to CLOSED", provider)
+        lib_logger.info("Circuit for '%s' manually reset to CLOSED", provider)
 
     async def reset_all(self) -> None:
         """Reset all provider circuits to CLOSED state."""
@@ -423,10 +461,10 @@ class ProviderCircuitBreaker:
         Get detailed information about a provider's circuit.
 
         Args:
-            provider: Provider name to query
+        provider: Provider name to query
 
         Returns:
-            Dictionary with circuit details
+        Dictionary with circuit details
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -440,6 +478,7 @@ class ProviderCircuitBreaker:
                 "recovery_timeout": self._recovery_timeout,
                 "half_open_requests": self._half_open_requests,
                 "half_open_attempts": circuit.half_open_attempts,
+                "half_open_active": circuit.half_open_active,
             }
 
             if circuit.last_failure_time:
@@ -457,10 +496,10 @@ class ProviderCircuitBreaker:
         Get remaining cooldown time for a provider's circuit.
 
         Args:
-            provider: Provider name to check
+        provider: Provider name to check
 
         Returns:
-            Remaining cooldown time in seconds, or 0 if not cooling down
+        Remaining cooldown time in seconds, or 0 if not cooling down
         """
         lock = await self._get_provider_lock(provider)
         async with lock:
@@ -477,7 +516,7 @@ class ProviderCircuitBreaker:
         Get list of all providers with open circuits.
 
         Returns:
-            List of provider names with OPEN circuits
+        List of provider names with OPEN circuits
         """
         async with self._locks_lock:
             providers = list(self._circuits.keys())
