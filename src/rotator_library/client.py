@@ -24,6 +24,16 @@ patch_litellm_finish_reason()
 # CRITICAL: Patch aiohttp.TCPConnector to use TLS 1.2 and disable SSL verification
 # This fixes ConnectionResetError and SSLCertVerificationError with servers like noobrouterproduction.azurewebsites.net
 import ssl as _ssl_module
+# Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
+_AZURE_COMPATIBLE_CIPHERS = (
+ "ECDHE-RSA-AES256-GCM-SHA384:"
+ "ECDHE-RSA-AES128-GCM-SHA256:"
+ "ECDHE-ECDSA-AES256-GCM-SHA384:"
+ "ECDHE-ECDSA-AES128-GCM-SHA256:"
+ "AES256-GCM-SHA384:"
+ "AES128-GCM-SHA256"
+)
+
 
 def _patch_aiohttp_connector():
     """Patch ssl module and aiohttp.TCPConnector to disable SSL verification."""
@@ -37,6 +47,10 @@ def _patch_aiohttp_connector():
             def _patched_create_default(*args, **kwargs):
                 ctx = _ssl_module._create_unverified_context()
                 ctx.maximum_version = _ssl_module.TLSVersion.TLSv1_2
+                try:
+                    ctx.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
+                except _ssl_module.SSLError:
+                    pass
                 return ctx
             
             _ssl_module.create_default_context = _patched_create_default
@@ -57,6 +71,10 @@ def _patch_aiohttp_connector():
             if not _ssl_verify:
                 ssl_context = _ssl_module._create_unverified_context()
                 ssl_context.maximum_version = _ssl_module.TLSVersion.TLSv1_2
+                try:
+                    ssl_context.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
+                except _ssl_module.SSLError:
+                    pass
                 kwargs['ssl'] = ssl_context
             _original_init(self, *args, **kwargs)
         

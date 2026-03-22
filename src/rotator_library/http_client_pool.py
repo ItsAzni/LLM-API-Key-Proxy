@@ -87,7 +87,22 @@ def _env_ssl_verify() -> Union[bool, List[str]]:
     
     # Check per-host SSL verification overrides
     hosts_str = os.getenv("HTTP_SSL_VERIFY_HOSTS", "").strip()
+
+    # Default hosts that need SSL bypass due to Azure SSLV3_ALERT_HANDSHAKE_FAILURE
+    DEFAULT_SSL_BYPASS_HOSTS = [
+        "noobrouterproduction.azurewebsites.net",
+    ]
+
+    hosts = []
     if hosts_str:
+        hosts = [h.strip() for h in hosts_str.split(",") if h.strip()]
+
+    # Add default hosts if not already present
+    for default_host in DEFAULT_SSL_BYPASS_HOSTS:
+        if default_host not in hosts:
+            hosts.append(default_host)
+
+    if hosts:
         hosts = [h.strip() for h in hosts_str.split(",") if h.strip()]
         if hosts:
             lib_logger.info(
@@ -98,6 +113,30 @@ def _env_ssl_verify() -> Union[bool, List[str]]:
     
     return True
 
+
+
+
+def should_skip_ssl_for_host(host: str, ssl_verify: Union[bool, List[str]]) -> bool:
+    """
+    Check if SSL verification should be skipped for a specific host.
+
+    Args:
+        host: Hostname to check (e.g., "noobrouterproduction.azurewebsites.net")
+        ssl_verify: SSL verification setting from _env_ssl_verify()
+
+    Returns:
+        True if SSL verification should be skipped for this host
+    """
+    if ssl_verify is False:
+        return True
+    if ssl_verify is True:
+        return False
+    if isinstance(ssl_verify, list):
+        # Check for exact match or subdomain match
+        for skip_host in ssl_verify:
+            if host == skip_host or host.endswith(f".{skip_host}"):
+                return True
+    return False
 
 def _create_custom_dns_resolver(dns_host: str, dns_port: int = DEFAULT_DNS_PORT):
     """
@@ -262,7 +301,22 @@ class HttpClientPool:
         # Create SSL context with TLS 1.2 for compatibility with servers that don't support TLS 1.3
         import ssl
         ssl_context = ssl.create_default_context()
-        ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2  # Allow TLS 1.2 and 1.3 for Azure compatibility
+
+        # Set Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
+        AZURE_COMPATIBLE_CIPHERS = (
+            "ECDHE-RSA-AES256-GCM-SHA384:"
+            "ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-ECDSA-AES256-GCM-SHA384:"
+            "ECDHE-ECDSA-AES128-GCM-SHA256:"
+            "AES256-GCM-SHA384:"
+            "AES128-GCM-SHA256"
+        )
+        try:
+            ssl_context.set_ciphers(AZURE_COMPATIBLE_CIPHERS)
+        except ssl.SSLError:
+            pass  # Use default ciphers if set_ciphers fails
+
         if not self._ssl_verify:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE

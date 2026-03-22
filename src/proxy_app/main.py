@@ -141,9 +141,31 @@ with _console.status("[dim]Loading core dependencies...", spinner="dots"):
     # --- Early Log Level Configuration ---
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
-print("  → Loading LiteLLM library...")
+print(" → Loading LiteLLM library...")
 with _console.status("[dim]Loading LiteLLM library...", spinner="dots"):
     import litellm
+    import httpx
+
+    # CRITICAL: Apply SSL patches IMMEDIATELY after litellm import
+    # This must happen BEFORE rotator_library import and BEFORE any API calls
+    # Fixes: Cannot connect to host noobrouterproduction.azurewebsites.net:443 ssl:False
+    _ssl_verify_env = os.environ.get("HTTP_SSL_VERIFY", "true").lower()
+    if _ssl_verify_env == "false":
+        print("[SSL-FIX-MAIN] HTTP_SSL_VERIFY=false - Applying SSL patches in main.py")
+        
+        # 1. Set litellm's SSL verification to False
+        litellm.ssl_verify = False
+        print(f"[SSL-FIX-MAIN] Set litellm.ssl_verify = False")
+        
+        # 2. Create pre-configured httpx clients with SSL verification disabled
+        # This is the MOST RELIABLE way to disable SSL in litellm
+        litellm.client_session = httpx.Client(verify=False)
+        litellm.aclient_session = httpx.AsyncClient(verify=False)
+        print(f"[SSL-FIX-MAIN] Created litellm.client_session and aclient_session with verify=False")
+        
+        # 3. Set environment variable for litellm
+        os.environ["SSL_VERIFY"] = "False"
+        print(f"[SSL-FIX-MAIN] Set SSL_VERIFY=False environment variable")
 
 # Phase 4: Application imports with granular loading messages
 print("  → Initializing proxy core...")
