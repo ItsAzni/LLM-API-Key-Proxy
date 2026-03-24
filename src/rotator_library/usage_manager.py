@@ -17,6 +17,7 @@ from .error_handler import ClassifiedError, NoAvailableKeysError, mask_credentia
 from .providers import PROVIDER_PLUGINS
 from .async_locks import ReadWriteLock
 from .utils.resilient_io import ResilientStateWriter
+from .utils.provider_locks import ProviderLockManager
 from .batched_persistence import UsagePersistenceManager
 from .utils.paths import get_data_file
 from .config import (
@@ -155,8 +156,7 @@ class UsageManager:
 
         # Per-provider locks for parallel access (sharded locking)
         # This allows concurrent operations on different providers
-        self._provider_locks: Dict[str, asyncio.Lock] = {}
-        self._provider_locks_lock = asyncio.Lock()  # Protects _provider_locks dict
+        self._provider_lock_manager = ProviderLockManager()
 
         # Read-write lock for usage data: allows parallel reads, exclusive writes
         self._data_lock = ReadWriteLock()
@@ -198,15 +198,7 @@ class UsageManager:
         Returns:
             asyncio.Lock specific to this provider
         """
-        # Fast path: lock already exists
-        if provider in self._provider_locks:
-            return self._provider_locks[provider]
-
-        # Slow path: create new lock
-        async with self._provider_locks_lock:
-            if provider not in self._provider_locks:
-                self._provider_locks[provider] = asyncio.Lock()
-            return self._provider_locks[provider]
+        return await self._provider_lock_manager.get_lock(provider)
 
     def _get_rotation_mode(self, provider: str) -> str:
         """

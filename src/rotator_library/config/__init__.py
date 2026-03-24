@@ -71,6 +71,7 @@ from .defaults import (
     # Cooldown Disable
     is_cooldown_disabled,
 )
+from .env_utils import env_bool, env_float, env_int
 
 __all__ = [
     # Rotation & Selection
@@ -135,4 +136,8 @@ __all__ = [
     "KILOCODE_MAX_BACKOFF",
     # Cooldown Disable
     "is_cooldown_disabled",
+    # Env helpers
+    "env_bool",
+    "env_float",
+    "env_int",
 ]

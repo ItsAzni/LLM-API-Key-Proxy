@@ -150,6 +150,11 @@ from .provider_config import ProviderConfig
 from .http_client_pool import HttpClientPool, get_http_pool, close_http_pool
 from .providers import PROVIDER_PLUGINS
 from .providers.openai_compatible_provider import OpenAICompatibleProvider
+from .providers.utilities import (
+    DEFAULT_GENERIC_SAFETY_SETTINGS,
+    DEFAULT_GEMINI_SAFETY_SETTINGS_MAP,
+    DEFAULT_SAFETY_SETTINGS,
+)
 from .request_sanitizer import sanitize_request_payload
 from .model_info_service import get_model_info_service
 from .cooldown_manager import CooldownManager
@@ -1187,29 +1192,11 @@ class RotatingClient:
         if provider != "gemini":
             return
 
-        # Generic defaults (openai-compatible style)
-        default_generic = {
-            "harassment": "OFF",
-            "hate_speech": "OFF",
-            "sexually_explicit": "OFF",
-            "dangerous_content": "OFF",
-            "civic_integrity": "BLOCK_NONE",
-        }
-
-        # Gemini defaults (direct Gemini format)
-        default_gemini = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
-            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-        ]
-
         # If generic form is present, ensure missing generic keys are filled in
         if "safety_settings" in litellm_kwargs and isinstance(
             litellm_kwargs["safety_settings"], dict
         ):
-            for k, v in default_generic.items():
+            for k, v in DEFAULT_GENERIC_SAFETY_SETTINGS.items():
                 if k not in litellm_kwargs["safety_settings"]:
                     litellm_kwargs["safety_settings"][k] = v
             return
@@ -1223,9 +1210,9 @@ class RotatingClient:
                 for item in litellm_kwargs["safetySettings"]
                 if isinstance(item, dict)
             }
-            for d in default_gemini:
-                if d["category"] not in present:
-                    litellm_kwargs["safetySettings"].append(d)
+            for default_setting in DEFAULT_SAFETY_SETTINGS:
+                if default_setting["category"] not in present:
+                    litellm_kwargs["safetySettings"].append(dict(default_setting))
             return
 
         # Neither present: set generic defaults so provider conversion will translate them
@@ -1233,7 +1220,7 @@ class RotatingClient:
             "safety_settings" not in litellm_kwargs
             and "safetySettings" not in litellm_kwargs
         ):
-            litellm_kwargs["safety_settings"] = default_generic.copy()
+            litellm_kwargs["safety_settings"] = DEFAULT_GENERIC_SAFETY_SETTINGS.copy()
 
     def _strip_client_headers(self, litellm_kwargs: Dict[str, Any]) -> None:
         """

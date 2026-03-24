@@ -14,25 +14,11 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
+from ...config import env_bool, env_int
+
 lib_logger = logging.getLogger("rotator_library")
-
-
-# =============================================================================
-# ENVIRONMENT HELPERS
-# =============================================================================
-
-
-def env_bool(key: str, default: bool = False) -> bool:
-    """Get boolean from environment variable."""
-    return os.getenv(key, str(default).lower()).lower() in ("true", "1", "yes")
-
-
-def env_int(key: str, default: int) -> int:
-    """Get integer from environment variable."""
-    return int(os.getenv(key, str(default)))
 
 
 # =============================================================================
@@ -100,7 +86,16 @@ FINISH_REASON_MAP: Dict[str, str] = {
     "OTHER": "stop",
 }
 
-# Default safety settings - disable content filtering for all categories
+# Default generic safety settings - disable content filtering for all categories
+DEFAULT_GENERIC_SAFETY_SETTINGS: Dict[str, str] = {
+    "harassment": "OFF",
+    "hate_speech": "OFF",
+    "sexually_explicit": "OFF",
+    "dangerous_content": "OFF",
+    "civic_integrity": "BLOCK_NONE",
+}
+
+# Default safety settings - disable content filtering for all Gemini categories
 DEFAULT_SAFETY_SETTINGS: List[Dict[str, str]] = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
@@ -108,6 +103,10 @@ DEFAULT_SAFETY_SETTINGS: List[Dict[str, str]] = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
     {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
 ]
+
+DEFAULT_GEMINI_SAFETY_SETTINGS_MAP: Dict[str, str] = {
+    item["category"]: item["threshold"] for item in DEFAULT_SAFETY_SETTINGS
+}
 
 
 # =============================================================================

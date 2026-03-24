@@ -28,6 +28,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 import logging
 
+from .utils.provider_locks import ProviderLockManager
+
 lib_logger = logging.getLogger("rotator_library")
 
 
@@ -113,9 +115,7 @@ class ProviderCircuitBreaker:
         self._circuits: Dict[str, CircuitInfo] = {}
 
         # Per-provider sharded locks (lazy init)
-        self._provider_locks: Dict[str, asyncio.Lock] = {}
-        # Protects the _provider_locks dict itself
-        self._locks_lock = asyncio.Lock()
+        self._provider_lock_manager = ProviderLockManager()
 
         lib_logger.info(
             "Circuit breaker initialized: threshold=%d, timeout=%ds, half_open=%d, overrides=%s",
@@ -128,14 +128,7 @@ class ProviderCircuitBreaker:
         Lazily create and return the lock for a given provider.
         Uses a meta-lock to safely initialize new per-provider locks.
         """
-        # Fast path: lock already exists
-        if provider in self._provider_locks:
-            return self._provider_locks[provider]
-        # Slow path: create lock under protection
-        async with self._locks_lock:
-            if provider not in self._provider_locks:
-                self._provider_locks[provider] = asyncio.Lock()
-            return self._provider_locks[provider]
+        return await self._provider_lock_manager.get_lock(provider)
 
     def _get_provider_threshold(self, provider: str) -> int:
         """Get failure threshold for a provider (with overrides)."""
@@ -419,9 +412,7 @@ class ProviderCircuitBreaker:
         Returns:
         Dictionary mapping provider names to their CircuitState
         """
-        # Acquire all existing provider locks to get a consistent snapshot
-        async with self._locks_lock:
-            providers = list(self._circuits.keys())
+        providers = list(self._circuits.keys())
 
         result = {}
         for provider in providers:
@@ -446,8 +437,7 @@ class ProviderCircuitBreaker:
 
     async def reset_all(self) -> None:
         """Reset all provider circuits to CLOSED state."""
-        async with self._locks_lock:
-            providers = list(self._circuits.keys())
+        providers = list(self._circuits.keys())
 
         for provider in providers:
             lock = await self._get_provider_lock(provider)
@@ -518,8 +508,7 @@ class ProviderCircuitBreaker:
         Returns:
         List of provider names with OPEN circuits
         """
-        async with self._locks_lock:
-            providers = list(self._circuits.keys())
+        providers = list(self._circuits.keys())
 
         open_circuits = []
         for provider in providers:

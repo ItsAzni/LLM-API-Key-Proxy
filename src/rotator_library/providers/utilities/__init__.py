@@ -17,7 +17,9 @@ from .gemini_shared_utils import (
     GEMINI3_TOOL_RENAMES,
     GEMINI3_TOOL_RENAMES_REVERSE,
     FINISH_REASON_MAP,
+    DEFAULT_GENERIC_SAFETY_SETTINGS,
     DEFAULT_SAFETY_SETTINGS,
+    DEFAULT_GEMINI_SAFETY_SETTINGS_MAP,
 )
 from .gemini_tool_handler import GeminiToolHandler
 from .gemini_credential_manager import GeminiCredentialManager
@@ -49,7 +51,9 @@ __all__ = [
     "GEMINI3_TOOL_RENAMES",
     "GEMINI3_TOOL_RENAMES_REVERSE",
     "FINISH_REASON_MAP",
+    "DEFAULT_GENERIC_SAFETY_SETTINGS",
     "DEFAULT_SAFETY_SETTINGS",
+    "DEFAULT_GEMINI_SAFETY_SETTINGS_MAP",
     # Loggers (from transaction_logger)
     "ProviderLogger",
     "AntigravityProviderLogger",

@@ -13,12 +13,12 @@ generalized for any state data.
 import asyncio
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, field
 
+from .config import env_bool as _env_bool, env_float as _env_float
 from .utils.resilient_io import safe_write_json
 
 lib_logger = logging.getLogger("rotator_library")
@@ -31,20 +31,6 @@ class PersistenceConfig:
     max_dirty_age: float = 30.0  # Max age before forced write
     enable_disk: bool = True
     env_prefix: str = "BATCHED_PERSISTENCE"
-
-
-def _env_float(key: str, default: float) -> float:
-    """Get float from environment variable."""
-    try:
-        return float(os.getenv(key, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_bool(key: str, default: bool) -> bool:
-    """Get boolean from environment variable."""
-    return os.getenv(key, str(default).lower()).lower() in ("true", "1", "yes")
-
 
 class BatchedPersistence:
     """

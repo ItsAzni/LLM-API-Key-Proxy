@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Dict
 
+from .utils.provider_locks import ProviderLockManager
+
 lib_logger = logging.getLogger("rotator_library")
 
 
@@ -22,9 +24,7 @@ class CooldownManager:
     def __init__(self):
         self._cooldowns: Dict[str, float] = {}
         # Per-provider locks: each provider has its own asyncio.Lock
-        self._provider_locks: Dict[str, asyncio.Lock] = {}
-        # Protects the _provider_locks dict itself (lazy init)
-        self._locks_lock = asyncio.Lock()
+        self._provider_lock_manager = ProviderLockManager()
 
     def _extract_provider(self, credential: str) -> str:
         """
@@ -45,14 +45,7 @@ class CooldownManager:
         Lazily create and return the lock for a given provider.
         Uses a meta-lock to safely initialize new per-provider locks.
         """
-        # Fast path: lock already exists
-        if provider in self._provider_locks:
-            return self._provider_locks[provider]
-        # Slow path: create lock under protection
-        async with self._locks_lock:
-            if provider not in self._provider_locks:
-                self._provider_locks[provider] = asyncio.Lock()
-            return self._provider_locks[provider]
+        return await self._provider_lock_manager.get_lock(provider)
 
     async def is_cooling_down(self, credential: str) -> bool:
         """Checks if a credential is currently in a cooldown period."""

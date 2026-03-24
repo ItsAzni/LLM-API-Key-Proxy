@@ -5,6 +5,7 @@ import httpx
 import logging
 from typing import List, Dict, Any
 from .provider_interface import ProviderInterface
+from .utilities import DEFAULT_GEMINI_SAFETY_SETTINGS_MAP, DEFAULT_SAFETY_SETTINGS
 
 lib_logger = logging.getLogger('rotator_library')
 
@@ -33,22 +34,10 @@ class GeminiProvider(ProviderInterface):
         """
         if not settings:
             # Return full defaults if nothing provided
-            return [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-            ]
+            return [dict(item) for item in DEFAULT_SAFETY_SETTINGS]
 
         # Default gemini-format settings for merging
-        default_gemini = {
-            "HARM_CATEGORY_HARASSMENT": "OFF",
-            "HARM_CATEGORY_HATE_SPEECH": "OFF",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "OFF",
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "OFF",
-            "HARM_CATEGORY_CIVIC_INTEGRITY": "BLOCK_NONE",
-        }
+        default_gemini = DEFAULT_GEMINI_SAFETY_SETTINGS_MAP
 
         # If the caller already provided Gemini-style list, merge defaults without overwriting
         if isinstance(settings, list):

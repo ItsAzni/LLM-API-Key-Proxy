@@ -11,6 +11,7 @@ from .paths import (
     get_oauth_dir,
     get_data_file,
 )
+from .provider_locks import ProviderLockManager
 from .reauth_coordinator import get_reauth_coordinator, ReauthCoordinator
 from .resilient_io import (
     AsyncResilientStateWriter,
@@ -29,6 +30,7 @@ __all__ = [
     "get_cache_dir",
     "get_oauth_dir",
     "get_data_file",
+    "ProviderLockManager",
     "get_reauth_coordinator",
     "ReauthCoordinator",
     "AsyncResilientStateWriter",

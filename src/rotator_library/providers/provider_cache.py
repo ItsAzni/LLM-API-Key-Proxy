@@ -22,11 +22,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from ..config import env_bool as _env_bool, env_int as _env_int
 from ..utils.resilient_io import safe_write_json
 
 lib_logger = logging.getLogger("rotator_library")
@@ -35,17 +35,6 @@ lib_logger = logging.getLogger("rotator_library")
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
-
-def _env_bool(key: str, default: bool = False) -> bool:
-    """Get boolean from environment variable."""
-    return os.getenv(key, str(default).lower()).lower() in ("true", "1", "yes")
-
-
-def _env_int(key: str, default: int) -> int:
-    """Get integer from environment variable."""
-    return int(os.getenv(key, str(default)))
-
 
 # =============================================================================
 # PROVIDER CACHE CLASS

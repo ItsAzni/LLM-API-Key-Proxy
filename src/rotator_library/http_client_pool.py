@@ -30,6 +30,7 @@ if _http_dns_resolver in ("true", "1", "yes", "on") or (
     os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 
 from .timeout_config import TimeoutConfig
+from .config import env_bool as _env_bool, env_float as _env_float, env_int as _env_int
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -44,29 +45,6 @@ DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
 DEFAULT_HTTP2_ENABLED = True  # HTTP/2 enabled by default
 DEFAULT_DNS_RESOLVER = None  # Custom DNS resolver (e.g., "8.8.8.8")
 DEFAULT_DNS_PORT = 53  # Default DNS port
-
-
-def _env_int(key: str, default: int) -> int:
-    """Get integer from environment variable."""
-    try:
-        return int(os.getenv(key, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_float(key: str, default: float) -> float:
-    """Get float from environment variable."""
-    try:
-        return float(os.getenv(key, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_bool(key: str, default: bool) -> bool:
-    """Get boolean from environment variable."""
-    value = os.getenv(key, str(default)).lower()
-    return value in ("true", "1", "yes", "on")
-
 
 def _env_ssl_verify() -> Union[bool, List[str]]:
     """
