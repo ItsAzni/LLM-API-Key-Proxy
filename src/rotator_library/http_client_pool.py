@@ -81,14 +81,12 @@ def _env_ssl_verify() -> Union[bool, List[str]]:
             hosts.append(default_host)
 
     if hosts:
-        hosts = [h.strip() for h in hosts_str.split(",") if h.strip()]
-        if hosts:
-            lib_logger.info(
-                f"SSL certificate verification DISABLED for hosts: {hosts}. "
-                f"These hosts will skip SSL verification."
-            )
-            return hosts
-    
+        lib_logger.info(
+            f"SSL certificate verification DISABLED for hosts: {hosts}. "
+            f"These hosts will skip SSL verification."
+        )
+        return hosts
+
     return True
 
 

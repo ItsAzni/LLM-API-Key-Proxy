@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 import logging
 
 from .utils.provider_locks import ProviderLockManager
+from .config.defaults import (
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+    CIRCUIT_BREAKER_HALF_OPEN_REQUESTS,
+)
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -93,9 +98,9 @@ class ProviderCircuitBreaker:
 
     def __init__(
         self,
-        failure_threshold: int = 3,
-        recovery_timeout: int = 60,
-        half_open_requests: int = 5,  # FIX: Increased from 1 to 5 to handle concurrent requests
+        failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        recovery_timeout: int = CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+        half_open_requests: int = CIRCUIT_BREAKER_HALF_OPEN_REQUESTS,
         provider_overrides: Optional[Dict[str, Dict[str, int]]] = None,
     ):
         """
