@@ -23,6 +23,8 @@ class EmbeddingBatcher:
         while True:
             batch, futures = await self._gather_batch()
             if not batch:
+                # No items arrived during the timeout window — yield to event loop
+                await asyncio.sleep(0)
                 continue
 
             try:
@@ -82,3 +84,12 @@ class EmbeddingBatcher:
             await self.worker_task
         except asyncio.CancelledError:
             pass
+        # Drain any pending futures so callers don't hang forever
+        cancelled_exc = asyncio.CancelledError("EmbeddingBatcher stopped")
+        while not self.queue.empty():
+            try:
+                _, future = self.queue.get_nowait()
+                if not future.done():
+                    future.set_exception(cancelled_exc)
+            except asyncio.QueueEmpty:
+                break

@@ -384,6 +384,9 @@ if ENABLE_RAW_LOGGING:
 PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 
+# Cache OVERRIDE_TEMPERATURE_ZERO at module load time (called on every request otherwise)
+OVERRIDE_TEMP_ZERO = os.getenv("OVERRIDE_TEMPERATURE_ZERO", "false").lower()
+
 # Discover API keys from environment variables
 api_keys = {}
 for key, value in os.environ.items():
@@ -783,10 +786,13 @@ async def streaming_response_wrapper(
     """
     response_chunks = []
     full_response = {}
+    _chunk_count = 0
 
     try:
         async for chunk_str in response_stream:
-            if await request.is_disconnected():
+            _chunk_count += 1
+            # Check disconnection every 20 chunks to avoid per-chunk syscall overhead
+            if _chunk_count % 20 == 0 and await request.is_disconnected():
                 logging.warning("Client disconnected, stopping stream.")
                 break
             yield chunk_str
@@ -966,7 +972,7 @@ async def chat_completions(
         # Low temperature makes models deterministic and prone to following training data
         # instead of actual schemas, which can cause tool hallucination
         # Modes: "remove" = delete temperature key, "set" = change to 1.0, "false" = disabled
-        override_temp_zero = os.getenv("OVERRIDE_TEMPERATURE_ZERO", "false").lower()
+        override_temp_zero = OVERRIDE_TEMP_ZERO
 
         if (
             override_temp_zero in ("remove", "set", "true", "1", "yes")
@@ -1090,11 +1096,14 @@ async def anthropic_messages(
     # Initialize raw I/O logger if enabled (for debugging proxy boundary)
     logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
 
+    # Serialize body once — reused for logging and downstream calls
+    body_data = body.model_dump(exclude_none=True)
+
     # Log raw Anthropic request if raw logging is enabled
     if logger:
         logger.log_request(
             headers=dict(request.headers),
-            body=body.model_dump(exclude_none=True),
+            body=body_data,
         )
 
     try:
@@ -1106,7 +1115,7 @@ async def anthropic_messages(
                 request.client.host if request.client else "unknown",
                 request.client.port if request.client else 0,
             ),
-            request_data=body.model_dump(exclude_none=True),
+            request_data=body_data,
         )
 
         # Use the library method to handle the request
@@ -1243,6 +1252,7 @@ async def embeddings(
     - False: Passes requests directly to the provider.
     """
     try:
+        # Serialize body once — reused for logging and both code paths below
         request_data = body.model_dump(exclude_none=True)
         log_request_to_console(
             url=str(request.url),
@@ -1252,7 +1262,6 @@ async def embeddings(
         )
         if USE_EMBEDDING_BATCHER and batcher:
             # --- Server-Side Batching Logic ---
-            request_data = body.model_dump(exclude_none=True)
             inputs = request_data.get("input", [])
             if isinstance(inputs, str):
                 inputs = [inputs]
@@ -1287,7 +1296,6 @@ async def embeddings(
 
         else:
             # --- Direct Pass-Through Logic ---
-            request_data = body.model_dump(exclude_none=True)
             if isinstance(request_data.get("input"), str):
                 request_data["input"] = [request_data["input"]]
 
@@ -1320,7 +1328,7 @@ async def embeddings(
 
 
 @app.get("/")
-def read_root():
+async def read_root():
     return {"Status": "API Key Proxy is running"}
 
 
