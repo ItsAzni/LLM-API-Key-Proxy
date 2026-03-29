@@ -476,13 +476,14 @@ class ProviderCircuitBreaker:
                 "half_open_active": circuit.half_open_active,
             }
 
+            now = time.time()
             if circuit.last_failure_time:
-                elapsed = time.time() - circuit.last_failure_time
+                elapsed = now - circuit.last_failure_time
                 info["last_failure_elapsed"] = elapsed
                 info["recovery_in"] = max(0, self._recovery_timeout - elapsed)
 
             if circuit.last_success_time:
-                info["last_success_elapsed"] = time.time() - circuit.last_success_time
+                info["last_success_elapsed"] = now - circuit.last_success_time
 
             return info
 

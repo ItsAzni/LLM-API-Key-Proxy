@@ -29,6 +29,7 @@ import struct
 import random
 import json
 import ssl
+import threading
 import time
 import asyncio
 from typing import List, Tuple, Optional, Dict
@@ -59,6 +60,7 @@ _original_getaddrinfo = socket.getaddrinfo
 # =============================================================================
 # Cache structure: hostname -> (list of IPs, expiry timestamp)
 _dns_cache: Dict[str, Tuple[List[str], float]] = {}
+_dns_cache_lock = threading.RLock()
 
 
 def get_dns_cache_ttl() -> int:
@@ -73,21 +75,24 @@ def get_dns_cache_ttl() -> int:
 
 def _get_cached_ips(hostname: str) -> Optional[List[str]]:
     """Get cached IPs if still valid."""
-    if hostname in _dns_cache:
-        ips, expiry = _dns_cache[hostname]
+    with _dns_cache_lock:
+        entry = _dns_cache.get(hostname)
+        if entry is None:
+            return None
+        ips, expiry = entry
         if time.time() < expiry:
             return ips
-        else:
-            # Expired, remove from cache
-            del _dns_cache[hostname]
-    return None
+        # Expired, remove from cache
+        del _dns_cache[hostname]
+        return None
 
 
 def _cache_ips(hostname: str, ips: List[str]) -> None:
     """Cache IPs with TTL."""
     if ips:
         ttl = get_dns_cache_ttl()
-        _dns_cache[hostname] = (ips, time.time() + ttl)
+        with _dns_cache_lock:
+            _dns_cache[hostname] = (ips, time.time() + ttl)
 
 
 def get_dns_query_timeout() -> int:
@@ -132,27 +137,30 @@ async def resolve_dns_async(hostname: str) -> List[str]:
         return ips
     except Exception:
         # Fallback to cached value even if expired
-        if hostname in _dns_cache:
-            return _dns_cache[hostname][0]
+        with _dns_cache_lock:
+            entry = _dns_cache.get(hostname)
+        if entry is not None:
+            return entry[0]
         raise
 
 
 def clear_dns_cache() -> None:
     """Clear all cached DNS entries."""
-    global _dns_cache
-    _dns_cache = {}
+    with _dns_cache_lock:
+        _dns_cache.clear()
 
 
-def get_dns_cache_stats() -> Dict[str, any]:
+def get_dns_cache_stats() -> Dict[str, int]:
     """Get DNS cache statistics."""
-    now = time.time()
-    valid_entries = sum(1 for ips, expiry in _dns_cache.values() if now < expiry)
-    expired_entries = len(_dns_cache) - valid_entries
+    with _dns_cache_lock:
+        now = time.time()
+        snapshot = list(_dns_cache.items())
+    valid_entries = sum(1 for _, (_, expiry) in snapshot if now < expiry)
     return {
-        "total_entries": len(_dns_cache),
+        "total_entries": len(snapshot),
         "valid_entries": valid_entries,
-        "expired_entries": expired_entries,
-        "hostnames": list(_dns_cache.keys()),
+        "expired_entries": len(snapshot) - valid_entries,
+        "hostnames": [h for h, _ in snapshot],
     }
 
 

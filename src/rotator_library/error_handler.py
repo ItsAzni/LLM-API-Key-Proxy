@@ -5,6 +5,7 @@ import re
 import json
 import os
 import logging
+import random
 from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 import httpx
 
@@ -712,6 +713,18 @@ class AllProviders:
         return False
 
 
+# Pre-compiled retry-after patterns for get_retry_after() (module-level, not per-call)
+_RETRY_AFTER_PATTERNS = [
+    re.compile(r"retry[-_\s]after:?\s*(\d+)"),
+    re.compile(r"retry in\s*(\d+)\s*seconds?"),
+    re.compile(r"wait for\s*(\d+)\s*seconds?"),
+    re.compile(r'"retrydelay":\s*"([\d.]+)s?"'),
+    re.compile(r"x-ratelimit-reset:?\s*(\d+)"),
+    re.compile(r"quota will reset after\s*([\dhms.]+)"),
+    re.compile(r"reset after\s*([\dhms.]+)"),
+    re.compile(r'"quotaresetdelay":\s*"([\dhms.]+)"'),
+]
+
 # Singleton instance
 _all_providers_instance: Optional["AllProviders"] = None
 
@@ -880,19 +893,8 @@ def get_retry_after(error: Exception) -> Optional[int]:
     # 2. Common regex patterns for 'retry-after' (with compound duration support)
     # Use lowercase for pattern matching
     error_str_lower = error_str.lower()
-    patterns = [
-        r"retry[-_\s]after:?\s*(\d+)",  # Matches: retry-after, retry_after, retry after
-        r"retry in\s*(\d+)\s*seconds?",
-        r"wait for\s*(\d+)\s*seconds?",
-        r'"retrydelay":\s*"([\d.]+)s?"',  # retryDelay in JSON (lowercased)
-        r"x-ratelimit-reset:?\s*(\d+)",
-        # Compound duration patterns (Antigravity format)
-        r"quota will reset after\s*([\dhms.]+)",  # e.g., "156h14m36s" or "120s"
-        r"reset after\s*([\dhms.]+)",
-        r'"quotaresetdelay":\s*"([\dhms.]+)"',  # quotaResetDelay in JSON (lowercased)
-    ]
 
-    for pattern in patterns:
+    for pattern in _RETRY_AFTER_PATTERNS:
         match = re.search(pattern, error_str_lower)
         if match:
             duration_str = match.group(1)
@@ -1092,8 +1094,6 @@ def get_retry_backoff(
     Returns:
         Backoff time in seconds
     """
-    import random
-
     # If provider specified retry_after, use it
     if classified_error.retry_after:
         return classified_error.retry_after

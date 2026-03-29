@@ -828,7 +828,10 @@ async def streaming_response_wrapper(
         if response_chunks:
             # --- Aggregation Logic ---
             final_message = {"role": "assistant"}
-            aggregated_tool_calls = {}
+            # Use lists for O(n) string building instead of O(n²) repeated concatenation
+            _content_parts: list = []
+            _generic_str_parts: dict = {}  # key -> list of str parts
+            aggregated_tool_calls = {}  # index -> {type, id, function: {name_parts, args_parts}}
             usage_data = None
             finish_reason = None
 
@@ -843,10 +846,8 @@ async def streaming_response_wrapper(
                             continue
 
                         if key == "content":
-                            if "content" not in final_message:
-                                final_message["content"] = ""
                             if value:
-                                final_message["content"] += value
+                                _content_parts.append(value)
 
                         elif key == "tool_calls":
                             for tc_chunk in value:
@@ -854,56 +855,37 @@ async def streaming_response_wrapper(
                                 if index not in aggregated_tool_calls:
                                     aggregated_tool_calls[index] = {
                                         "type": "function",
-                                        "function": {"name": "", "arguments": ""},
+                                        "function": {"name_parts": [], "args_parts": []},
                                     }
-                                # Ensure 'function' key exists for this index before accessing its sub-keys
-                                if "function" not in aggregated_tool_calls[index]:
-                                    aggregated_tool_calls[index]["function"] = {
-                                        "name": "",
-                                        "arguments": "",
-                                    }
+                                tc = aggregated_tool_calls[index]
                                 if tc_chunk.get("id"):
-                                    aggregated_tool_calls[index]["id"] = tc_chunk["id"]
+                                    tc["id"] = tc_chunk["id"]
                                 if "function" in tc_chunk:
-                                    if "name" in tc_chunk["function"]:
-                                        if tc_chunk["function"]["name"] is not None:
-                                            aggregated_tool_calls[index]["function"][
-                                                "name"
-                                            ] += tc_chunk["function"]["name"]
-                                    if "arguments" in tc_chunk["function"]:
-                                        if (
-                                            tc_chunk["function"]["arguments"]
-                                            is not None
-                                        ):
-                                            aggregated_tool_calls[index]["function"][
-                                                "arguments"
-                                            ] += tc_chunk["function"]["arguments"]
+                                    fn = tc_chunk["function"]
+                                    if fn.get("name") is not None:
+                                        tc["function"]["name_parts"].append(fn["name"])
+                                    if fn.get("arguments") is not None:
+                                        tc["function"]["args_parts"].append(fn["arguments"])
 
                         elif key == "function_call":
                             if "function_call" not in final_message:
                                 final_message["function_call"] = {
-                                    "name": "",
-                                    "arguments": "",
+                                    "_name_parts": [],
+                                    "_args_parts": [],
                                 }
-                            if "name" in value:
-                                if value["name"] is not None:
-                                    final_message["function_call"]["name"] += value[
-                                        "name"
-                                    ]
-                            if "arguments" in value:
-                                if value["arguments"] is not None:
-                                    final_message["function_call"][
-                                        "arguments"
-                                    ] += value["arguments"]
+                            if value.get("name") is not None:
+                                final_message["function_call"]["_name_parts"].append(value["name"])
+                            if value.get("arguments") is not None:
+                                final_message["function_call"]["_args_parts"].append(value["arguments"])
 
                         else:  # Generic key handling for other data like 'reasoning'
                             # FIX: Role should always replace, never concatenate
                             if key == "role":
                                 final_message[key] = value
-                            elif key not in final_message:
-                                final_message[key] = value
-                            elif isinstance(final_message.get(key), str):
-                                final_message[key] += value
+                            elif isinstance(value, str):
+                                if key not in _generic_str_parts:
+                                    _generic_str_parts[key] = []
+                                _generic_str_parts[key].append(value)
                             else:
                                 final_message[key] = value
 
@@ -913,12 +895,37 @@ async def streaming_response_wrapper(
                 if "usage" in chunk and chunk["usage"]:
                     usage_data = chunk["usage"]
 
-            # --- Final Response Construction ---
+            # --- Join accumulated string parts ---
+            if _content_parts:
+                final_message["content"] = "".join(_content_parts)
+
+            for key, parts in _generic_str_parts.items():
+                final_message[key] = "".join(parts)
+
+            # Flatten tool_calls: convert name_parts/args_parts to strings
             if aggregated_tool_calls:
-                final_message["tool_calls"] = list(aggregated_tool_calls.values())
+                tool_calls_list = []
+                for tc in aggregated_tool_calls.values():
+                    fn = tc["function"]
+                    tool_calls_list.append({
+                        "id": tc.get("id"),
+                        "type": tc["type"],
+                        "function": {
+                            "name": "".join(fn["name_parts"]),
+                            "arguments": "".join(fn["args_parts"]),
+                        },
+                    })
+                final_message["tool_calls"] = tool_calls_list
                 # CRITICAL FIX: Override finish_reason when tool_calls exist
                 # This ensures OpenCode and other agentic systems continue the conversation loop
                 finish_reason = "tool_calls"
+
+            if "function_call" in final_message:
+                fc = final_message["function_call"]
+                final_message["function_call"] = {
+                    "name": "".join(fc["_name_parts"]),
+                    "arguments": "".join(fc["_args_parts"]),
+                }
 
             # Ensure standard fields are present for consistent logging
             for field in ["content", "tool_calls", "function_call"]:
@@ -1014,7 +1021,7 @@ async def chat_completions(
         # Log basic request info to console (this is a separate, simpler logger).
         log_request_to_console(
             url=str(request.url),
-            headers=dict(request.headers),
+            headers=request.headers,
             client_info=(request.client.host, request.client.port),
             request_data=request_data,
         )
@@ -1110,7 +1117,7 @@ async def anthropic_messages(
         # Log the request to console
         log_request_to_console(
             url=str(request.url),
-            headers=dict(request.headers),
+            headers=request.headers,
             client_info=(
                 request.client.host if request.client else "unknown",
                 request.client.port if request.client else 0,
@@ -1256,7 +1263,7 @@ async def embeddings(
         request_data = body.model_dump(exclude_none=True)
         log_request_to_console(
             url=str(request.url),
-            headers=dict(request.headers),
+            headers=request.headers,
             client_info=(request.client.host, request.client.port),
             request_data=request_data,
         )

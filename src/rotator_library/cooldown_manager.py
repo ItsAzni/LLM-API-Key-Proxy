@@ -49,30 +49,30 @@ class CooldownManager:
 
     async def is_cooling_down(self, credential: str) -> bool:
         """Checks if a credential is currently in a cooldown period."""
-        provider = self._extract_provider(credential)
-        lock = await self._get_provider_lock(provider)
-        async with lock:
-            return credential in self._cooldowns and time.time() < self._cooldowns[credential]
+        # CPython dict reads are GIL-protected; no lock needed for a single lookup.
+        expiry = self._cooldowns.get(credential)
+        return expiry is not None and time.time() < expiry
 
     async def start_cooldown(self, credential: str, duration: int):
         """
         Initiates or extends a cooldown period for a credential.
-        The cooldown is set to the current time plus the specified duration.
+        Sets expiry to max(existing, now + duration) so concurrent 429s
+        with different durations always keep the longest cooldown.
         """
         provider = self._extract_provider(credential)
         lock = await self._get_provider_lock(provider)
         async with lock:
-            self._cooldowns[credential] = time.time() + duration
+            new_expiry = time.time() + duration
+            existing = self._cooldowns.get(credential, 0)
+            self._cooldowns[credential] = max(existing, new_expiry)
 
     async def get_cooldown_remaining(self, credential: str) -> float:
         """
         Returns the remaining cooldown time in seconds for a credential.
         Returns 0 if the credential is not in a cooldown period.
         """
-        provider = self._extract_provider(credential)
-        lock = await self._get_provider_lock(provider)
-        async with lock:
-            if credential in self._cooldowns:
-                remaining = self._cooldowns[credential] - time.time()
-                return max(0, remaining)
+        # Single dict read — no lock needed in CPython asyncio context.
+        expiry = self._cooldowns.get(credential)
+        if expiry is None:
             return 0
+        return max(0.0, expiry - time.time())

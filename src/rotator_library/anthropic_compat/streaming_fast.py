@@ -493,7 +493,7 @@ async def anthropic_streaming_wrapper_fast(
         event_str = _make_message_stop_event()
         if event := batcher.add(event_str):
             yield event
-        
+
         # Flush any remaining events
         if remaining := batcher.flush():
             yield remaining
@@ -504,17 +504,6 @@ async def anthropic_streaming_wrapper_fast(
             "error": {"type": "api_error", "message": str(e)},
         }
         yield f"event: error\ndata: {json_dumps(error_event)}\n\n"
-        
-        # Memory cleanup after error
-        del accumulated_text
-        del accumulated_thinking
-    
-    finally:
-        # Memory cleanup after successful completion
-        if 'accumulated_text' in locals():
-            del accumulated_text
-        if 'accumulated_thinking' in locals():
-            del accumulated_thinking
 
 
 def _log_anthropic_response(

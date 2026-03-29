@@ -15,8 +15,9 @@ Key optimizations:
 import asyncio
 import logging
 import os
+import ssl
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 
 # Disable aiodns before any aiohttp import to fix DNS resolution issues
@@ -45,6 +46,13 @@ DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
 DEFAULT_HTTP2_ENABLED = True  # HTTP/2 enabled by default
 DEFAULT_DNS_RESOLVER = None  # Custom DNS resolver (e.g., "8.8.8.8")
 DEFAULT_DNS_PORT = 53  # Default DNS port
+
+# Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
+# Some Azure endpoints reject TLS 1.3 cipher suites; this list prefers TLS 1.2 suites
+AZURE_COMPATIBLE_CIPHERS = (
+    "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:"
+    "ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS"
+)
 
 def _env_ssl_verify() -> Union[bool, List[str]]:
     """
@@ -275,19 +283,10 @@ class HttpClientPool:
         )
 
         # Create SSL context with TLS 1.2 for compatibility with servers that don't support TLS 1.3
-        import ssl
         ssl_context = ssl.create_default_context()
         ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2  # Allow TLS 1.2 and 1.3 for Azure compatibility
 
         # Set Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
-        AZURE_COMPATIBLE_CIPHERS = (
-            "ECDHE-RSA-AES256-GCM-SHA384:"
-            "ECDHE-RSA-AES128-GCM-SHA256:"
-            "ECDHE-ECDSA-AES256-GCM-SHA384:"
-            "ECDHE-ECDSA-AES128-GCM-SHA256:"
-            "AES256-GCM-SHA384:"
-            "AES128-GCM-SHA256"
-        )
         try:
             ssl_context.set_ciphers(AZURE_COMPATIBLE_CIPHERS)
         except ssl.SSLError:
@@ -599,7 +598,7 @@ class HttpClientPool:
 
         lib_logger.debug(f"HTTP client error recorded: {error_type} - {message}")
 
-    def get_stats(self) -> Dict[str, any]:
+    def get_stats(self) -> Dict[str, Any]:
         """Get client pool statistics."""
         return {
             **self._stats,
@@ -617,7 +616,7 @@ class HttpClientPool:
             },
         }
 
-    async def health_check(self) -> Dict[str, any]:
+    async def health_check(self) -> Dict[str, Any]:
         """
         Perform a health check on the client pool.
 
