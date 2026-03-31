@@ -194,6 +194,19 @@ DNS_QUERY_TIMEOUT: int = int(os.getenv("DNS_QUERY_TIMEOUT", "10"))
 HTTP_DOH_TIMEOUT: int = int(os.getenv("HTTP_DOH_TIMEOUT", "5"))
 
 # =============================================================================
+# HTTP COMPRESSION DEFAULTS
+# =============================================================================
+# Gzip compression for outgoing requests to bypass WAF payload size limits.
+
+# Minimum request body size in bytes to trigger gzip compression
+# Override: HTTP_COMPRESS_MIN_SIZE=<bytes>
+HTTP_COMPRESS_MIN_SIZE: int = int(os.getenv("HTTP_COMPRESS_MIN_SIZE", "10240"))
+
+# Enable gzip compression for outgoing requests
+# Override: HTTP_COMPRESS_REQUESTS=true/false
+HTTP_COMPRESS_REQUESTS: bool = os.getenv("HTTP_COMPRESS_REQUESTS", "true").lower() == "true"
+
+# =============================================================================
 # OAUTH USER FLOW TIMEOUT DEFAULTS
 # =============================================================================
 

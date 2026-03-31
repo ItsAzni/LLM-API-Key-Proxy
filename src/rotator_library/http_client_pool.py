@@ -13,12 +13,15 @@ Key optimizations:
 """
 
 import asyncio
+import gzip
 import logging
 import os
 import ssl
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
+
+from .config.defaults import HTTP_COMPRESS_MIN_SIZE, HTTP_COMPRESS_REQUESTS
 
 # Disable aiodns before any aiohttp import to fix DNS resolution issues
 # This must be set before aiohttp is imported anywhere in the process
@@ -56,6 +59,42 @@ AZURE_COMPATIBLE_CIPHERS = (
     "ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS"
 )
 
+
+class GzipRequestTransport(httpx.AsyncHTTPTransport):
+    """
+    Custom HTTP transport that compresses large request bodies with gzip.
+
+    This bypasses WAF payload size limits on providers like zenllm.org
+    that block requests >100KB by compressing the body before sending.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._compress_min_size = HTTP_COMPRESS_MIN_SIZE
+        self._compress_enabled = HTTP_COMPRESS_REQUESTS
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Compress request body if eligible before sending."""
+        if self._compress_enabled and request.content:
+            content_len = len(request.content)
+
+            if content_len >= self._compress_min_size:
+                content_type = request.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    if "content-encoding" not in [k.lower() for k in request.headers.keys()]:
+                        compressed = gzip.compress(request.content)
+
+                        if len(compressed) < content_len * 0.9:
+                            request.content = compressed
+                            request.headers["content-encoding"] = "gzip"
+                            request.headers["content-length"] = str(len(compressed))
+
+                            lib_logger.debug(
+                                f"Gzip compressed: {content_len} -> {len(compressed)} bytes "
+                                f"({100 * (1 - len(compressed) / content_len):.1f}% reduction)"
+                            )
+
+        return await super().handle_async_request(request)
 
 def _env_ssl_verify() -> Union[bool, List[str]]:
     """
@@ -310,6 +349,14 @@ class HttpClientPool:
             "http1": True,
             "verify": ssl_context,
         }
+
+        # Use GzipRequestTransport for request body compression
+        if HTTP_COMPRESS_REQUESTS:
+            client_kwargs["transport"] = GzipRequestTransport(
+                verify=ssl_context,
+                limits=self._create_limits(),
+                http2=self._http2_enabled,
+            )
 
         # Configure custom DNS resolver if specified
         # This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus
