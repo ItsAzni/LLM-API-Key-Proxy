@@ -20,6 +20,7 @@ All models share a daily/monthly usage pool at the credential level.
 
 import asyncio
 import httpx
+from ..http_client_pool import get_http_pool
 import os
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -444,8 +445,9 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                     )
 
         # Fetch all credentials in parallel using a shared client
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            tasks = [
-                refresh_single_credential(api_key, client) for api_key in credentials
-            ]
-            await asyncio.gather(*tasks, return_exceptions=True)
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        tasks = [
+            refresh_single_credential(api_key, client) for api_key in credentials
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)

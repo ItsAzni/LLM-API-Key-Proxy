@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, List
 
 import httpx
 
+from ..http_client_pool import get_http_pool
 from .google_oauth_base import GoogleOAuthBase
 # Note: Endpoint constants are imported by helper methods from gemini_shared_utils
 
@@ -360,362 +361,364 @@ class AntigravityAuthBase(GoogleOAuthBase):
         discovered_project_id = None
         discovered_tier = None
 
-        async with httpx.AsyncClient() as client:
-            # 1. Try discovery endpoint with loadCodeAssist using endpoint fallback
-            lib_logger.debug(
-                "Attempting project discovery via Code Assist loadCodeAssist endpoint..."
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        # 1. Try discovery endpoint with loadCodeAssist using endpoint fallback
+        lib_logger.debug(
+            "Attempting project discovery via Code Assist loadCodeAssist endpoint..."
+        )
+        try:
+            # Use helper with endpoint fallback chain
+            data, successful_endpoint = await self._call_load_code_assist(
+                client, access_token, configured_project_id, headers
             )
-            try:
-                # Use helper with endpoint fallback chain
-                data, successful_endpoint = await self._call_load_code_assist(
-                    client, access_token, configured_project_id, headers
+
+            if data is None:
+                # All endpoints failed - skip to GCP Resource Manager fallback
+                raise httpx.HTTPStatusError(
+                    "All loadCodeAssist endpoints failed",
+                    request=None,
+                    response=None,
                 )
 
-                if data is None:
-                    # All endpoints failed - skip to GCP Resource Manager fallback
-                    raise httpx.HTTPStatusError(
-                        "All loadCodeAssist endpoints failed",
-                        request=None,
-                        response=None,
-                    )
+            lib_logger.debug(
+                f"loadCodeAssist succeeded at {successful_endpoint}, response keys: {list(data.keys())}"
+            )
 
+            # Extract tier information
+            allowed_tiers = data.get("allowedTiers", [])
+            current_tier = data.get("currentTier")
+
+            lib_logger.debug(f"=== Tier Information ===")
+            lib_logger.debug(f"currentTier: {current_tier}")
+            lib_logger.debug(f"allowedTiers count: {len(allowed_tiers)}")
+            for i, tier in enumerate(allowed_tiers):
+                tier_id = tier.get("id", "unknown")
+                is_default = tier.get("isDefault", False)
+                user_defined = tier.get("userDefinedCloudaicompanionProject", False)
                 lib_logger.debug(
-                    f"loadCodeAssist succeeded at {successful_endpoint}, response keys: {list(data.keys())}"
+                    f"  Tier {i + 1}: id={tier_id}, isDefault={is_default}, userDefinedProject={user_defined}"
                 )
+            lib_logger.debug(f"========================")
 
-                # Extract tier information
-                allowed_tiers = data.get("allowedTiers", [])
-                current_tier = data.get("currentTier")
+            # Determine the current tier ID
+            current_tier_id = None
+            if current_tier:
+                current_tier_id = current_tier.get("id")
+                lib_logger.debug(f"User has currentTier: {current_tier_id}")
 
-                lib_logger.debug(f"=== Tier Information ===")
-                lib_logger.debug(f"currentTier: {current_tier}")
-                lib_logger.debug(f"allowedTiers count: {len(allowed_tiers)}")
-                for i, tier in enumerate(allowed_tiers):
-                    tier_id = tier.get("id", "unknown")
-                    is_default = tier.get("isDefault", False)
-                    user_defined = tier.get("userDefinedCloudaicompanionProject", False)
+            # Check if user is already known to server (has currentTier)
+            if current_tier_id:
+                # User is already onboarded - check for project from server
+                # Use helper to handle both string and object formats
+                server_project = self._extract_project_id_from_response(data)
+
+                # Check if this tier requires user-defined project (paid tiers)
+                requires_user_project = any(
+                    t.get("id") == current_tier_id
+                    and t.get("userDefinedCloudaicompanionProject", False)
+                    for t in allowed_tiers
+                )
+                is_free_tier = current_tier_id == "free-tier"
+
+                if server_project:
+                    # Server returned a project - use it (server wins)
+                    project_id = server_project
+                    lib_logger.debug(f"Server returned project: {project_id}")
+                elif configured_project_id:
+                    # No server project but we have configured one - use it
+                    project_id = configured_project_id
                     lib_logger.debug(
-                        f"  Tier {i + 1}: id={tier_id}, isDefault={is_default}, userDefinedProject={user_defined}"
+                        f"No server project, using configured: {project_id}"
                     )
-                lib_logger.debug(f"========================")
-
-                # Determine the current tier ID
-                current_tier_id = None
-                if current_tier:
-                    current_tier_id = current_tier.get("id")
-                    lib_logger.debug(f"User has currentTier: {current_tier_id}")
-
-                # Check if user is already known to server (has currentTier)
-                if current_tier_id:
-                    # User is already onboarded - check for project from server
-                    # Use helper to handle both string and object formats
-                    server_project = self._extract_project_id_from_response(data)
-
-                    # Check if this tier requires user-defined project (paid tiers)
-                    requires_user_project = any(
-                        t.get("id") == current_tier_id
-                        and t.get("userDefinedCloudaicompanionProject", False)
-                        for t in allowed_tiers
-                    )
-                    is_free_tier = current_tier_id == "free-tier"
-
-                    if server_project:
-                        # Server returned a project - use it (server wins)
-                        project_id = server_project
-                        lib_logger.debug(f"Server returned project: {project_id}")
-                    elif configured_project_id:
-                        # No server project but we have configured one - use it
-                        project_id = configured_project_id
-                        lib_logger.debug(
-                            f"No server project, using configured: {project_id}"
-                        )
-                    elif is_free_tier:
-                        # Free tier user without server project - try onboarding
-                        lib_logger.debug(
-                            "Free tier user with currentTier but no project - will try onboarding"
-                        )
-                        project_id = None
-                    elif requires_user_project:
-                        # Paid tier requires a project ID to be set
-                        raise ValueError(
-                            f"Paid tier '{current_tier_id}' requires setting ANTIGRAVITY_PROJECT_ID environment variable."
-                        )
-                    else:
-                        # Unknown tier without project - proceed to onboarding
-                        lib_logger.warning(
-                            f"Tier '{current_tier_id}' has no project and none configured - will try onboarding"
-                        )
-                        project_id = None
-
-                    if project_id:
-                        # Cache tier info
-                        self.project_tier_cache[credential_path] = current_tier_id
-                        discovered_tier = current_tier_id
-
-                        # Log appropriately based on tier
-                        is_paid = current_tier_id and current_tier_id not in [
-                            "free-tier",
-                            "legacy-tier",
-                            "unknown",
-                        ]
-                        if is_paid:
-                            lib_logger.info(
-                                f"Using Antigravity paid tier '{current_tier_id}' with project: {project_id}"
-                            )
-                        else:
-                            lib_logger.info(
-                                f"Discovered Antigravity project ID via loadCodeAssist: {project_id}"
-                            )
-
-                        self.project_id_cache[credential_path] = project_id
-                        discovered_project_id = project_id
-
-                        # Persist to credential file
-                        await self._persist_project_metadata(
-                            credential_path, project_id, discovered_tier
-                        )
-
-                        return project_id
-
-                # 2. User needs onboarding - no currentTier or no project found
-                lib_logger.info(
-                    "No existing Antigravity session found (no currentTier), attempting to onboard user..."
-                )
-
-                # Determine which tier to onboard with
-                onboard_tier = None
-                for tier in allowed_tiers:
-                    if tier.get("isDefault"):
-                        onboard_tier = tier
-                        break
-
-                # Fallback to legacy tier if no default
-                if not onboard_tier and allowed_tiers:
-                    for tier in allowed_tiers:
-                        if tier.get("id") == "legacy-tier":
-                            onboard_tier = tier
-                            break
-                    if not onboard_tier:
-                        onboard_tier = allowed_tiers[0]
-
-                if not onboard_tier:
-                    raise ValueError("No onboarding tiers available from server")
-
-                tier_id = onboard_tier.get("id", "free-tier")
-                requires_user_project = onboard_tier.get(
-                    "userDefinedCloudaicompanionProject", False
-                )
-
-                lib_logger.debug(
-                    f"Onboarding with tier: {tier_id}, requiresUserProject: {requires_user_project}"
-                )
-
-                # Build onboard request based on tier type
-                # FREE tier: cloudaicompanionProject = None (server-managed)
-                # PAID tier: cloudaicompanionProject = configured_project_id
-                is_free_tier = tier_id == "free-tier"
-
-                if is_free_tier:
-                    # Free tier uses server-managed project
-                    onboard_request = {
-                        "tierId": tier_id,
-                        "cloudaicompanionProject": None,  # Server will create/manage
-                        "metadata": core_client_metadata,
-                    }
+                elif is_free_tier:
+                    # Free tier user without server project - try onboarding
                     lib_logger.debug(
-                        "Free tier onboarding: using server-managed project"
+                        "Free tier user with currentTier but no project - will try onboarding"
+                    )
+                    project_id = None
+                elif requires_user_project:
+                    # Paid tier requires a project ID to be set
+                    raise ValueError(
+                        f"Paid tier '{current_tier_id}' requires setting ANTIGRAVITY_PROJECT_ID environment variable."
                     )
                 else:
-                    # Paid/legacy tier requires user-provided project
-                    if not configured_project_id and requires_user_project:
-                        raise ValueError(
-                            f"Tier '{tier_id}' requires setting ANTIGRAVITY_PROJECT_ID environment variable."
+                    # Unknown tier without project - proceed to onboarding
+                    lib_logger.warning(
+                        f"Tier '{current_tier_id}' has no project and none configured - will try onboarding"
+                    )
+                    project_id = None
+
+                if project_id:
+                    # Cache tier info
+                    self.project_tier_cache[credential_path] = current_tier_id
+                    discovered_tier = current_tier_id
+
+                    # Log appropriately based on tier
+                    is_paid = current_tier_id and current_tier_id not in [
+                        "free-tier",
+                        "legacy-tier",
+                        "unknown",
+                    ]
+                    if is_paid:
+                        lib_logger.info(
+                            f"Using Antigravity paid tier '{current_tier_id}' with project: {project_id}"
                         )
-                    onboard_request = {
-                        "tierId": tier_id,
-                        "cloudaicompanionProject": configured_project_id,
-                        "metadata": {
-                            **core_client_metadata,
-                            "duetProject": configured_project_id,
-                        }
-                        if configured_project_id
-                        else core_client_metadata,
-                    }
-                    lib_logger.debug(
-                        f"Paid tier onboarding: using project {configured_project_id}"
+                    else:
+                        lib_logger.info(
+                            f"Discovered Antigravity project ID via loadCodeAssist: {project_id}"
+                        )
+
+                    self.project_id_cache[credential_path] = project_id
+                    discovered_project_id = project_id
+
+                    # Persist to credential file
+                    await self._persist_project_metadata(
+                        credential_path, project_id, discovered_tier
                     )
 
+                    return project_id
+
+            # 2. User needs onboarding - no currentTier or no project found
+            lib_logger.info(
+                "No existing Antigravity session found (no currentTier), attempting to onboard user..."
+            )
+
+            # Determine which tier to onboard with
+            onboard_tier = None
+            for tier in allowed_tiers:
+                if tier.get("isDefault"):
+                    onboard_tier = tier
+                    break
+
+            # Fallback to legacy tier if no default
+            if not onboard_tier and allowed_tiers:
+                for tier in allowed_tiers:
+                    if tier.get("id") == "legacy-tier":
+                        onboard_tier = tier
+                        break
+                if not onboard_tier:
+                    onboard_tier = allowed_tiers[0]
+
+            if not onboard_tier:
+                raise ValueError("No onboarding tiers available from server")
+
+            tier_id = onboard_tier.get("id", "free-tier")
+            requires_user_project = onboard_tier.get(
+                "userDefinedCloudaicompanionProject", False
+            )
+
+            lib_logger.debug(
+                f"Onboarding with tier: {tier_id}, requiresUserProject: {requires_user_project}"
+            )
+
+            # Build onboard request based on tier type
+            # FREE tier: cloudaicompanionProject = None (server-managed)
+            # PAID tier: cloudaicompanionProject = configured_project_id
+            is_free_tier = tier_id == "free-tier"
+
+            if is_free_tier:
+                # Free tier uses server-managed project
+                onboard_request = {
+                    "tierId": tier_id,
+                    "cloudaicompanionProject": None,  # Server will create/manage
+                    "metadata": core_client_metadata,
+                }
                 lib_logger.debug(
-                    "Initiating onboardUser request with endpoint fallback..."
+                    "Free tier onboarding: using server-managed project"
+                )
+            else:
+                # Paid/legacy tier requires user-provided project
+                if not configured_project_id and requires_user_project:
+                    raise ValueError(
+                        f"Tier '{tier_id}' requires setting ANTIGRAVITY_PROJECT_ID environment variable."
+                    )
+                onboard_request = {
+                    "tierId": tier_id,
+                    "cloudaicompanionProject": configured_project_id,
+                    "metadata": {
+                        **core_client_metadata,
+                        "duetProject": configured_project_id,
+                    }
+                    if configured_project_id
+                    else core_client_metadata,
+                }
+                lib_logger.debug(
+                    f"Paid tier onboarding: using project {configured_project_id}"
+                )
+
+            lib_logger.debug(
+                "Initiating onboardUser request with endpoint fallback..."
+            )
+            lro_data = await self._call_onboard_user(
+                client, headers, onboard_request
+            )
+
+            if lro_data is None:
+                raise ValueError(
+                    "All onboardUser endpoints failed. Cannot onboard user."
+                )
+
+            lib_logger.debug(
+                f"Initial onboarding response: done={lro_data.get('done')}"
+            )
+
+            # Poll for onboarding completion (up to 60 seconds)
+            for i in range(30):  # 30 × 2s = 60 seconds
+                if lro_data.get("done"):
+                    lib_logger.debug(f"Onboarding completed after {i * 2}s")
+                    break
+                await asyncio.sleep(2)
+                if (i + 1) % 10 == 0:  # Log every 20 seconds
+                    lib_logger.info(
+                        f"Still waiting for onboarding completion... ({(i + 1) * 2}s elapsed)"
+                    )
+                lib_logger.debug(
+                    f"Polling onboarding status... (Attempt {i + 1}/30)"
                 )
                 lro_data = await self._call_onboard_user(
                     client, headers, onboard_request
                 )
-
                 if lro_data is None:
-                    raise ValueError(
-                        "All onboardUser endpoints failed. Cannot onboard user."
-                    )
+                    lib_logger.warning("onboardUser endpoint failed during polling")
+                    break
 
+            if not lro_data or not lro_data.get("done"):
+                lib_logger.error("Onboarding process timed out after 60 seconds")
+                raise ValueError(
+                    "Onboarding process timed out after 60 seconds. Please try again or contact support."
+                )
+
+            # Extract project ID from LRO response using helper
+            # Note: onboardUser returns response.cloudaicompanionProject as an object with .id
+            lro_response_data = lro_data.get("response", {})
+            project_id = self._extract_project_id_from_response(lro_response_data)
+
+            # Fallback to configured project if LRO didn't return one
+            if not project_id and configured_project_id:
+                project_id = configured_project_id
                 lib_logger.debug(
-                    f"Initial onboarding response: done={lro_data.get('done')}"
+                    f"LRO didn't return project, using configured: {project_id}"
                 )
 
-                # Poll for onboarding completion (up to 60 seconds)
-                for i in range(30):  # 30 × 2s = 60 seconds
-                    if lro_data.get("done"):
-                        lib_logger.debug(f"Onboarding completed after {i * 2}s")
-                        break
-                    await asyncio.sleep(2)
-                    if (i + 1) % 10 == 0:  # Log every 20 seconds
-                        lib_logger.info(
-                            f"Still waiting for onboarding completion... ({(i + 1) * 2}s elapsed)"
-                        )
-                    lib_logger.debug(
-                        f"Polling onboarding status... (Attempt {i + 1}/30)"
-                    )
-                    lro_data = await self._call_onboard_user(
-                        client, headers, onboard_request
-                    )
-                    if lro_data is None:
-                        lib_logger.warning("onboardUser endpoint failed during polling")
-                        break
-
-                if not lro_data or not lro_data.get("done"):
-                    lib_logger.error("Onboarding process timed out after 60 seconds")
-                    raise ValueError(
-                        "Onboarding process timed out after 60 seconds. Please try again or contact support."
-                    )
-
-                # Extract project ID from LRO response using helper
-                # Note: onboardUser returns response.cloudaicompanionProject as an object with .id
-                lro_response_data = lro_data.get("response", {})
-                project_id = self._extract_project_id_from_response(lro_response_data)
-
-                # Fallback to configured project if LRO didn't return one
-                if not project_id and configured_project_id:
-                    project_id = configured_project_id
-                    lib_logger.debug(
-                        f"LRO didn't return project, using configured: {project_id}"
-                    )
-
-                if not project_id:
-                    lib_logger.error(
-                        "Onboarding completed but no project ID in response and none configured"
-                    )
-                    raise ValueError(
-                        "Onboarding completed, but no project ID was returned. "
-                        "For paid tiers, set ANTIGRAVITY_PROJECT_ID environment variable."
-                    )
-
-                lib_logger.debug(
-                    f"Successfully extracted project ID from onboarding response: {project_id}"
+            if not project_id:
+                lib_logger.error(
+                    "Onboarding completed but no project ID in response and none configured"
+                )
+                raise ValueError(
+                    "Onboarding completed, but no project ID was returned. "
+                    "For paid tiers, set ANTIGRAVITY_PROJECT_ID environment variable."
                 )
 
-                # Cache tier info
-                self.project_tier_cache[credential_path] = tier_id
-                discovered_tier = tier_id
-                lib_logger.debug(f"Cached tier information: {tier_id}")
+            lib_logger.debug(
+                f"Successfully extracted project ID from onboarding response: {project_id}"
+            )
 
-                # Log concise message based on tier
-                is_paid = tier_id and tier_id not in ["free-tier", "legacy-tier"]
-                if is_paid:
-                    lib_logger.info(
-                        f"Using Antigravity paid tier '{tier_id}' with project: {project_id}"
-                    )
-                else:
-                    lib_logger.info(
-                        f"Successfully onboarded user and discovered project ID: {project_id}"
-                    )
+            # Cache tier info
+            self.project_tier_cache[credential_path] = tier_id
+            discovered_tier = tier_id
+            lib_logger.debug(f"Cached tier information: {tier_id}")
 
-                self.project_id_cache[credential_path] = project_id
-                discovered_project_id = project_id
-
-                # Persist to credential file
-                await self._persist_project_metadata(
-                    credential_path, project_id, discovered_tier
+            # Log concise message based on tier
+            is_paid = tier_id and tier_id not in ["free-tier", "legacy-tier"]
+            if is_paid:
+                lib_logger.info(
+                    f"Using Antigravity paid tier '{tier_id}' with project: {project_id}"
+                )
+            else:
+                lib_logger.info(
+                    f"Successfully onboarded user and discovered project ID: {project_id}"
                 )
 
-                return project_id
+            self.project_id_cache[credential_path] = project_id
+            discovered_project_id = project_id
 
-            except httpx.HTTPStatusError as e:
-                error_body = ""
-                try:
-                    error_body = e.response.text
-                except Exception:
-                    pass
-                if e.response.status_code == 403:
-                    lib_logger.error(
-                        f"Antigravity Code Assist API access denied (403). Response: {error_body}"
-                    )
-                    lib_logger.error(
-                        "Possible causes: 1) cloudaicompanion.googleapis.com API not enabled, 2) Wrong project ID for paid tier, 3) Account lacks permissions"
-                    )
-                elif e.response.status_code == 404:
-                    lib_logger.warning(
-                        f"Antigravity Code Assist endpoint not found (404). Falling back to project listing."
-                    )
-                elif e.response.status_code == 412:
-                    # Precondition Failed - often means wrong project for free tier onboarding
-                    lib_logger.error(
-                        f"Precondition failed (412): {error_body}. This may mean the project ID is incompatible with the selected tier."
-                    )
-                else:
-                    lib_logger.warning(
-                        f"Antigravity onboarding/discovery failed with status {e.response.status_code}: {error_body}. Falling back to project listing."
-                    )
-            except httpx.RequestError as e:
+            # Persist to credential file
+            await self._persist_project_metadata(
+                credential_path, project_id, discovered_tier
+            )
+
+            return project_id
+
+        except httpx.HTTPStatusError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
+            if e.response.status_code == 403:
+                lib_logger.error(
+                    f"Antigravity Code Assist API access denied (403). Response: {error_body}"
+                )
+                lib_logger.error(
+                    "Possible causes: 1) cloudaicompanion.googleapis.com API not enabled, 2) Wrong project ID for paid tier, 3) Account lacks permissions"
+                )
+            elif e.response.status_code == 404:
                 lib_logger.warning(
-                    f"Antigravity onboarding/discovery network error: {e}. Falling back to project listing."
+                    f"Antigravity Code Assist endpoint not found (404). Falling back to project listing."
                 )
+            elif e.response.status_code == 412:
+                # Precondition Failed - often means wrong project for free tier onboarding
+                lib_logger.error(
+                    f"Precondition failed (412): {error_body}. This may mean the project ID is incompatible with the selected tier."
+                )
+            else:
+                lib_logger.warning(
+                    f"Antigravity onboarding/discovery failed with status {e.response.status_code}: {error_body}. Falling back to project listing."
+                )
+        except httpx.RequestError as e:
+            lib_logger.warning(
+                f"Antigravity onboarding/discovery network error: {e}. Falling back to project listing."
+            )
 
         # 3. Fallback to listing all available GCP projects (last resort)
         lib_logger.debug(
             "Attempting to discover project via GCP Resource Manager API..."
         )
         try:
-            async with httpx.AsyncClient() as client:
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            lib_logger.debug(
+                "Querying Cloud Resource Manager for available projects..."
+            )
+            response = await client.get(
+                "https://cloudresourcemanager.googleapis.com/v1/projects",
+                headers=headers,
+                timeout=20,
+            )
+            response.raise_for_status()
+            projects = response.json().get("projects", [])
+            lib_logger.debug(f"Found {len(projects)} total projects")
+            active_projects = [
+                p for p in projects if p.get("lifecycleState") == "ACTIVE"
+            ]
+            lib_logger.debug(f"Found {len(active_projects)} active projects")
+
+            if not projects:
+                lib_logger.error(
+                    "No GCP projects found for this account. Please create a project in Google Cloud Console."
+                )
+            elif not active_projects:
+                lib_logger.error(
+                    "No active GCP projects found. Please activate a project in Google Cloud Console."
+                )
+            else:
+                project_id = active_projects[0]["projectId"]
+                lib_logger.info(
+                    f"Discovered Antigravity project ID from active projects list: {project_id}"
+                )
                 lib_logger.debug(
-                    "Querying Cloud Resource Manager for available projects..."
+                    f"Selected first active project: {project_id} (out of {len(active_projects)} active projects)"
                 )
-                response = await client.get(
-                    "https://cloudresourcemanager.googleapis.com/v1/projects",
-                    headers=headers,
-                    timeout=20,
+                self.project_id_cache[credential_path] = project_id
+                discovered_project_id = project_id
+
+                # Persist to credential file (no tier info from resource manager)
+                await self._persist_project_metadata(
+                    credential_path, project_id, None
                 )
-                response.raise_for_status()
-                projects = response.json().get("projects", [])
-                lib_logger.debug(f"Found {len(projects)} total projects")
-                active_projects = [
-                    p for p in projects if p.get("lifecycleState") == "ACTIVE"
-                ]
-                lib_logger.debug(f"Found {len(active_projects)} active projects")
 
-                if not projects:
-                    lib_logger.error(
-                        "No GCP projects found for this account. Please create a project in Google Cloud Console."
-                    )
-                elif not active_projects:
-                    lib_logger.error(
-                        "No active GCP projects found. Please activate a project in Google Cloud Console."
-                    )
-                else:
-                    project_id = active_projects[0]["projectId"]
-                    lib_logger.info(
-                        f"Discovered Antigravity project ID from active projects list: {project_id}"
-                    )
-                    lib_logger.debug(
-                        f"Selected first active project: {project_id} (out of {len(active_projects)} active projects)"
-                    )
-                    self.project_id_cache[credential_path] = project_id
-                    discovered_project_id = project_id
-
-                    # Persist to credential file (no tier info from resource manager)
-                    await self._persist_project_metadata(
-                        credential_path, project_id, None
-                    )
-
-                    return project_id
+                return project_id
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 lib_logger.error(

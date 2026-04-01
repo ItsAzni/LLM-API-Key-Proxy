@@ -20,6 +20,8 @@ from typing import Dict, Any, Tuple, Union, Optional, List
 from urllib.parse import urlencode, parse_qs, urlparse
 
 import httpx
+
+from ..http_client_pool import get_http_pool
 from aiohttp import web
 from rich.console import Console
 from rich.panel import Panel
@@ -430,10 +432,11 @@ class IFlowAuthBase(BaseTokenManager):
         url = f"{IFLOW_USER_INFO_ENDPOINT}?accessToken={access_token}"
         headers = {"Accept": "application/json"}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            result = response.json()
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
 
         if not result.get("success"):
             raise ValueError("iFlow user info request not successful")
@@ -476,21 +479,22 @@ class IFlowAuthBase(BaseTokenManager):
             "client_secret": IFLOW_CLIENT_SECRET,
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                IFLOW_OAUTH_TOKEN_ENDPOINT, headers=headers, data=data
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        response = await client.post(
+            IFLOW_OAUTH_TOKEN_ENDPOINT, headers=headers, data=data
+        )
+
+        if response.status_code != 200:
+            error_text = response.text
+            lib_logger.error(
+                f"iFlow token exchange failed: {response.status_code} {error_text}"
+            )
+            raise ValueError(
+                f"Token exchange failed: {response.status_code} {error_text}"
             )
 
-            if response.status_code != 200:
-                error_text = response.text
-                lib_logger.error(
-                    f"iFlow token exchange failed: {response.status_code} {error_text}"
-                )
-                raise ValueError(
-                    f"Token exchange failed: {response.status_code} {error_text}"
-                )
-
-            token_data = response.json()
+        token_data = response.json()
 
         access_token = token_data.get("access_token")
         if not access_token:
@@ -565,132 +569,133 @@ class IFlowAuthBase(BaseTokenManager):
                 "client_secret": IFLOW_CLIENT_SECRET,
             }
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                for attempt in range(max_retries):
-                    try:
-                        response = await client.post(
-                            IFLOW_OAUTH_TOKEN_ENDPOINT, headers=headers, data=data
-                        )
-                        response.raise_for_status()
-                        new_token_data = response.json()
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        IFLOW_OAUTH_TOKEN_ENDPOINT, headers=headers, data=data
+                    )
+                    response.raise_for_status()
+                    new_token_data = response.json()
 
-                        # [FIX] Handle wrapped response format: {success: bool, data: {...}}
-                        # iFlow API may return tokens nested inside a 'data' key
-                        if (
-                            isinstance(new_token_data, dict)
-                            and "data" in new_token_data
-                        ):
-                            lib_logger.debug(
-                                f"iFlow refresh response wrapped in 'data' key, extracting..."
+                    # [FIX] Handle wrapped response format: {success: bool, data: {...}}
+                    # iFlow API may return tokens nested inside a 'data' key
+                    if (
+                        isinstance(new_token_data, dict)
+                        and "data" in new_token_data
+                    ):
+                        lib_logger.debug(
+                            f"iFlow refresh response wrapped in 'data' key, extracting..."
+                        )
+                        # Check for error in wrapped response
+                        if not new_token_data.get("success", True):
+                            error_msg = new_token_data.get(
+                                "message", "Unknown error"
                             )
-                            # Check for error in wrapped response
-                            if not new_token_data.get("success", True):
-                                error_msg = new_token_data.get(
-                                    "message", "Unknown error"
-                                )
-                                raise ValueError(
-                                    f"iFlow token refresh failed: {error_msg}"
-                                )
-                            new_token_data = new_token_data.get("data", {})
+                            raise ValueError(
+                                f"iFlow token refresh failed: {error_msg}"
+                            )
+                        new_token_data = new_token_data.get("data", {})
 
-                        break  # Success
+                    break  # Success
 
-                    except httpx.HTTPStatusError as e:
-                        last_error = e
-                        status_code = e.response.status_code
-                        error_body = e.response.text
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    status_code = e.response.status_code
+                    error_body = e.response.text
 
-                        lib_logger.error(
-                            f"[REFRESH HTTP ERROR] HTTP {status_code} for '{Path(path).name}': {error_body}"
-                        )
+                    lib_logger.error(
+                        f"[REFRESH HTTP ERROR] HTTP {status_code} for '{Path(path).name}': {error_body}"
+                    )
 
-                        # [STATUS CODE HANDLING]
-                        # [INVALID GRANT HANDLING] Handle 400/401/403 by raising
-                        # Queue for re-auth in background so credential gets fixed automatically
-                        if status_code == 400:
-                            # Check if this is an invalid refresh token error
-                            try:
-                                error_data = e.response.json()
-                                error_type = error_data.get("error", "")
-                                error_desc = error_data.get("error_description", "")
-                                if not error_desc:
-                                    error_desc = error_data.get("message", error_body)
-                            except Exception:
-                                error_type = ""
-                                error_desc = error_body
+                    # [STATUS CODE HANDLING]
+                    # [INVALID GRANT HANDLING] Handle 400/401/403 by raising
+                    # Queue for re-auth in background so credential gets fixed automatically
+                    if status_code == 400:
+                        # Check if this is an invalid refresh token error
+                        try:
+                            error_data = e.response.json()
+                            error_type = error_data.get("error", "")
+                            error_desc = error_data.get("error_description", "")
+                            if not error_desc:
+                                error_desc = error_data.get("message", error_body)
+                        except Exception:
+                            error_type = ""
+                            error_desc = error_body
 
-                            if (
-                                "invalid" in error_desc.lower()
-                                or error_type == "invalid_request"
-                            ):
-                                lib_logger.info(
-                                    f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
-                                    f"Queued for re-authentication, rotating to next credential."
-                                )
-                                # Queue for re-auth in background (non-blocking, fire-and-forget)
-                                # This ensures credential gets fixed even if caller doesn't handle it
-                                asyncio.create_task(
-                                    self._queue_refresh(
-                                        path, force=True, needs_reauth=True
-                                    )
-                                )
-                                # Raise rotatable error instead of raw HTTPStatusError
-                                raise CredentialNeedsReauthError(
-                                    credential_path=path,
-                                    message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
-                                )
-                            else:
-                                # Other 400 error - raise it
-                                raise
-
-                        elif status_code in (401, 403):
+                        if (
+                            "invalid" in error_desc.lower()
+                            or error_type == "invalid_request"
+                        ):
                             lib_logger.info(
-                                f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                                f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
                                 f"Queued for re-authentication, rotating to next credential."
                             )
                             # Queue for re-auth in background (non-blocking, fire-and-forget)
+                            # This ensures credential gets fixed even if caller doesn't handle it
                             asyncio.create_task(
-                                self._queue_refresh(path, force=True, needs_reauth=True)
+                                self._queue_refresh(
+                                    path, force=True, needs_reauth=True
+                                )
                             )
                             # Raise rotatable error instead of raw HTTPStatusError
                             raise CredentialNeedsReauthError(
                                 credential_path=path,
-                                message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                                message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
                             )
-
-                        elif status_code == 429:
-                            retry_after = int(e.response.headers.get("Retry-After", 60))
-                            lib_logger.warning(
-                                f"Rate limited (HTTP 429), retry after {retry_after}s"
-                            )
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_after)
-                                continue
-                            raise
-
-                        elif 500 <= status_code < 600:
-                            if attempt < max_retries - 1:
-                                wait_time = 2**attempt
-                                lib_logger.warning(
-                                    f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
-                                )
-                                await asyncio.sleep(wait_time)
-                                continue
-                            raise
-
                         else:
+                            # Other 400 error - raise it
                             raise
 
-                    except (httpx.RequestError, httpx.TimeoutException) as e:
-                        last_error = e
+                    elif status_code in (401, 403):
+                        lib_logger.info(
+                            f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                            f"Queued for re-authentication, rotating to next credential."
+                        )
+                        # Queue for re-auth in background (non-blocking, fire-and-forget)
+                        asyncio.create_task(
+                            self._queue_refresh(path, force=True, needs_reauth=True)
+                        )
+                        # Raise rotatable error instead of raw HTTPStatusError
+                        raise CredentialNeedsReauthError(
+                            credential_path=path,
+                            message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                        )
+
+                    elif status_code == 429:
+                        retry_after = int(e.response.headers.get("Retry-After", 60))
+                        lib_logger.warning(
+                            f"Rate limited (HTTP 429), retry after {retry_after}s"
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_after)
+                            continue
+                        raise
+
+                    elif 500 <= status_code < 600:
                         if attempt < max_retries - 1:
                             wait_time = 2**attempt
                             lib_logger.warning(
-                                f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                                f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
                             )
                             await asyncio.sleep(wait_time)
                             continue
                         raise
+
+                    else:
+                        raise
+
+                except (httpx.RequestError, httpx.TimeoutException) as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 2**attempt
+                        lib_logger.warning(
+                            f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
 
             if new_token_data is None:
                 # [BACKOFF TRACKING] Increment failure count and set backoff timer

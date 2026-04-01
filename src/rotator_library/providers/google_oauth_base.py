@@ -13,6 +13,9 @@ import time
 import asyncio
 import logging
 from pathlib import Path
+import httpx
+
+from ..http_client_pool import get_http_pool
 from glob import glob
 
 import httpx
@@ -419,102 +422,103 @@ class GoogleOAuthBase(BaseTokenManager):
             new_token_data = None
             last_error = None
 
-            async with httpx.AsyncClient() as client:
-                for attempt in range(max_retries):
-                    try:
-                        response = await client.post(
-                            self.TOKEN_URI,
-                            data={
-                                "client_id": creds.get("client_id", self.CLIENT_ID),
-                                "client_secret": creds.get(
-                                    "client_secret", self.CLIENT_SECRET
-                                ),
-                                "refresh_token": refresh_token,
-                                "grant_type": "refresh_token",
-                            },
-                            timeout=30.0,
-                        )
-                        response.raise_for_status()
-                        new_token_data = response.json()
-                        break  # Success, exit retry loop
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        self.TOKEN_URI,
+                        data={
+                            "client_id": creds.get("client_id", self.CLIENT_ID),
+                            "client_secret": creds.get(
+                                "client_secret", self.CLIENT_SECRET
+                            ),
+                            "refresh_token": refresh_token,
+                            "grant_type": "refresh_token",
+                        },
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
+                    new_token_data = response.json()
+                    break  # Success, exit retry loop
 
-                    except httpx.HTTPStatusError as e:
-                        last_error = e
-                        status_code = e.response.status_code
-                        error_body = e.response.text
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    status_code = e.response.status_code
+                    error_body = e.response.text
 
-                        # [INVALID GRANT HANDLING] Handle 400/401/403 by queuing for re-auth
-                        # We must NOT call initialize_token from here as we hold a lock (would deadlock)
-                        if status_code == 400:
-                            # Check if this is an invalid_grant error
-                            if "invalid_grant" in error_body.lower():
-                                lib_logger.info(
-                                    f"Credential '{Path(path).name}' needs re-auth (HTTP 400: invalid_grant). "
-                                    f"Queued for re-authentication, rotating to next credential."
-                                )
-                                asyncio.create_task(
-                                    self._queue_refresh(
-                                        path, force=True, needs_reauth=True
-                                    )
-                                )
-                                raise CredentialNeedsReauthError(
-                                    credential_path=path,
-                                    message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
-                                )
-                            else:
-                                # Other 400 error - raise it
-                                raise
-
-                        elif status_code in (401, 403):
+                    # [INVALID GRANT HANDLING] Handle 400/401/403 by queuing for re-auth
+                    # We must NOT call initialize_token from here as we hold a lock (would deadlock)
+                    if status_code == 400:
+                        # Check if this is an invalid_grant error
+                        if "invalid_grant" in error_body.lower():
                             lib_logger.info(
-                                f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                                f"Credential '{Path(path).name}' needs re-auth (HTTP 400: invalid_grant). "
                                 f"Queued for re-authentication, rotating to next credential."
                             )
                             asyncio.create_task(
-                                self._queue_refresh(path, force=True, needs_reauth=True)
+                                self._queue_refresh(
+                                    path, force=True, needs_reauth=True
+                                )
                             )
                             raise CredentialNeedsReauthError(
                                 credential_path=path,
-                                message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                                message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
                             )
-
-                        elif status_code == 429:
-                            # Rate limit - honor Retry-After header if present
-                            retry_after = int(e.response.headers.get("Retry-After", 60))
-                            lib_logger.warning(
-                                f"Rate limited (HTTP 429), retry after {retry_after}s"
-                            )
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_after)
-                                continue
-                            raise
-
-                        elif status_code >= 500 and status_code < 600:
-                            # Server error - retry with exponential backoff
-                            if attempt < max_retries - 1:
-                                wait_time = 2**attempt  # 1s, 2s, 4s
-                                lib_logger.warning(
-                                    f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
-                                )
-                                await asyncio.sleep(wait_time)
-                                continue
-                            raise  # Final attempt failed
-
                         else:
-                            # Other errors - don't retry
+                            # Other 400 error - raise it
                             raise
 
-                    except (httpx.RequestError, httpx.TimeoutException) as e:
-                        # Network errors - retry with backoff
-                        last_error = e
+                    elif status_code in (401, 403):
+                        lib_logger.info(
+                            f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                            f"Queued for re-authentication, rotating to next credential."
+                        )
+                        asyncio.create_task(
+                            self._queue_refresh(path, force=True, needs_reauth=True)
+                        )
+                        raise CredentialNeedsReauthError(
+                            credential_path=path,
+                            message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                        )
+
+                    elif status_code == 429:
+                        # Rate limit - honor Retry-After header if present
+                        retry_after = int(e.response.headers.get("Retry-After", 60))
+                        lib_logger.warning(
+                            f"Rate limited (HTTP 429), retry after {retry_after}s"
+                        )
                         if attempt < max_retries - 1:
-                            wait_time = 2**attempt
+                            await asyncio.sleep(retry_after)
+                            continue
+                        raise
+
+                    elif status_code >= 500 and status_code < 600:
+                        # Server error - retry with exponential backoff
+                        if attempt < max_retries - 1:
+                            wait_time = 2**attempt  # 1s, 2s, 4s
                             lib_logger.warning(
-                                f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                                f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
                             )
                             await asyncio.sleep(wait_time)
                             continue
+                        raise  # Final attempt failed
+
+                    else:
+                        # Other errors - don't retry
                         raise
+
+                except (httpx.RequestError, httpx.TimeoutException) as e:
+                    # Network errors - retry with backoff
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 2**attempt
+                        lib_logger.warning(
+                            f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
 
             # If we exhausted retries without success
             if new_token_data is None:
@@ -566,16 +570,17 @@ class GoogleOAuthBase(BaseTokenManager):
 
             # [VALIDATION] Optional: Test that the refreshed token is actually usable
             try:
-                async with httpx.AsyncClient() as client:
-                    test_response = await client.get(
-                        self.USER_INFO_URI,
-                        headers={"Authorization": f"Bearer {creds['access_token']}"},
-                        timeout=5.0,
-                    )
-                    test_response.raise_for_status()
-                    lib_logger.debug(
-                        f"Token validation successful for '{Path(path).name}'"
-                    )
+                pool = await get_http_pool()
+                client = await pool.get_client_async()
+                test_response = await client.get(
+                    self.USER_INFO_URI,
+                    headers={"Authorization": f"Bearer {creds['access_token']}"},
+                    timeout=5.0,
+                )
+                test_response.raise_for_status()
+                lib_logger.debug(
+                    f"Token validation successful for '{Path(path).name}'"
+                )
             except Exception as e:
                 lib_logger.warning(
                     f"Refreshed token validation failed for '{Path(path).name}': {e}"
@@ -1097,77 +1102,78 @@ class GoogleOAuthBase(BaseTokenManager):
                 await server.wait_closed()
 
         lib_logger.info(f"Attempting to exchange authorization code for tokens...")
-        async with httpx.AsyncClient() as client:
-            # [PKCE + HEADERS] Include code_verifier and explicit headers for token exchange
-            # Uses GEMINI_CLI style headers for consistent fingerprinting
-            response = await client.post(
-                self.TOKEN_URI,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-                    "Accept": "*/*",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "User-Agent": "google-api-nodejs-client/10.3.0",
-                    "X-Goog-Api-Client": "gl-node/22.18.0",
-                },
-                data={
-                    "code": auth_code.strip(),
-                    "client_id": self.CLIENT_ID,
-                    "client_secret": self.CLIENT_SECRET,
-                    "redirect_uri": f"http://localhost:{self.callback_port}{self.CALLBACK_PATH}",
-                    "grant_type": "authorization_code",
-                    "code_verifier": effective_verifier,
-                },
-            )
-            response.raise_for_status()
-            token_data = response.json()
-            # Start with the full token data from the exchange
-            new_creds = token_data.copy()
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        # [PKCE + HEADERS] Include code_verifier and explicit headers for token exchange
+        # Uses GEMINI_CLI style headers for consistent fingerprinting
+        response = await client.post(
+            self.TOKEN_URI,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br",
+                "User-Agent": "google-api-nodejs-client/10.3.0",
+                "X-Goog-Api-Client": "gl-node/22.18.0",
+            },
+            data={
+                "code": auth_code.strip(),
+                "client_id": self.CLIENT_ID,
+                "client_secret": self.CLIENT_SECRET,
+                "redirect_uri": f"http://localhost:{self.callback_port}{self.CALLBACK_PATH}",
+                "grant_type": "authorization_code",
+                "code_verifier": effective_verifier,
+            },
+        )
+        response.raise_for_status()
+        token_data = response.json()
+        # Start with the full token data from the exchange
+        new_creds = token_data.copy()
 
-            # Convert 'expires_in' to 'expiry_date' in milliseconds
-            new_creds["expiry_date"] = (
-                time.time() + new_creds.pop("expires_in")
-            ) * 1000
+        # Convert 'expires_in' to 'expiry_date' in milliseconds
+        new_creds["expiry_date"] = (
+            time.time() + new_creds.pop("expires_in")
+        ) * 1000
 
-            # Ensure client_id and client_secret are present
-            new_creds["client_id"] = self.CLIENT_ID
-            new_creds["client_secret"] = self.CLIENT_SECRET
+        # Ensure client_id and client_secret are present
+        new_creds["client_id"] = self.CLIENT_ID
+        new_creds["client_secret"] = self.CLIENT_SECRET
 
-            new_creds["token_uri"] = self.TOKEN_URI
-            new_creds["universe_domain"] = "googleapis.com"
+        new_creds["token_uri"] = self.TOKEN_URI
+        new_creds["universe_domain"] = "googleapis.com"
 
-            # Fetch user info and add metadata
-            # Uses GEMINI_CLI style headers per PR 246
-            user_info_response = await client.get(
-                self.USER_INFO_URI,
-                headers={
-                    "Authorization": f"Bearer {new_creds['access_token']}",
-                    "User-Agent": "google-api-nodejs-client/10.3.0",
-                    "X-Goog-Api-Client": "gl-node/22.18.0",
-                },
-            )
-            user_info_response.raise_for_status()
-            user_info = user_info_response.json()
-            new_creds["_proxy_metadata"] = {
-                "email": user_info.get("email"),
-                "last_check_timestamp": time.time(),
-            }
+        # Fetch user info and add metadata
+        # Uses GEMINI_CLI style headers per PR 246
+        user_info_response = await client.get(
+            self.USER_INFO_URI,
+            headers={
+                "Authorization": f"Bearer {new_creds['access_token']}",
+                "User-Agent": "google-api-nodejs-client/10.3.0",
+                "X-Goog-Api-Client": "gl-node/22.18.0",
+            },
+        )
+        user_info_response.raise_for_status()
+        user_info = user_info_response.json()
+        new_creds["_proxy_metadata"] = {
+            "email": user_info.get("email"),
+            "last_check_timestamp": time.time(),
+        }
 
-            if path:
-                await self._save_credentials(path, new_creds)
-            lib_logger.info(
-                f"{self.ENV_PREFIX} OAuth initialized successfully for '{display_name}'."
-            )
+        if path:
+            await self._save_credentials(path, new_creds)
+        lib_logger.info(
+            f"{self.ENV_PREFIX} OAuth initialized successfully for '{display_name}'."
+        )
 
-            # Perform post-auth discovery (tier, project, etc.) while we have a fresh token
-            if path:
-                try:
-                    await self._post_auth_discovery(path, new_creds["access_token"])
-                except Exception as e:
-                    # Don't fail auth if discovery fails - it can be retried on first request
-                    lib_logger.warning(
-                        f"Post-auth discovery failed for '{display_name}': {e}. "
-                        "Tier/project will be discovered on first request."
-                    )
+        # Perform post-auth discovery (tier, project, etc.) while we have a fresh token
+        if path:
+            try:
+                await self._post_auth_discovery(path, new_creds["access_token"])
+            except Exception as e:
+                # Don't fail auth if discovery fails - it can be retried on first request
+                lib_logger.warning(
+                    f"Post-auth discovery failed for '{display_name}': {e}. "
+                    "Tier/project will be discovered on first request."
+                )
 
         return new_creds
 
@@ -1321,19 +1327,20 @@ class GoogleOAuthBase(BaseTokenManager):
 
         # Fallback to API call if metadata is missing
         headers = {"Authorization": f"Bearer {creds['access_token']}"}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self.USER_INFO_URI, headers=headers)
-            response.raise_for_status()
-            user_info = response.json()
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        response = await client.get(self.USER_INFO_URI, headers=headers)
+        response.raise_for_status()
+        user_info = response.json()
 
-            # Save the retrieved info for future use
-            creds["_proxy_metadata"] = {
-                "email": user_info.get("email"),
-                "last_check_timestamp": time.time(),
-            }
-            if path:
-                await self._save_credentials(path, creds)
-            return {"email": user_info.get("email")}
+        # Save the retrieved info for future use
+        creds["_proxy_metadata"] = {
+            "email": user_info.get("email"),
+            "last_check_timestamp": time.time(),
+        }
+        if path:
+            await self._save_credentials(path, creds)
+        return {"email": user_info.get("email")}
 
     # =========================================================================
     # CREDENTIAL MANAGEMENT METHODS

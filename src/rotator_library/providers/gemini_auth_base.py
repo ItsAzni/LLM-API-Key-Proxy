@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, List
 
 import httpx
 
+from ..http_client_pool import get_http_pool
 from .google_oauth_base import GoogleOAuthBase
 from .utilities.gemini_shared_utils import CODE_ASSIST_ENDPOINT
 
@@ -226,213 +227,240 @@ class GeminiAuthBase(GoogleOAuthBase):
         discovered_project_id = None
         discovered_tier = None
 
-        async with httpx.AsyncClient() as client:
-            # 1. Try discovery endpoint with loadCodeAssist
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        # 1. Try discovery endpoint with loadCodeAssist
+        lib_logger.debug(
+            "Attempting project discovery via Code Assist loadCodeAssist endpoint..."
+        )
+        try:
+            # Build metadata - include duetProject only if we have a configured project
+            core_client_metadata = {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }
+            if configured_project_id:
+                core_client_metadata["duetProject"] = configured_project_id
+
+            # Build load request - pass configured_project_id if available, otherwise None
+            load_request = {
+                "cloudaicompanionProject": configured_project_id,  # Can be None
+                "metadata": core_client_metadata,
+            }
+
             lib_logger.debug(
-                "Attempting project discovery via Code Assist loadCodeAssist endpoint..."
+                f"Sending loadCodeAssist request with cloudaicompanionProject={configured_project_id}"
             )
-            try:
-                # Build metadata - include duetProject only if we have a configured project
-                core_client_metadata = {
-                    "ideType": "IDE_UNSPECIFIED",
-                    "platform": "PLATFORM_UNSPECIFIED",
-                    "pluginType": "GEMINI",
-                }
-                if configured_project_id:
-                    core_client_metadata["duetProject"] = configured_project_id
+            response = await client.post(
+                f"{CODE_ASSIST_ENDPOINT}:loadCodeAssist",
+                headers=headers,
+                json=load_request,
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
 
-                # Build load request - pass configured_project_id if available, otherwise None
-                load_request = {
-                    "cloudaicompanionProject": configured_project_id,  # Can be None
-                    "metadata": core_client_metadata,
-                }
+            # Log full response for debugging
+            lib_logger.debug(
+                f"loadCodeAssist full response keys: {list(data.keys())}"
+            )
 
+            # Extract and log ALL tier information for debugging
+            allowed_tiers = data.get("allowedTiers", [])
+            current_tier = data.get("currentTier")
+
+            lib_logger.debug(f"=== Tier Information ===")
+            lib_logger.debug(f"currentTier: {current_tier}")
+            lib_logger.debug(f"allowedTiers count: {len(allowed_tiers)}")
+            for i, tier in enumerate(allowed_tiers):
+                tier_id = tier.get("id", "unknown")
+                is_default = tier.get("isDefault", False)
+                user_defined = tier.get("userDefinedCloudaicompanionProject", False)
                 lib_logger.debug(
-                    f"Sending loadCodeAssist request with cloudaicompanionProject={configured_project_id}"
+                    f"  Tier {i + 1}: id={tier_id}, isDefault={is_default}, userDefinedProject={user_defined}"
                 )
-                response = await client.post(
-                    f"{CODE_ASSIST_ENDPOINT}:loadCodeAssist",
-                    headers=headers,
-                    json=load_request,
-                    timeout=20,
+            lib_logger.debug(f"========================")
+
+            # Determine the current tier ID
+            current_tier_id = None
+            if current_tier:
+                current_tier_id = current_tier.get("id")
+                lib_logger.debug(f"User has currentTier: {current_tier_id}")
+
+            # Check if user is already known to server (has currentTier)
+            if current_tier_id:
+                # User is already onboarded - check for project from server
+                server_project = data.get("cloudaicompanionProject")
+
+                # Check if this tier requires user-defined project (paid tiers)
+                requires_user_project = any(
+                    t.get("id") == current_tier_id
+                    and t.get("userDefinedCloudaicompanionProject", False)
+                    for t in allowed_tiers
                 )
-                response.raise_for_status()
-                data = response.json()
+                is_free_tier = current_tier_id == "free-tier"
 
-                # Log full response for debugging
-                lib_logger.debug(
-                    f"loadCodeAssist full response keys: {list(data.keys())}"
-                )
-
-                # Extract and log ALL tier information for debugging
-                allowed_tiers = data.get("allowedTiers", [])
-                current_tier = data.get("currentTier")
-
-                lib_logger.debug(f"=== Tier Information ===")
-                lib_logger.debug(f"currentTier: {current_tier}")
-                lib_logger.debug(f"allowedTiers count: {len(allowed_tiers)}")
-                for i, tier in enumerate(allowed_tiers):
-                    tier_id = tier.get("id", "unknown")
-                    is_default = tier.get("isDefault", False)
-                    user_defined = tier.get("userDefinedCloudaicompanionProject", False)
+                if server_project:
+                    # Server returned a project - use it (server wins)
+                    # This is the normal case for FREE tier users
+                    project_id = server_project
+                    lib_logger.debug(f"Server returned project: {project_id}")
+                elif configured_project_id:
+                    # No server project but we have configured one - use it
+                    # This is the PAID TIER case where server doesn't return a project
+                    project_id = configured_project_id
                     lib_logger.debug(
-                        f"  Tier {i + 1}: id={tier_id}, isDefault={is_default}, userDefinedProject={user_defined}"
+                        f"No server project, using configured: {project_id}"
                     )
-                lib_logger.debug(f"========================")
-
-                # Determine the current tier ID
-                current_tier_id = None
-                if current_tier:
-                    current_tier_id = current_tier.get("id")
-                    lib_logger.debug(f"User has currentTier: {current_tier_id}")
-
-                # Check if user is already known to server (has currentTier)
-                if current_tier_id:
-                    # User is already onboarded - check for project from server
-                    server_project = data.get("cloudaicompanionProject")
-
-                    # Check if this tier requires user-defined project (paid tiers)
-                    requires_user_project = any(
-                        t.get("id") == current_tier_id
-                        and t.get("userDefinedCloudaicompanionProject", False)
-                        for t in allowed_tiers
-                    )
-                    is_free_tier = current_tier_id == "free-tier"
-
-                    if server_project:
-                        # Server returned a project - use it (server wins)
-                        # This is the normal case for FREE tier users
-                        project_id = server_project
-                        lib_logger.debug(f"Server returned project: {project_id}")
-                    elif configured_project_id:
-                        # No server project but we have configured one - use it
-                        # This is the PAID TIER case where server doesn't return a project
-                        project_id = configured_project_id
-                        lib_logger.debug(
-                            f"No server project, using configured: {project_id}"
-                        )
-                    elif is_free_tier:
-                        # Free tier user without server project - this shouldn't happen normally
-                        # but let's not fail, just proceed to onboarding
-                        lib_logger.debug(
-                            "Free tier user with currentTier but no project - will try onboarding"
-                        )
-                        project_id = None
-                    elif requires_user_project:
-                        # Paid tier requires a project ID to be set
-                        raise ValueError(
-                            f"Paid tier '{current_tier_id}' requires setting GEMINI_CLI_PROJECT_ID environment variable. "
-                            "See https://goo.gle/gemini-cli-auth-docs#workspace-gca"
-                        )
-                    else:
-                        # Unknown tier without project - proceed carefully
-                        lib_logger.warning(
-                            f"Tier '{current_tier_id}' has no project and none configured - will try onboarding"
-                        )
-                        project_id = None
-
-                    if project_id:
-                        # Cache tier info
-                        self.project_tier_cache[credential_path] = current_tier_id
-                        discovered_tier = current_tier_id
-
-                        # Log appropriately based on tier
-                        is_paid = current_tier_id and current_tier_id not in [
-                            "free-tier",
-                            "legacy-tier",
-                            "unknown",
-                        ]
-                        if is_paid:
-                            lib_logger.info(
-                                f"Using Gemini paid tier '{current_tier_id}' with project: {project_id}"
-                            )
-                        else:
-                            lib_logger.info(
-                                f"Discovered Gemini project ID via loadCodeAssist: {project_id}"
-                            )
-
-                        self.project_id_cache[credential_path] = project_id
-                        discovered_project_id = project_id
-
-                        # Persist to credential file
-                        await self._persist_project_metadata(
-                            credential_path, project_id, discovered_tier
-                        )
-
-                        return project_id
-
-                # 2. User needs onboarding - no currentTier
-                lib_logger.info(
-                    "No existing Gemini session found (no currentTier), attempting to onboard user..."
-                )
-
-                # Determine which tier to onboard with
-                onboard_tier = None
-                for tier in allowed_tiers:
-                    if tier.get("isDefault"):
-                        onboard_tier = tier
-                        break
-
-                # Fallback to LEGACY tier if no default (requires user project)
-                if not onboard_tier and allowed_tiers:
-                    # Look for legacy-tier as fallback
-                    for tier in allowed_tiers:
-                        if tier.get("id") == "legacy-tier":
-                            onboard_tier = tier
-                            break
-                    # If still no tier, use first available
-                    if not onboard_tier:
-                        onboard_tier = allowed_tiers[0]
-
-                if not onboard_tier:
-                    raise ValueError("No onboarding tiers available from server")
-
-                tier_id = onboard_tier.get("id", "free-tier")
-                requires_user_project = onboard_tier.get(
-                    "userDefinedCloudaicompanionProject", False
-                )
-
-                lib_logger.debug(
-                    f"Onboarding with tier: {tier_id}, requiresUserProject: {requires_user_project}"
-                )
-
-                # Build onboard request based on tier type (following official CLI logic)
-                # FREE tier: cloudaicompanionProject = None (server-managed)
-                # PAID tier: cloudaicompanionProject = configured_project_id (user must provide)
-                is_free_tier = tier_id == "free-tier"
-
-                if is_free_tier:
-                    # Free tier uses server-managed project
-                    onboard_request = {
-                        "tierId": tier_id,
-                        "cloudaicompanionProject": None,  # Server will create/manage
-                        "metadata": core_client_metadata,
-                    }
+                elif is_free_tier:
+                    # Free tier user without server project - this shouldn't happen normally
+                    # but let's not fail, just proceed to onboarding
                     lib_logger.debug(
-                        "Free tier onboarding: using server-managed project"
+                        "Free tier user with currentTier but no project - will try onboarding"
+                    )
+                    project_id = None
+                elif requires_user_project:
+                    # Paid tier requires a project ID to be set
+                    raise ValueError(
+                        f"Paid tier '{current_tier_id}' requires setting GEMINI_CLI_PROJECT_ID environment variable. "
+                        "See https://goo.gle/gemini-cli-auth-docs#workspace-gca"
                     )
                 else:
-                    # Paid/legacy tier requires user-provided project
-                    if not configured_project_id and requires_user_project:
-                        raise ValueError(
-                            f"Tier '{tier_id}' requires setting GEMINI_CLI_PROJECT_ID environment variable. "
-                            "See https://goo.gle/gemini-cli-auth-docs#workspace-gca"
+                    # Unknown tier without project - proceed carefully
+                    lib_logger.warning(
+                        f"Tier '{current_tier_id}' has no project and none configured - will try onboarding"
+                    )
+                    project_id = None
+
+                if project_id:
+                    # Cache tier info
+                    self.project_tier_cache[credential_path] = current_tier_id
+                    discovered_tier = current_tier_id
+
+                    # Log appropriately based on tier
+                    is_paid = current_tier_id and current_tier_id not in [
+                        "free-tier",
+                        "legacy-tier",
+                        "unknown",
+                    ]
+                    if is_paid:
+                        lib_logger.info(
+                            f"Using Gemini paid tier '{current_tier_id}' with project: {project_id}"
                         )
-                    onboard_request = {
-                        "tierId": tier_id,
-                        "cloudaicompanionProject": configured_project_id,
-                        "metadata": {
-                            **core_client_metadata,
-                            "duetProject": configured_project_id,
-                        }
-                        if configured_project_id
-                        else core_client_metadata,
-                    }
-                    lib_logger.debug(
-                        f"Paid tier onboarding: using project {configured_project_id}"
+                    else:
+                        lib_logger.info(
+                            f"Discovered Gemini project ID via loadCodeAssist: {project_id}"
+                        )
+
+                    self.project_id_cache[credential_path] = project_id
+                    discovered_project_id = project_id
+
+                    # Persist to credential file
+                    await self._persist_project_metadata(
+                        credential_path, project_id, discovered_tier
                     )
 
-                lib_logger.debug("Initiating onboardUser request...")
+                    return project_id
+
+            # 2. User needs onboarding - no currentTier
+            lib_logger.info(
+                "No existing Gemini session found (no currentTier), attempting to onboard user..."
+            )
+
+            # Determine which tier to onboard with
+            onboard_tier = None
+            for tier in allowed_tiers:
+                if tier.get("isDefault"):
+                    onboard_tier = tier
+                    break
+
+            # Fallback to LEGACY tier if no default (requires user project)
+            if not onboard_tier and allowed_tiers:
+                # Look for legacy-tier as fallback
+                for tier in allowed_tiers:
+                    if tier.get("id") == "legacy-tier":
+                        onboard_tier = tier
+                        break
+                # If still no tier, use first available
+                if not onboard_tier:
+                    onboard_tier = allowed_tiers[0]
+
+            if not onboard_tier:
+                raise ValueError("No onboarding tiers available from server")
+
+            tier_id = onboard_tier.get("id", "free-tier")
+            requires_user_project = onboard_tier.get(
+                "userDefinedCloudaicompanionProject", False
+            )
+
+            lib_logger.debug(
+                f"Onboarding with tier: {tier_id}, requiresUserProject: {requires_user_project}"
+            )
+
+            # Build onboard request based on tier type (following official CLI logic)
+            # FREE tier: cloudaicompanionProject = None (server-managed)
+            # PAID tier: cloudaicompanionProject = configured_project_id (user must provide)
+            is_free_tier = tier_id == "free-tier"
+
+            if is_free_tier:
+                # Free tier uses server-managed project
+                onboard_request = {
+                    "tierId": tier_id,
+                    "cloudaicompanionProject": None,  # Server will create/manage
+                    "metadata": core_client_metadata,
+                }
+                lib_logger.debug(
+                    "Free tier onboarding: using server-managed project"
+                )
+            else:
+                # Paid/legacy tier requires user-provided project
+                if not configured_project_id and requires_user_project:
+                    raise ValueError(
+                        f"Tier '{tier_id}' requires setting GEMINI_CLI_PROJECT_ID environment variable. "
+                        "See https://goo.gle/gemini-cli-auth-docs#workspace-gca"
+                    )
+                onboard_request = {
+                    "tierId": tier_id,
+                    "cloudaicompanionProject": configured_project_id,
+                    "metadata": {
+                        **core_client_metadata,
+                        "duetProject": configured_project_id,
+                    }
+                    if configured_project_id
+                    else core_client_metadata,
+                }
+                lib_logger.debug(
+                    f"Paid tier onboarding: using project {configured_project_id}"
+                )
+
+            lib_logger.debug("Initiating onboardUser request...")
+            lro_response = await client.post(
+                f"{CODE_ASSIST_ENDPOINT}:onboardUser",
+                headers=headers,
+                json=onboard_request,
+                timeout=30,
+            )
+            lro_response.raise_for_status()
+            lro_data = lro_response.json()
+            lib_logger.debug(
+                f"Initial onboarding response: done={lro_data.get('done')}"
+            )
+
+            for i in range(150):  # Poll for up to 5 minutes (150 × 2s)
+                if lro_data.get("done"):
+                    lib_logger.debug(
+                        f"Onboarding completed after {i} polling attempts"
+                    )
+                    break
+                await asyncio.sleep(2)
+                if (i + 1) % 15 == 0:  # Log every 30 seconds
+                    lib_logger.info(
+                        f"Still waiting for onboarding completion... ({(i + 1) * 2}s elapsed)"
+                    )
+                lib_logger.debug(
+                    f"Polling onboarding status... (Attempt {i + 1}/150)"
+                )
                 lro_response = await client.post(
                     f"{CODE_ASSIST_ENDPOINT}:onboardUser",
                     headers=headers,
@@ -441,173 +469,148 @@ class GeminiAuthBase(GoogleOAuthBase):
                 )
                 lro_response.raise_for_status()
                 lro_data = lro_response.json()
+
+            if not lro_data.get("done"):
+                lib_logger.error("Onboarding process timed out after 5 minutes")
+                raise ValueError(
+                    "Onboarding process timed out after 5 minutes. Please try again or contact support."
+                )
+
+            # Extract project ID from LRO response
+            # Note: onboardUser returns response.cloudaicompanionProject as an object with .id
+            lro_response_data = lro_data.get("response", {})
+            lro_project_obj = lro_response_data.get("cloudaicompanionProject", {})
+            project_id = (
+                lro_project_obj.get("id")
+                if isinstance(lro_project_obj, dict)
+                else None
+            )
+
+            # Fallback to configured project if LRO didn't return one
+            if not project_id and configured_project_id:
+                project_id = configured_project_id
                 lib_logger.debug(
-                    f"Initial onboarding response: done={lro_data.get('done')}"
+                    f"LRO didn't return project, using configured: {project_id}"
                 )
 
-                for i in range(150):  # Poll for up to 5 minutes (150 × 2s)
-                    if lro_data.get("done"):
-                        lib_logger.debug(
-                            f"Onboarding completed after {i} polling attempts"
-                        )
-                        break
-                    await asyncio.sleep(2)
-                    if (i + 1) % 15 == 0:  # Log every 30 seconds
-                        lib_logger.info(
-                            f"Still waiting for onboarding completion... ({(i + 1) * 2}s elapsed)"
-                        )
-                    lib_logger.debug(
-                        f"Polling onboarding status... (Attempt {i + 1}/150)"
-                    )
-                    lro_response = await client.post(
-                        f"{CODE_ASSIST_ENDPOINT}:onboardUser",
-                        headers=headers,
-                        json=onboard_request,
-                        timeout=30,
-                    )
-                    lro_response.raise_for_status()
-                    lro_data = lro_response.json()
-
-                if not lro_data.get("done"):
-                    lib_logger.error("Onboarding process timed out after 5 minutes")
-                    raise ValueError(
-                        "Onboarding process timed out after 5 minutes. Please try again or contact support."
-                    )
-
-                # Extract project ID from LRO response
-                # Note: onboardUser returns response.cloudaicompanionProject as an object with .id
-                lro_response_data = lro_data.get("response", {})
-                lro_project_obj = lro_response_data.get("cloudaicompanionProject", {})
-                project_id = (
-                    lro_project_obj.get("id")
-                    if isinstance(lro_project_obj, dict)
-                    else None
+            if not project_id:
+                lib_logger.error(
+                    "Onboarding completed but no project ID in response and none configured"
+                )
+                raise ValueError(
+                    "Onboarding completed, but no project ID was returned. "
+                    "For paid tiers, set GEMINI_CLI_PROJECT_ID environment variable."
                 )
 
-                # Fallback to configured project if LRO didn't return one
-                if not project_id and configured_project_id:
-                    project_id = configured_project_id
-                    lib_logger.debug(
-                        f"LRO didn't return project, using configured: {project_id}"
-                    )
+            lib_logger.debug(
+                f"Successfully extracted project ID from onboarding response: {project_id}"
+            )
 
-                if not project_id:
-                    lib_logger.error(
-                        "Onboarding completed but no project ID in response and none configured"
-                    )
-                    raise ValueError(
-                        "Onboarding completed, but no project ID was returned. "
-                        "For paid tiers, set GEMINI_CLI_PROJECT_ID environment variable."
-                    )
+            # Cache tier info
+            self.project_tier_cache[credential_path] = tier_id
+            discovered_tier = tier_id
+            lib_logger.debug(f"Cached tier information: {tier_id}")
 
-                lib_logger.debug(
-                    f"Successfully extracted project ID from onboarding response: {project_id}"
+            # Log concise message for paid projects
+            is_paid = tier_id and tier_id not in ["free-tier", "legacy-tier"]
+            if is_paid:
+                lib_logger.info(
+                    f"Using Gemini paid tier '{tier_id}' with project: {project_id}"
+                )
+            else:
+                lib_logger.info(
+                    f"Successfully onboarded user and discovered project ID: {project_id}"
                 )
 
-                # Cache tier info
-                self.project_tier_cache[credential_path] = tier_id
-                discovered_tier = tier_id
-                lib_logger.debug(f"Cached tier information: {tier_id}")
+            self.project_id_cache[credential_path] = project_id
+            discovered_project_id = project_id
 
-                # Log concise message for paid projects
-                is_paid = tier_id and tier_id not in ["free-tier", "legacy-tier"]
-                if is_paid:
-                    lib_logger.info(
-                        f"Using Gemini paid tier '{tier_id}' with project: {project_id}"
-                    )
-                else:
-                    lib_logger.info(
-                        f"Successfully onboarded user and discovered project ID: {project_id}"
-                    )
+            # Persist to credential file
+            await self._persist_project_metadata(
+                credential_path, project_id, discovered_tier
+            )
 
-                self.project_id_cache[credential_path] = project_id
-                discovered_project_id = project_id
+            return project_id
 
-                # Persist to credential file
-                await self._persist_project_metadata(
-                    credential_path, project_id, discovered_tier
+        except httpx.HTTPStatusError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
+            if e.response.status_code == 403:
+                lib_logger.error(
+                    f"Gemini Code Assist API access denied (403). Response: {error_body}"
                 )
-
-                return project_id
-
-            except httpx.HTTPStatusError as e:
-                error_body = ""
-                try:
-                    error_body = e.response.text
-                except Exception:
-                    pass
-                if e.response.status_code == 403:
-                    lib_logger.error(
-                        f"Gemini Code Assist API access denied (403). Response: {error_body}"
-                    )
-                    lib_logger.error(
-                        "Possible causes: 1) cloudaicompanion.googleapis.com API not enabled, 2) Wrong project ID for paid tier, 3) Account lacks permissions"
-                    )
-                elif e.response.status_code == 404:
-                    lib_logger.warning(
-                        f"Gemini Code Assist endpoint not found (404). Falling back to project listing."
-                    )
-                elif e.response.status_code == 412:
-                    # Precondition Failed - often means wrong project for free tier onboarding
-                    lib_logger.error(
-                        f"Precondition failed (412): {error_body}. This may mean the project ID is incompatible with the selected tier."
-                    )
-                else:
-                    lib_logger.warning(
-                        f"Gemini onboarding/discovery failed with status {e.response.status_code}: {error_body}. Falling back to project listing."
-                    )
-            except httpx.RequestError as e:
+                lib_logger.error(
+                    "Possible causes: 1) cloudaicompanion.googleapis.com API not enabled, 2) Wrong project ID for paid tier, 3) Account lacks permissions"
+                )
+            elif e.response.status_code == 404:
                 lib_logger.warning(
-                    f"Gemini onboarding/discovery network error: {e}. Falling back to project listing."
+                    f"Gemini Code Assist endpoint not found (404). Falling back to project listing."
                 )
+            elif e.response.status_code == 412:
+                # Precondition Failed - often means wrong project for free tier onboarding
+                lib_logger.error(
+                    f"Precondition failed (412): {error_body}. This may mean the project ID is incompatible with the selected tier."
+                )
+            else:
+                lib_logger.warning(
+                    f"Gemini onboarding/discovery failed with status {e.response.status_code}: {error_body}. Falling back to project listing."
+                )
+        except httpx.RequestError as e:
+            lib_logger.warning(
+                f"Gemini onboarding/discovery network error: {e}. Falling back to project listing."
+            )
 
         # 3. Fallback to listing all available GCP projects (last resort)
         lib_logger.debug(
             "Attempting to discover project via GCP Resource Manager API..."
         )
         try:
-            async with httpx.AsyncClient() as client:
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            lib_logger.debug(
+                "Querying Cloud Resource Manager for available projects..."
+            )
+            response = await client.get(
+                "https://cloudresourcemanager.googleapis.com/v1/projects",
+                headers=headers,
+                timeout=20,
+            )
+            response.raise_for_status()
+            projects = response.json().get("projects", [])
+            lib_logger.debug(f"Found {len(projects)} total projects")
+            active_projects = [
+                p for p in projects if p.get("lifecycleState") == "ACTIVE"
+            ]
+            lib_logger.debug(f"Found {len(active_projects)} active projects")
+
+            if not projects:
+                lib_logger.error(
+                    "No GCP projects found for this account. Please create a project in Google Cloud Console."
+                )
+            elif not active_projects:
+                lib_logger.error(
+                    "No active GCP projects found. Please activate a project in Google Cloud Console."
+                )
+            else:
+                project_id = active_projects[0]["projectId"]
+                lib_logger.info(
+                    f"Discovered Gemini project ID from active projects list: {project_id}"
+                )
                 lib_logger.debug(
-                    "Querying Cloud Resource Manager for available projects..."
+                    f"Selected first active project: {project_id} (out of {len(active_projects)} active projects)"
                 )
-                response = await client.get(
-                    "https://cloudresourcemanager.googleapis.com/v1/projects",
-                    headers=headers,
-                    timeout=20,
+                self.project_id_cache[credential_path] = project_id
+                discovered_project_id = project_id
+
+                # Persist to credential file (no tier info from resource manager)
+                await self._persist_project_metadata(
+                    credential_path, project_id, None
                 )
-                response.raise_for_status()
-                projects = response.json().get("projects", [])
-                lib_logger.debug(f"Found {len(projects)} total projects")
-                active_projects = [
-                    p for p in projects if p.get("lifecycleState") == "ACTIVE"
-                ]
-                lib_logger.debug(f"Found {len(active_projects)} active projects")
 
-                if not projects:
-                    lib_logger.error(
-                        "No GCP projects found for this account. Please create a project in Google Cloud Console."
-                    )
-                elif not active_projects:
-                    lib_logger.error(
-                        "No active GCP projects found. Please activate a project in Google Cloud Console."
-                    )
-                else:
-                    project_id = active_projects[0]["projectId"]
-                    lib_logger.info(
-                        f"Discovered Gemini project ID from active projects list: {project_id}"
-                    )
-                    lib_logger.debug(
-                        f"Selected first active project: {project_id} (out of {len(active_projects)} active projects)"
-                    )
-                    self.project_id_cache[credential_path] = project_id
-                    discovered_project_id = project_id
-
-                    # Persist to credential file (no tier info from resource manager)
-                    await self._persist_project_metadata(
-                        credential_path, project_id, None
-                    )
-
-                    return project_id
+                return project_id
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 lib_logger.error(

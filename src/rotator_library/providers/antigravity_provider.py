@@ -96,10 +96,6 @@ class _MalformedFunctionCallDetected(Exception):
 # =============================================================================
 
 
-# NOTE: env_bool and env_int have been moved to utilities.gemini_shared_utils
-# and are imported as env_bool and env_int at top of file
-
-
 lib_logger = logging.getLogger("rotator_library")
 
 # Antigravity base URLs with fallback order
@@ -220,11 +216,6 @@ EXCLUDED_MODELS = {
     "gemini-2.5-flash-thinking",
     "gemini-2.5-pro",
 }
-
-# NOTE: FINISH_REASON_MAP, GEMINI3_TOOL_RENAMES, GEMINI3_TOOL_RENAMES_REVERSE,
-# and DEFAULT_SAFETY_SETTINGS have been moved to utilities.gemini_shared_utils
-# and are imported at top of file
-
 
 # Directory paths - use centralized path management
 
@@ -549,15 +540,6 @@ def _generate_project_id() -> str:
     nouns = ["fuze", "wave", "spark", "flow", "core"]
     return f"{random.choice(adjectives)}-{random.choice(nouns)}-{uuid.uuid4().hex[:5]}"
 
-
-# NOTE: normalize_type_arrays has been moved to utilities.gemini_shared_utils
-# and is imported as normalize_type_arrays at top of file
-
-# NOTE: _recursively_parse_json_strings has been moved to utilities.gemini_shared_utils
-# and is imported as recursively_parse_json_strings at top of file
-
-# NOTE: inline_schema_refs has been moved to utilities.gemini_shared_utils
-# and is imported as inline_schema_refs at top of file
 
 
 def _score_schema_option(schema: Any) -> Tuple[int, str]:
@@ -976,14 +958,6 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     return cleaned
 
 
-# =============================================================================
-# FILE LOGGER
-# =============================================================================
-
-# NOTE: AntigravityProviderLogger is imported from transaction_logger at top of file
-
-
-# =============================================================================
 # MAIN PROVIDER CLASS
 # =============================================================================
 
@@ -1318,7 +1292,6 @@ class AntigravityProvider(
     def __init__(self):
         super().__init__()
         self.model_definitions = ModelDefinitions()
-        # NOTE: project_id_cache and project_tier_cache are inherited from AntigravityAuthBase
 
         # Base URL management
         self._base_url_index = 0
@@ -1502,9 +1475,6 @@ class AntigravityProvider(
         """Return the Antigravity API headers. Used by quota tracker mixin."""
         return ANTIGRAVITY_HEADERS
 
-    # NOTE: _load_tier_from_file() is inherited from GeminiCredentialManager mixin
-    # NOTE: get_credential_tier_name() is inherited from GeminiCredentialManager mixin
-
     def get_model_tier_requirement(self, model: str) -> Optional[int]:
         """
         Returns the minimum priority tier required for a model.
@@ -1517,12 +1487,6 @@ class AntigravityProvider(
             None - no restrictions for any model
         """
         return None
-
-    # NOTE: initialize_credentials() is inherited from GeminiCredentialManager mixin
-    # NOTE: get_background_job_config() is inherited from GeminiCredentialManager mixin
-    # NOTE: run_background_job() is inherited from GeminiCredentialManager mixin
-    # NOTE: _load_persisted_tiers() is inherited from GeminiCredentialManager mixin
-    # NOTE: _post_auth_discovery() is inherited from AntigravityAuthBase
 
     # =========================================================================
     # MODEL UTILITIES
@@ -1636,8 +1600,6 @@ class AntigravityProvider(
             key_parts.append(f"text_{text_hash}")
 
         return "thinking_" + "_".join(key_parts) if key_parts else None
-
-    # NOTE: _discover_project_id() and _persist_project_metadata() are inherited from AntigravityAuthBase
 
     # =========================================================================
     # THINKING MODE SANITIZATION
@@ -2755,8 +2717,6 @@ class AntigravityProvider(
     # TOOL RESPONSE GROUPING
     # =========================================================================
 
-    # NOTE: _fix_tool_response_grouping() is inherited from GeminiToolHandler mixin
-
     # =========================================================================
     # GEMINI 3 TOOL TRANSFORMATIONS
     # =========================================================================
@@ -2834,9 +2794,6 @@ class AntigravityProvider(
                 self._inject_signature_into_description(func_decl, prompt_template)
 
         return modified
-
-    # NOTE: _format_type_hint() is inherited from GeminiToolHandler mixin
-    # NOTE: _strip_gemini3_prefix() is inherited from GeminiToolHandler mixin
 
     # =========================================================================
     # MALFORMED FUNCTION CALL HANDLING
@@ -3281,8 +3238,6 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 "usage": usage,
             }
         )
-
-    # NOTE: _translate_tool_choice() is inherited from GeminiToolHandler mixin
 
     # =========================================================================
     # REQUEST TRANSFORMATION

@@ -54,10 +54,6 @@ def _get_gemini3_signature_cache_file() -> Path:
     return _get_gemini_cli_cache_dir() / "gemini3_signatures.json"
 
 
-# NOTE: _GeminiCliFileLogger has been moved to utilities.gemini_file_logger
-# and is imported as GeminiCliFileLogger
-
-
 AVAILABLE_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
@@ -120,11 +116,6 @@ The tool names may look familiar, but the schemas are DIFFERENT.
 When in doubt, RE-READ THE SCHEMA before making the call.
 </CRITICAL_TOOL_USAGE_INSTRUCTIONS>
 """
-
-# NOTE: FINISH_REASON_MAP has been moved to utilities.gemini_shared_utils
-
-# NOTE: _recursively_parse_json_strings, _inline_schema_refs, _env_bool, _env_int
-# have been moved to utilities.gemini_shared_utils and are imported at top of file
 
 
 class GeminiCliProvider(
@@ -353,7 +344,6 @@ class GeminiCliProvider(
     def __init__(self):
         super().__init__()
         self.model_definitions = ModelDefinitions()
-        # NOTE: project_id_cache and project_tier_cache are inherited from GeminiAuthBase
 
         # Quota refresh interval (mirrors Antigravity pattern)
         self._quota_refresh_interval = env_int("GEMINI_CLI_QUOTA_REFRESH_INTERVAL", 300)
@@ -414,23 +404,6 @@ class GeminiCliProvider(
         self._learned_costs_loaded: bool = False
 
 
-    # =========================================================================
-    # CREDENTIAL TIER LOOKUP (Provider-specific - uses cache)
-    # =========================================================================
-    #
-    # NOTE: get_credential_priority() is now inherited from ProviderInterface.
-    # It uses get_credential_tier_name() to get the tier and resolve priority
-    # from the tier_priorities class attribute.
-    #
-    # NOTE: _load_tier_from_file(), get_credential_tier_name(), initialize_credentials(),
-    # _load_persisted_tiers(), get_background_job_config(), and run_background_job()
-    # are now inherited from GeminiCredentialManager mixin.
-    # =========================================================================
-
-    # NOTE: _load_tier_from_file() is inherited from GeminiCredentialManager
-
-    # NOTE: get_credential_tier_name() is inherited from GeminiCredentialManager
-
     def get_model_tier_requirement(self, model: str) -> Optional[int]:
         """
         Returns the minimum priority tier required for a model.
@@ -444,20 +417,6 @@ class GeminiCliProvider(
         # No model-specific priority restrictions
         # (Gemini 3 is now public and available to all tiers)
         return None
-
-    # NOTE: initialize_credentials() is inherited from GeminiCredentialManager
-
-    # NOTE: _load_persisted_tiers() is inherited from GeminiCredentialManager
-
-    # =========================================================================
-    # BACKGROUND JOB INTERFACE (Quota Baseline Refresh)
-    # =========================================================================
-
-    # NOTE: get_background_job_config() is inherited from GeminiCredentialManager
-
-    # NOTE: run_background_job() is inherited from GeminiCredentialManager
-
-    # NOTE: _post_auth_discovery() is inherited from GeminiAuthBase
 
     # =========================================================================
     # MODEL UTILITIES
@@ -577,10 +536,6 @@ class GeminiCliProvider(
             List of user-facing model names
         """
         return AVAILABLE_MODELS
-
-    # NOTE: _strip_gemini3_prefix() is inherited from GeminiToolHandler
-
-    # NOTE: _discover_project_id() and _persist_project_metadata() are inherited from GeminiAuthBase
 
     def _check_mixed_tier_warning(self):
         """Check if mixed free/paid tier credentials are loaded and emit warning."""
@@ -832,8 +787,6 @@ class GeminiCliProvider(
             gemini_contents.insert(0, {"role": "user", "parts": [{"text": ""}]})
 
         return system_instruction, gemini_contents
-
-    # NOTE: _fix_tool_response_grouping() is inherited from GeminiToolHandler mixin
 
     def _handle_reasoning_parameters(
         self, payload: Dict[str, Any], model: str

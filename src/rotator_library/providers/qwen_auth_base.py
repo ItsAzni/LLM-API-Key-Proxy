@@ -19,6 +19,8 @@ from glob import glob
 from typing import Dict, Any, Tuple, Union, Optional, List
 
 import httpx
+
+from ..http_client_pool import get_http_pool
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -280,116 +282,117 @@ class QwenAuthBase(BaseTokenManager):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             }
 
-            async with httpx.AsyncClient() as client:
-                for attempt in range(max_retries):
-                    try:
-                        response = await client.post(
-                            TOKEN_ENDPOINT,
-                            headers=headers,
-                            data={
-                                "grant_type": "refresh_token",
-                                "refresh_token": refresh_token,
-                                "client_id": CLIENT_ID,
-                            },
-                            timeout=30.0,
-                        )
-                        response.raise_for_status()
-                        new_token_data = response.json()
-                        break  # Success
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        TOKEN_ENDPOINT,
+                        headers=headers,
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": refresh_token,
+                            "client_id": CLIENT_ID,
+                        },
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
+                    new_token_data = response.json()
+                    break  # Success
 
-                    except httpx.HTTPStatusError as e:
-                        last_error = e
-                        status_code = e.response.status_code
-                        error_body = e.response.text
-                        lib_logger.error(
-                            f"HTTP {status_code} for '{Path(path).name}': {error_body}"
-                        )
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    status_code = e.response.status_code
+                    error_body = e.response.text
+                    lib_logger.error(
+                        f"HTTP {status_code} for '{Path(path).name}': {error_body}"
+                    )
 
-                        # [INVALID GRANT HANDLING] Handle 400/401/403 by raising
-                        # The caller (_process_refresh_queue or initialize_token) will handle re-auth
-                        # We must NOT call initialize_token from here as we hold a lock (would deadlock)
-                        if status_code == 400:
-                            # Check if this is an invalid refresh token error
-                            try:
-                                error_data = e.response.json()
-                                error_type = error_data.get("error", "")
-                                error_desc = error_data.get("error_description", "")
-                            except Exception:
-                                error_type = ""
-                                error_desc = error_body
+                    # [INVALID GRANT HANDLING] Handle 400/401/403 by raising
+                    # The caller (_process_refresh_queue or initialize_token) will handle re-auth
+                    # We must NOT call initialize_token from here as we hold a lock (would deadlock)
+                    if status_code == 400:
+                        # Check if this is an invalid refresh token error
+                        try:
+                            error_data = e.response.json()
+                            error_type = error_data.get("error", "")
+                            error_desc = error_data.get("error_description", "")
+                        except Exception:
+                            error_type = ""
+                            error_desc = error_body
 
-                            if (
-                                "invalid" in error_desc.lower()
-                                or error_type == "invalid_request"
-                            ):
-                                lib_logger.info(
-                                    f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
-                                    f"Queued for re-authentication, rotating to next credential."
-                                )
-                                # Queue for re-auth in background (non-blocking, fire-and-forget)
-                                # This ensures credential gets fixed even if caller doesn't handle it
-                                asyncio.create_task(
-                                    self._queue_refresh(
-                                        path, force=True, needs_reauth=True
-                                    )
-                                )
-                                # Raise rotatable error instead of raw HTTPStatusError
-                                raise CredentialNeedsReauthError(
-                                    credential_path=path,
-                                    message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
-                                )
-                            else:
-                                # Other 400 error - raise it
-                                raise
-
-                        elif status_code in (401, 403):
+                        if (
+                            "invalid" in error_desc.lower()
+                            or error_type == "invalid_request"
+                        ):
                             lib_logger.info(
-                                f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                                f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
                                 f"Queued for re-authentication, rotating to next credential."
                             )
                             # Queue for re-auth in background (non-blocking, fire-and-forget)
+                            # This ensures credential gets fixed even if caller doesn't handle it
                             asyncio.create_task(
-                                self._queue_refresh(path, force=True, needs_reauth=True)
+                                self._queue_refresh(
+                                    path, force=True, needs_reauth=True
+                                )
                             )
                             # Raise rotatable error instead of raw HTTPStatusError
                             raise CredentialNeedsReauthError(
                                 credential_path=path,
-                                message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                                message=f"Refresh token invalid for '{Path(path).name}'. Re-auth queued.",
                             )
-
-                        elif status_code == 429:
-                            retry_after = int(e.response.headers.get("Retry-After", 60))
-                            lib_logger.warning(
-                                f"Rate limited (HTTP 429), retry after {retry_after}s"
-                            )
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_after)
-                                continue
-                            raise
-
-                        elif 500 <= status_code < 600:
-                            if attempt < max_retries - 1:
-                                wait_time = 2**attempt
-                                lib_logger.warning(
-                                    f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
-                                )
-                                await asyncio.sleep(wait_time)
-                                continue
-                            raise
-
                         else:
+                            # Other 400 error - raise it
                             raise
 
-                    except (httpx.RequestError, httpx.TimeoutException) as e:
-                        last_error = e
+                    elif status_code in (401, 403):
+                        lib_logger.info(
+                            f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
+                            f"Queued for re-authentication, rotating to next credential."
+                        )
+                        # Queue for re-auth in background (non-blocking, fire-and-forget)
+                        asyncio.create_task(
+                            self._queue_refresh(path, force=True, needs_reauth=True)
+                        )
+                        # Raise rotatable error instead of raw HTTPStatusError
+                        raise CredentialNeedsReauthError(
+                            credential_path=path,
+                            message=f"Token invalid for '{Path(path).name}' (HTTP {status_code}). Re-auth queued.",
+                        )
+
+                    elif status_code == 429:
+                        retry_after = int(e.response.headers.get("Retry-After", 60))
+                        lib_logger.warning(
+                            f"Rate limited (HTTP 429), retry after {retry_after}s"
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_after)
+                            continue
+                        raise
+
+                    elif 500 <= status_code < 600:
                         if attempt < max_retries - 1:
                             wait_time = 2**attempt
                             lib_logger.warning(
-                                f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                                f"Server error (HTTP {status_code}), retry {attempt + 1}/{max_retries} in {wait_time}s"
                             )
                             await asyncio.sleep(wait_time)
                             continue
                         raise
+
+                    else:
+                        raise
+
+                except (httpx.RequestError, httpx.TimeoutException) as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 2**attempt
+                        lib_logger.warning(
+                            f"Network error during refresh: {e}, retry {attempt + 1}/{max_retries} in {wait_time}s"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
 
             if new_token_data is None:
                 # [BACKOFF TRACKING] Increment failure count and set backoff timer
@@ -887,155 +890,156 @@ class QwenAuthBase(BaseTokenManager):
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
         }
-        async with httpx.AsyncClient() as client:
-            request_data = {
-                "client_id": CLIENT_ID,
-                "scope": SCOPE,
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-            }
-            lib_logger.debug(f"Qwen device code request data: {request_data}")
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        request_data = {
+            "client_id": CLIENT_ID,
+            "scope": SCOPE,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        lib_logger.debug(f"Qwen device code request data: {request_data}")
+        try:
+            dev_response = await client.post(
+                "https://chat.qwen.ai/api/v1/oauth2/device/code",
+                headers=headers,
+                data=request_data,
+            )
+            dev_response.raise_for_status()
+            dev_data = dev_response.json()
+            lib_logger.debug(f"Qwen device auth response: {dev_data}")
+        except httpx.HTTPStatusError as e:
+            lib_logger.error(
+                f"Qwen device code request failed with status {e.response.status_code}: {e.response.text}"
+            )
+            raise e
+
+        # [HEADLESS SUPPORT] Display appropriate instructions
+        if is_headless:
+            auth_panel_text = Text.from_markup(
+                "Running in headless environment (no GUI detected).\n"
+                "Please open the URL below in a browser on another machine to authorize:\n"
+                "1. Visit the URL below to sign in.\n"
+                "2. [bold]Copy your email[/bold] or another unique identifier and authorize the application.\n"
+                "3. You will be prompted to enter your identifier after authorization."
+            )
+        else:
+            auth_panel_text = Text.from_markup(
+                "1. Visit the URL below to sign in.\n"
+                "2. [bold]Copy your email[/bold] or another unique identifier and authorize the application.\n"
+                "3. You will be prompted to enter your identifier after authorization."
+            )
+
+        console.print(
+            Panel(
+                auth_panel_text,
+                title=f"Qwen OAuth Setup for [bold yellow]{display_name}[/bold yellow]",
+                style="bold blue",
+            )
+        )
+        verification_url = dev_data["verification_uri_complete"]
+        escaped_url = rich_escape(verification_url)
+        console.print(
+            f"[bold]URL:[/bold] [link={verification_url}]{escaped_url}[/link]\n"
+        )
+
+        # [HEADLESS SUPPORT] Only attempt browser open if NOT headless
+        if not is_headless:
             try:
-                dev_response = await client.post(
-                    "https://chat.qwen.ai/api/v1/oauth2/device/code",
+                webbrowser.open(dev_data["verification_uri_complete"])
+                lib_logger.info("Browser opened successfully for Qwen OAuth flow")
+            except Exception as e:
+                lib_logger.warning(
+                    f"Failed to open browser automatically: {e}. Please open the URL manually."
+                )
+
+        token_data = None
+        start_time = time.time()
+        interval = dev_data.get("interval", 5)
+
+        with console.status(
+            "[bold green]Polling for token, please complete authentication in the browser...[/bold green]",
+            spinner="dots",
+        ) as status:
+            while time.time() - start_time < dev_data["expires_in"]:
+                poll_response = await client.post(
+                    TOKEN_ENDPOINT,
                     headers=headers,
-                    data=request_data,
+                    data={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "device_code": dev_data["device_code"],
+                        "client_id": CLIENT_ID,
+                        "code_verifier": code_verifier,
+                    },
                 )
-                dev_response.raise_for_status()
-                dev_data = dev_response.json()
-                lib_logger.debug(f"Qwen device auth response: {dev_data}")
-            except httpx.HTTPStatusError as e:
-                lib_logger.error(
-                    f"Qwen device code request failed with status {e.response.status_code}: {e.response.text}"
-                )
-                raise e
-
-            # [HEADLESS SUPPORT] Display appropriate instructions
-            if is_headless:
-                auth_panel_text = Text.from_markup(
-                    "Running in headless environment (no GUI detected).\n"
-                    "Please open the URL below in a browser on another machine to authorize:\n"
-                    "1. Visit the URL below to sign in.\n"
-                    "2. [bold]Copy your email[/bold] or another unique identifier and authorize the application.\n"
-                    "3. You will be prompted to enter your identifier after authorization."
-                )
-            else:
-                auth_panel_text = Text.from_markup(
-                    "1. Visit the URL below to sign in.\n"
-                    "2. [bold]Copy your email[/bold] or another unique identifier and authorize the application.\n"
-                    "3. You will be prompted to enter your identifier after authorization."
-                )
-
-            console.print(
-                Panel(
-                    auth_panel_text,
-                    title=f"Qwen OAuth Setup for [bold yellow]{display_name}[/bold yellow]",
-                    style="bold blue",
-                )
-            )
-            verification_url = dev_data["verification_uri_complete"]
-            escaped_url = rich_escape(verification_url)
-            console.print(
-                f"[bold]URL:[/bold] [link={verification_url}]{escaped_url}[/link]\n"
-            )
-
-            # [HEADLESS SUPPORT] Only attempt browser open if NOT headless
-            if not is_headless:
-                try:
-                    webbrowser.open(dev_data["verification_uri_complete"])
-                    lib_logger.info("Browser opened successfully for Qwen OAuth flow")
-                except Exception as e:
-                    lib_logger.warning(
-                        f"Failed to open browser automatically: {e}. Please open the URL manually."
-                    )
-
-            token_data = None
-            start_time = time.time()
-            interval = dev_data.get("interval", 5)
-
-            with console.status(
-                "[bold green]Polling for token, please complete authentication in the browser...[/bold green]",
-                spinner="dots",
-            ) as status:
-                while time.time() - start_time < dev_data["expires_in"]:
-                    poll_response = await client.post(
-                        TOKEN_ENDPOINT,
-                        headers=headers,
-                        data={
-                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                            "device_code": dev_data["device_code"],
-                            "client_id": CLIENT_ID,
-                            "code_verifier": code_verifier,
-                        },
-                    )
-                    if poll_response.status_code == 200:
-                        token_data = poll_response.json()
-                        lib_logger.info("Successfully received token.")
-                        break
-                    elif poll_response.status_code == 400:
-                        poll_data = poll_response.json()
-                        error_type = poll_data.get("error")
-                        if error_type == "authorization_pending":
-                            lib_logger.debug(
-                                f"Polling status: {error_type}, waiting {interval}s"
-                            )
-                        elif error_type == "slow_down":
-                            interval = int(interval * 1.5)
-                            if interval > 10:
-                                interval = 10
-                            lib_logger.debug(
-                                f"Polling status: {error_type}, waiting {interval}s"
-                            )
-                        else:
-                            raise ValueError(
-                                f"Token polling failed: {poll_data.get('error_description', error_type)}"
-                            )
+                if poll_response.status_code == 200:
+                    token_data = poll_response.json()
+                    lib_logger.info("Successfully received token.")
+                    break
+                elif poll_response.status_code == 400:
+                    poll_data = poll_response.json()
+                    error_type = poll_data.get("error")
+                    if error_type == "authorization_pending":
+                        lib_logger.debug(
+                            f"Polling status: {error_type}, waiting {interval}s"
+                        )
+                    elif error_type == "slow_down":
+                        interval = int(interval * 1.5)
+                        if interval > 10:
+                            interval = 10
+                        lib_logger.debug(
+                            f"Polling status: {error_type}, waiting {interval}s"
+                        )
                     else:
-                        poll_response.raise_for_status()
+                        raise ValueError(
+                            f"Token polling failed: {poll_data.get('error_description', error_type)}"
+                        )
+                else:
+                    poll_response.raise_for_status()
 
-                    await asyncio.sleep(interval)
+                await asyncio.sleep(interval)
 
-            if not token_data:
-                raise TimeoutError("Qwen device flow timed out.")
+        if not token_data:
+            raise TimeoutError("Qwen device flow timed out.")
 
-            creds.update(
-                {
-                    "access_token": token_data["access_token"],
-                    "refresh_token": token_data.get("refresh_token"),
-                    "expiry_date": (time.time() + token_data["expires_in"]) * 1000,
-                    "resource_url": token_data.get("resource_url"),
+        creds.update(
+            {
+                "access_token": token_data["access_token"],
+                "refresh_token": token_data.get("refresh_token"),
+                "expiry_date": (time.time() + token_data["expires_in"]) * 1000,
+                "resource_url": token_data.get("resource_url"),
+            }
+        )
+
+        # Prompt for user identifier and create metadata object if needed
+        if not creds.get("_proxy_metadata", {}).get("email"):
+            try:
+                prompt_text = Text.from_markup(
+                    f"\\n[bold]Please enter your email or a unique identifier for [yellow]'{display_name}'[/yellow][/bold]"
+                )
+                email = Prompt.ask(prompt_text)
+                creds["_proxy_metadata"] = {
+                    "email": email.strip(),
+                    "last_check_timestamp": time.time(),
                 }
-            )
+            except (EOFError, KeyboardInterrupt):
+                console.print(
+                    "\\n[bold yellow]No identifier provided. Deduplication will not be possible.[/bold yellow]"
+                )
+                creds["_proxy_metadata"] = {
+                    "email": None,
+                    "last_check_timestamp": time.time(),
+                }
 
-            # Prompt for user identifier and create metadata object if needed
-            if not creds.get("_proxy_metadata", {}).get("email"):
-                try:
-                    prompt_text = Text.from_markup(
-                        f"\\n[bold]Please enter your email or a unique identifier for [yellow]'{display_name}'[/yellow][/bold]"
-                    )
-                    email = Prompt.ask(prompt_text)
-                    creds["_proxy_metadata"] = {
-                        "email": email.strip(),
-                        "last_check_timestamp": time.time(),
-                    }
-                except (EOFError, KeyboardInterrupt):
-                    console.print(
-                        "\\n[bold yellow]No identifier provided. Deduplication will not be possible.[/bold yellow]"
-                    )
-                    creds["_proxy_metadata"] = {
-                        "email": None,
-                        "last_check_timestamp": time.time(),
-                    }
-
-            if path:
-                if not await self._save_credentials(path, creds):
-                    raise IOError(
-                        f"Failed to save OAuth credentials to disk for '{display_name}'. "
-                        f"Please retry authentication."
-                    )
-            lib_logger.info(
-                f"Qwen OAuth initialized successfully for '{display_name}'."
-            )
+        if path:
+            if not await self._save_credentials(path, creds):
+                raise IOError(
+                    f"Failed to save OAuth credentials to disk for '{display_name}'. "
+                    f"Please retry authentication."
+                )
+        lib_logger.info(
+            f"Qwen OAuth initialized successfully for '{display_name}'."
+        )
         return creds
 
     async def initialize_token(
