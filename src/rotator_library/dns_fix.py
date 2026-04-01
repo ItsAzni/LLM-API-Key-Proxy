@@ -240,12 +240,14 @@ def _dns_query(host: str, dns_host: str, dns_port: int = 53) -> Optional[str]:
         query = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
 
         # Question: domain name (encode each label with length prefix)
+        query_parts: List[bytes] = [struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)]
         for part in host.split("."):
-            query += bytes([len(part)]) + part.encode("ascii")
-        query += b"\x00"  # Null terminator
+            query_parts.append(bytes([len(part)]) + part.encode("ascii"))
+        query_parts.append(b"\x00")  # Null terminator
 
         # Question: type A (1), class IN (1)
-        query += struct.pack("!HH", 1, 1)
+        query_parts.append(struct.pack("!HH", 1, 1))
+        query = b"".join(query_parts)
 
         # Send DNS query via UDP
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

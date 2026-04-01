@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+from ...http_client_pool import get_http_pool
 
 # Use the shared rotator_library logger
 lib_logger = logging.getLogger("rotator_library")
@@ -105,10 +106,11 @@ class NanoGptQuotaTracker:
                 response.raise_for_status()
                 data = response.json()
             else:
-                async with httpx.AsyncClient(timeout=30.0) as new_client:
-                    response = await new_client.get(url, headers=headers)
-                    response.raise_for_status()
-                    data = response.json()
+                pool = await get_http_pool()
+                new_client = await pool.get_client_async()
+                response = await new_client.get(url, headers=headers, timeout=30)
+                response.raise_for_status()
+                data = response.json()
 
             # Parse response
             daily = data.get("daily", {})

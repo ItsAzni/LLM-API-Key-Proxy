@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from ...http_client_pool import get_http_pool
+
 # Use the shared rotator_library logger
 lib_logger = logging.getLogger("rotator_library")
 
@@ -98,10 +100,11 @@ class ChutesQuotaTracker:
                     CHUTES_QUOTA_API_URL, headers=headers, timeout=30
                 )
             else:
-                async with httpx.AsyncClient() as new_client:
-                    response = await new_client.get(
-                        CHUTES_QUOTA_API_URL, headers=headers, timeout=30
-                    )
+                pool = await get_http_pool()
+                new_client = await pool.get_client_async()
+                response = await new_client.get(
+                    CHUTES_QUOTA_API_URL, headers=headers, timeout=30
+                )
             response.raise_for_status()
             data = response.json()
 
@@ -312,11 +315,12 @@ class ChutesQuotaTracker:
             async with semaphore:
                 return identifier, await self.fetch_quota_usage(api_key, client)
 
-        async with httpx.AsyncClient() as client:
-            tasks = [
-                fetch_with_semaphore(ident, key, client) for ident, key in api_keys
-            ]
-            fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        pool = await get_http_pool()
+        client = await pool.get_client_async()
+        tasks = [
+            fetch_with_semaphore(ident, key, client) for ident, key in api_keys
+        ]
+        fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in fetch_results:
             if isinstance(result, Exception):

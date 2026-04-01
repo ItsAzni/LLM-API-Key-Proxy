@@ -459,8 +459,11 @@ async def anthropic_streaming_wrapper_fast(
                 func = tc.get("function", {})
                 if func.get("name"):
                     tool_calls_by_index[tc_index]["name"] = func["name"]
+                args_entry = tool_calls_by_index[tc_index]
                 if func.get("arguments"):
-                    tool_calls_by_index[tc_index]["arguments"] += func["arguments"]
+                    if "chunks" not in args_entry:
+                        args_entry["chunks"] = []
+                    args_entry["chunks"].append(func["arguments"])
                     event_str = _make_input_json_delta_event(
                         tool_block_indices[tc_index], func["arguments"]
                     )
@@ -538,7 +541,10 @@ def _log_anthropic_response(
     for tc_index in sorted(tool_calls_by_index.keys()):
         tc = tool_calls_by_index[tc_index]
         try:
-            input_data = json_loads(tc.get("arguments", "{}"))
+            args_str = "".join(tc.get("chunks", [])) if "chunks" in tc else tc.get("arguments", "{}")
+            if not args_str:
+                args_str = "{}"
+            input_data = json_loads(args_str)
         except Exception:
             input_data = {}
         content_blocks.append({

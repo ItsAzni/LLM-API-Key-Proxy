@@ -1106,35 +1106,39 @@ class GeminiCliProvider(
                             "name" in tc_chunk["function"]
                             and tc_chunk["function"]["name"] is not None
                         ):
-                            aggregated_tool_calls[index]["function"]["name"] += (
-                                tc_chunk["function"]["name"]
-                            )
+                            tc_fn = aggregated_tool_calls[index]["function"]
+                            if "_name_chunks" not in tc_fn:
+                                tc_fn["_name_chunks"] = []
+                            tc_fn["_name_chunks"].append(tc_chunk["function"]["name"])
                         if (
                             "arguments" in tc_chunk["function"]
                             and tc_chunk["function"]["arguments"] is not None
                         ):
-                            aggregated_tool_calls[index]["function"]["arguments"] += (
+                            tc_fn = aggregated_tool_calls[index]["function"]
+                            if "_args_chunks" not in tc_fn:
+                                tc_fn["_args_chunks"] = []
+                            tc_fn["_args_chunks"].append(
                                 tc_chunk["function"]["arguments"]
                             )
 
             # Aggregate function calls (legacy format)
             if "function_call" in delta and delta["function_call"] is not None:
                 if "function_call" not in final_message:
-                    final_message["function_call"] = {"name": "", "arguments": ""}
+                    final_message["function_call"] = {"_name_chunks": [], "_args_chunks": []}
                 if (
                     "name" in delta["function_call"]
                     and delta["function_call"]["name"] is not None
                 ):
-                    final_message["function_call"]["name"] += delta["function_call"][
-                        "name"
-                    ]
+                    final_message["function_call"]["_name_chunks"].append(
+                        delta["function_call"]["name"]
+                    )
                 if (
                     "arguments" in delta["function_call"]
                     and delta["function_call"]["arguments"] is not None
                 ):
-                    final_message["function_call"]["arguments"] += delta[
-                        "function_call"
-                    ]["arguments"]
+                    final_message["function_call"]["_args_chunks"].append(
+                        delta["function_call"]["arguments"]
+                    )
 
             # Track finish_reason from chunks (respects length, content_filter, etc.)
             if choice.get("finish_reason"):
@@ -1148,7 +1152,21 @@ class GeminiCliProvider(
 
         # Add tool calls to final message if any
         if aggregated_tool_calls:
+            for tc_index, tc in aggregated_tool_calls.items():
+                fn = tc["function"]
+                if "_name_chunks" in fn:
+                    fn["name"] = "".join(fn.pop("_name_chunks"))
+                if "_args_chunks" in fn:
+                    fn["arguments"] = "".join(fn.pop("_args_chunks"))
             final_message["tool_calls"] = list(aggregated_tool_calls.values())
+
+        # Resolve function_call chunks
+        if "function_call" in final_message:
+            fc = final_message["function_call"]
+            if "_name_chunks" in fc:
+                fc["name"] = "".join(fc.pop("_name_chunks"))
+            if "_args_chunks" in fc:
+                fc["arguments"] = "".join(fc.pop("_args_chunks"))
 
         # Ensure standard fields are present for consistent logging
         for field in ["content", "tool_calls", "function_call"]:
@@ -1222,8 +1240,6 @@ class GeminiCliProvider(
         # Note: additionalProperties is preserved for _enforce_strict_schema to handle
 
         return schema
-
-    # NOTE: _enforce_strict_schema() is inherited from GeminiToolHandler mixin
 
     def _transform_tool_schemas(
         self, tools: List[Dict[str, Any]], model: str = ""
@@ -1307,11 +1323,6 @@ class GeminiCliProvider(
                 transformed_declarations.append(new_function)
 
         return transformed_declarations
-
-    # NOTE: _inject_signature_into_description() is inherited from GeminiToolHandler mixin
-    # The inherited version requires passing the description_prompt parameter
-
-    # NOTE: _format_type_hint() is inherited from GeminiToolHandler mixin
 
     def _inject_gemini3_system_instruction(
         self, request_payload: Dict[str, Any]

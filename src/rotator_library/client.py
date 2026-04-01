@@ -136,6 +136,7 @@ DEFAULT_API_KEY_MAX_CONCURRENT_REQUESTS = 40
 from .usage_manager import UsageManager
 from .failure_logger import log_failure, configure_failure_logger
 from .error_handler import (
+    ClassifiedError,
     PreRequestCallbackError,
     CredentialNeedsReauthError,
     classify_error,
@@ -695,6 +696,33 @@ class RotatingClient:
 
         # Track consecutive quota failures per credential for intelligent rotation
         self._consecutive_quota_failures: Dict[str, int] = {}
+
+    async def _process_rate_limit(
+        self,
+        provider: str,
+        credential: str,
+        error: Exception,
+        error_body: Optional[str],
+        classified_error: "ClassifiedError",
+    ) -> bool:
+        """
+        Process a rate limit error through the unified 429 handler.
+
+        Returns True if IP-level throttle was detected (caller should set
+        ip_throttle_detected = True, or use this method as the condition:
+        ip_throttle_detected |= await self._process_rate_limit(...)).
+        """
+        action = await handle_429_error(
+            provider=provider,
+            credential=credential,
+            error=error,
+            error_body=error_body,
+            retry_after=classified_error.retry_after,
+            ip_throttle_detector=self.ip_throttle_detector,
+            circuit_breaker=self.circuit_breaker,
+            cooldown_manager=self.cooldown_manager,
+        )
+        return action.action_type == ThrottleActionType.PROVIDER_COOLDOWN
 
     def increment_quota_failures(self, credential_id: str) -> bool:
         """
@@ -2250,53 +2278,17 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=e,
-                                        error_body=str(e) if e else None,
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, e, str(e) if e else None, classified_error
+                                )
                                 lib_logger.error(
                                     f"Non-recoverable error ({classified_error.error_type}) during custom provider call. Failing."
                                 )
                                 raise last_exception
 
-                            # Handle 429 errors through unified handler
-                            if classified_error.error_type in (
-                                "ip_rate_limit",
-                                "rate_limit",
-                                "quota_exceeded",
-                            ):
-                                action = await handle_429_error(
-                                    provider=provider,
-                                    credential=current_cred,
-                                    error=e,
-                                    error_body=str(e) if e else None,
-                                    retry_after=classified_error.retry_after,
-                                    ip_throttle_detector=self.ip_throttle_detector,
-                                    circuit_breaker=self.circuit_breaker,
-                                    cooldown_manager=self.cooldown_manager,
-                                )
-                                if (
-                                    action.action_type
-                                    == ThrottleActionType.PROVIDER_COOLDOWN
-                                ):
-                                    ip_throttle_detected = True
+                            ip_throttle_detected |= await self._process_rate_limit(
+                                provider, current_cred, e, str(e) if e else None, classified_error
+                            )
 
                             # Track consecutive quota failures and force rotation if needed
                             if classified_error.error_type == "quota_exceeded":
@@ -2562,27 +2554,9 @@ class RotatingClient:
                                 f"Key {mask_credential(current_cred)} hit rate limit for {model}. Rotating key."
                             )
 
-                            # Only trigger provider-wide cooldown for rate limits, not quota issues
-                            if (
-                                classified_error.status_code == 429
-                                and classified_error.error_type != "quota_exceeded"
-                            ):
-                                # Handle 429 errors through unified handler
-                                action = await handle_429_error(
-                                    provider=provider,
-                                    credential=current_cred,
-                                    error=e,
-                                    error_body=str(e) if e else None,
-                                    retry_after=classified_error.retry_after,
-                                    ip_throttle_detector=self.ip_throttle_detector,
-                                    circuit_breaker=self.circuit_breaker,
-                                    cooldown_manager=self.cooldown_manager,
-                                )
-                                if (
-                                    action.action_type
-                                    == ThrottleActionType.PROVIDER_COOLDOWN
-                                ):
-                                    ip_throttle_detected = True
+                            ip_throttle_detected |= await self._process_rate_limit(
+                                provider, current_cred, e, str(e) if e else None, classified_error
+                            )
 
                             # Track consecutive quota failures and force rotation if needed
                             if classified_error.error_type == "quota_exceeded":
@@ -2694,27 +2668,9 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=e,
-                                        error_body=str(e) if e else None,
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, e, str(e) if e else None, classified_error
+                                )
                                 lib_logger.error(
                                     f"Non-recoverable error ({classified_error.error_type}). Failing request."
                                 )
@@ -2725,27 +2681,9 @@ class RotatingClient:
                                 current_cred, classified_error, error_message
                             )
 
-                            # Handle 429 errors through unified handler
-                            if classified_error.error_type in (
-                                "ip_rate_limit",
-                                "rate_limit",
-                                "quota_exceeded",
-                            ):
-                                action = await handle_429_error(
-                                    provider=provider,
-                                    credential=current_cred,
-                                    error=e,
-                                    error_body=str(e) if e else None,
-                                    retry_after=classified_error.retry_after,
-                                    ip_throttle_detector=self.ip_throttle_detector,
-                                    circuit_breaker=self.circuit_breaker,
-                                    cooldown_manager=self.cooldown_manager,
-                                )
-                                if (
-                                    action.action_type
-                                    == ThrottleActionType.PROVIDER_COOLDOWN
-                                ):
-                                    ip_throttle_detected = True
+                            ip_throttle_detected |= await self._process_rate_limit(
+                                provider, current_cred, e, str(e) if e else None, classified_error
+                            )
 
                             # Check if we should retry same key (server errors with retries left)
                             if (
@@ -2801,27 +2739,9 @@ class RotatingClient:
                                 f"Key {mask_credential(current_cred)} {classified_error.error_type} (HTTP {classified_error.status_code})."
                             )
 
-                            # Handle 429 errors through unified handler
-                            if classified_error.error_type in (
-                                "ip_rate_limit",
-                                "rate_limit",
-                                "quota_exceeded",
-                            ):
-                                action = await handle_429_error(
-                                    provider=provider,
-                                    credential=current_cred,
-                                    error=e,
-                                    error_body=str(e) if e else None,
-                                    retry_after=classified_error.retry_after,
-                                    ip_throttle_detector=self.ip_throttle_detector,
-                                    circuit_breaker=self.circuit_breaker,
-                                    cooldown_manager=self.cooldown_manager,
-                                )
-                                if (
-                                    action.action_type
-                                    == ThrottleActionType.PROVIDER_COOLDOWN
-                                ):
-                                    ip_throttle_detected = True
+                            ip_throttle_detected |= await self._process_rate_limit(
+                                provider, current_cred, e, str(e) if e else None, classified_error
+                            )
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
@@ -3114,53 +3034,17 @@ class RotatingClient:
 
                                 # Check if this error should trigger rotation
                                 if not should_rotate_on_error(classified_error):
-                                    # Handle 429 errors through unified handler
-                                    if classified_error.error_type in (
-                                        "ip_rate_limit",
-                                        "rate_limit",
-                                        "quota_exceeded",
-                                    ):
-                                        action = await handle_429_error(
-                                            provider=provider,
-                                            credential=current_cred,
-                                            error=e,
-                                            error_body=str(e) if e else None,
-                                            retry_after=classified_error.retry_after,
-                                            ip_throttle_detector=self.ip_throttle_detector,
-                                            circuit_breaker=self.circuit_breaker,
-                                            cooldown_manager=self.cooldown_manager,
-                                        )
-                                        if (
-                                            action.action_type
-                                            == ThrottleActionType.PROVIDER_COOLDOWN
-                                        ):
-                                            ip_throttle_detected = True
+                                    ip_throttle_detected |= await self._process_rate_limit(
+                                        provider, current_cred, e, str(e) if e else None, classified_error
+                                    )
                                     lib_logger.error(
                                         f"Non-recoverable error ({classified_error.error_type}) during custom stream. Failing."
                                     )
                                     raise last_exception
 
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=e,
-                                        error_body=str(e) if e else None,
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, e, str(e) if e else None, classified_error
+                                )
 
                                 await self.usage_manager.record_failure(
                                     current_cred, model, classified_error
@@ -3260,53 +3144,17 @@ class RotatingClient:
 
                                 # Check if this error should trigger rotation
                                 if not should_rotate_on_error(classified_error):
-                                    # Handle 429 errors through unified handler
-                                    if classified_error.error_type in (
-                                        "ip_rate_limit",
-                                        "rate_limit",
-                                        "quota_exceeded",
-                                    ):
-                                        action = await handle_429_error(
-                                            provider=provider,
-                                            credential=current_cred,
-                                            error=e,
-                                            error_body=str(e) if e else None,
-                                            retry_after=classified_error.retry_after,
-                                            ip_throttle_detector=self.ip_throttle_detector,
-                                            circuit_breaker=self.circuit_breaker,
-                                            cooldown_manager=self.cooldown_manager,
-                                        )
-                                        if (
-                                            action.action_type
-                                            == ThrottleActionType.PROVIDER_COOLDOWN
-                                        ):
-                                            ip_throttle_detected = True
+                                    ip_throttle_detected |= await self._process_rate_limit(
+                                        provider, current_cred, e, str(e) if e else None, classified_error
+                                    )
                                     lib_logger.error(
                                         f"Non-recoverable error ({classified_error.error_type}). Failing."
                                     )
                                     raise last_exception
 
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=e,
-                                        error_body=str(e) if e else None,
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, e, str(e) if e else None, classified_error
+                                )
 
                                 await self.usage_manager.record_failure(
                                     current_cred, model, classified_error
@@ -3480,53 +3328,34 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=original_exc,
-                                        error_body=(
-                                            str(original_exc) if original_exc else None
-                                        ),
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, original_exc,
+                                    str(original_exc) if original_exc else None, classified_error
+                                )
 
-                                    # Add exponential backoff delay before retry
-                                    wait_time = 2**attempt
-                                    lib_logger.warning(
-                                        f"Rate limit ({classified_error.error_type}) during litellm stream. "
-                                        f"Waiting {wait_time}s before retry."
-                                    )
-                                    await asyncio.sleep(wait_time)
+                                # Add exponential backoff delay before retry
+                                wait_time = 2**attempt
+                                lib_logger.warning(
+                                    f"Rate limit ({classified_error.error_type}) during litellm stream. "
+                                    f"Waiting {wait_time}s before retry."
+                                )
+                                await asyncio.sleep(wait_time)
 
-                                    # Record failure and rotate to next credential
-                                    await self.usage_manager.record_failure(
-                                        current_cred, model, classified_error
-                                    )
-                                    lib_logger.warning(
-                                        f"Cred {mask_credential(current_cred)} {classified_error.error_type} "
-                                        f"(HTTP {classified_error.status_code}). Rotating."
-                                    )
-                                    break  # Break inner try to rotate to next credential
-                                else:
-                                    # Truly non-recoverable error
-                                    lib_logger.error(
-                                        f"Non-recoverable error ({classified_error.error_type}) during litellm stream. Failing."
-                                    )
-                                    raise last_exception
+                                # Record failure and rotate to next credential
+                                await self.usage_manager.record_failure(
+                                    current_cred, model, classified_error
+                                )
+                                lib_logger.warning(
+                                    f"Cred {mask_credential(current_cred)} {classified_error.error_type} "
+                                    f"(HTTP {classified_error.status_code}). Rotating."
+                                )
+                                break  # Break inner try to rotate to next credential
+
+                            # Truly non-recoverable error
+                            lib_logger.error(
+                                f"Non-recoverable error ({classified_error.error_type}) during litellm stream. Failing."
+                            )
+                            raise last_exception
 
                             try:
                                 # The full error JSON is in the string representation of the exception.
@@ -3638,29 +3467,10 @@ class RotatingClient:
                                     f"Cred {mask_credential(current_cred)} {classified_error.error_type}. Rotating."
                                 )
 
-                                # Handle 429 errors through unified handler
-                                if classified_error.error_type in (
-                                    "ip_rate_limit",
-                                    "rate_limit",
-                                    "quota_exceeded",
-                                ):
-                                    action = await handle_429_error(
-                                        provider=provider,
-                                        credential=current_cred,
-                                        error=original_exc,
-                                        error_body=(
-                                            str(original_exc) if original_exc else None
-                                        ),
-                                        retry_after=classified_error.retry_after,
-                                        ip_throttle_detector=self.ip_throttle_detector,
-                                        circuit_breaker=self.circuit_breaker,
-                                        cooldown_manager=self.cooldown_manager,
-                                    )
-                                    if (
-                                        action.action_type
-                                        == ThrottleActionType.PROVIDER_COOLDOWN
-                                    ):
-                                        ip_throttle_detected = True
+                                ip_throttle_detected |= await self._process_rate_limit(
+                                    provider, current_cred, original_exc,
+                                    str(original_exc) if original_exc else None, classified_error
+                                )
 
                                 await self.usage_manager.record_failure(
                                     current_cred, model, classified_error
@@ -3758,27 +3568,9 @@ class RotatingClient:
                                 f"Credential {mask_credential(current_cred)} failed with {classified_error.error_type} (Status: {classified_error.status_code}). Error: {error_message_text}."
                             )
 
-                            # Handle 429 errors through unified handler
-                            if classified_error.error_type in (
-                                "ip_rate_limit",
-                                "rate_limit",
-                                "quota_exceeded",
-                            ):
-                                action = await handle_429_error(
-                                    provider=provider,
-                                    credential=current_cred,
-                                    error=e,
-                                    error_body=str(e) if e else None,
-                                    retry_after=classified_error.retry_after,
-                                    ip_throttle_detector=self.ip_throttle_detector,
-                                    circuit_breaker=self.circuit_breaker,
-                                    cooldown_manager=self.cooldown_manager,
-                                )
-                                if (
-                                    action.action_type
-                                    == ThrottleActionType.PROVIDER_COOLDOWN
-                                ):
-                                    ip_throttle_detected = True
+                            ip_throttle_detected |= await self._process_rate_limit(
+                                provider, current_cred, e, str(e) if e else None, classified_error
+                            )
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):

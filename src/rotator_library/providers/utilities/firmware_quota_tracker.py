@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
+from ...http_client_pool import get_http_pool
 
 # Use the shared rotator_library logger
 lib_logger = logging.getLogger("rotator_library")
@@ -96,10 +97,11 @@ class FirmwareQuotaTracker:
                     quota_url, headers=headers, timeout=30
                 )
             else:
-                async with httpx.AsyncClient() as new_client:
-                    response = await new_client.get(
-                        quota_url, headers=headers, timeout=30
-                    )
+                pool = await get_http_pool()
+                new_client = await pool.get_client_async()
+                response = await new_client.get(
+                    quota_url, headers=headers, timeout=30
+                )
             response.raise_for_status()
             data = response.json()
 

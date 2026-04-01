@@ -167,6 +167,13 @@ class UsageManager:
         self._timeout_lock = asyncio.Lock()
         self._claimed_on_timeout: Set[str] = set()
 
+        # Lazy caches for stable quota group config
+        # (key, model) -> group_name or None
+        self._quota_group_cache: Dict[str, Dict[str, Optional[str]]] = {}
+        # (key, group) -> (models_list, request_count_at_snapshot)
+        # Used by record_success to skip syncing siblings when count unchanged
+        self._grouped_models_cache: Dict[str, Dict[str, Tuple[List[str], int]]] = {}
+
         # Resilient writer for usage data persistence
         self._state_writer = ResilientStateWriter(file_path, lib_logger)
 
@@ -1008,6 +1015,10 @@ class UsageManager:
         """
         Get the quota group for a model, if the provider defines one.
 
+        Uses a lazy cache since quota groups are stable config that rarely
+        changes. Invalidates when custom_caps are updated (call _invalidate_quota_caches
+        if needed).
+
         Args:
             credential: The credential identifier
             model: Model name (with or without provider prefix)
@@ -1015,17 +1026,27 @@ class UsageManager:
         Returns:
             Group name (e.g., "claude") or None if not grouped
         """
+        # Check cache
+        key_cache = self._quota_group_cache.get(credential)
+        if key_cache is not None and model in key_cache:
+            return key_cache[model]
+
         provider = self._get_provider_from_credential(credential)
         plugin_instance = self._get_provider_instance(provider)
 
+        result = None
         if plugin_instance and hasattr(plugin_instance, "get_model_quota_group"):
-            return plugin_instance.get_model_quota_group(model)
+            result = plugin_instance.get_model_quota_group(model)
 
-        return None
+        # Populate cache
+        if credential not in self._quota_group_cache:
+            self._quota_group_cache[credential] = {}
+        self._quota_group_cache[credential][model] = result
+        return result
 
     def _get_grouped_models(self, credential: str, group: str) -> List[str]:
         """
-        Get all model names in a quota group (with provider prefix), normalized.
+        Get all model_names in a quota group (with provider prefix), normalized.
 
         Returns only public-facing model names, deduplicated. Internal variants
         (e.g., claude-sonnet-4-5-thinking) are normalized to their public name
@@ -1039,6 +1060,12 @@ class UsageManager:
             List of normalized, deduplicated model names with provider prefix
             (e.g., ["antigravity/claude-sonnet-4.5", "antigravity/claude-opus-4.5"])
         """
+        # Check cache
+        group_key_cache = self._grouped_models_cache.get(credential)
+        if group_key_cache is not None and group in group_key_cache:
+            models_list, _ = group_key_cache[group]
+            return models_list
+
         provider = self._get_provider_from_credential(credential)
         plugin_instance = self._get_provider_instance(provider)
 
@@ -1055,10 +1082,17 @@ class UsageManager:
                     if norm not in seen:
                         seen.add(norm)
                         normalized.append(norm)
+                if credential not in self._grouped_models_cache:
+                    self._grouped_models_cache[credential] = {}
+                self._grouped_models_cache[credential][group] = (normalized, -1)
                 return normalized
 
             # Fallback: just add provider prefix
-            return [f"{provider}/{m}" for m in models]
+            result = [f"{provider}/{m}" for m in models]
+            if credential not in self._grouped_models_cache:
+                self._grouped_models_cache[credential] = {}
+            self._grouped_models_cache[credential][group] = (result, -1)
+            return result
 
         return []
 
@@ -2287,30 +2321,37 @@ class UsageManager:
 
             # Group credentials by priority level (if priorities provided)
             if credential_priorities:
-                # Group keys by priority level
-                priority_groups = {}
+                # Snapshot cooldown data inside the lock, then release immediately
+                cooldown_snapshot: Dict[str, Tuple[float, float]] = {}
                 async with self._data_lock.read():
                     for key in available_keys:
                         key_data = self._usage_data.get(key, {})
-
-                        # Skip keys on cooldown (use normalized model for lookup)
-                        if (key_data.get("key_cooldown_until") or 0) > now or (
+                        cooldown_snapshot[key] = (
+                            key_data.get("key_cooldown_until") or 0,
                             key_data.get("model_cooldowns", {}).get(normalized_model)
-                            or 0
-                        ) > now:
-                            continue
+                            or 0,
+                        )
 
-                        # Get priority for this key (default to 999 if not specified)
-                        priority = credential_priorities.get(key, 999)
+                # Group keys by priority level — OUTSIDE the read lock
+                priority_groups = {}
+                for key in available_keys:
+                    key_cd, model_cd = cooldown_snapshot.get(key, (0, 0))
 
-                        # Get usage count for load balancing within priority groups
-                        # Uses grouped usage if model is in a quota group
-                        usage_count = self._get_grouped_usage_count(key, model)
+                    # Skip keys on cooldown (use normalized model for lookup)
+                    if key_cd > now or model_cd > now:
+                        continue
 
-                        # Group by priority
-                        if priority not in priority_groups:
-                            priority_groups[priority] = []
-                        priority_groups[priority].append((key, usage_count))
+                    # Get priority for this key (default to 999 if not specified)
+                    priority = credential_priorities.get(key, 999)
+
+                    # Get usage count for load balancing within priority groups
+                    # Uses grouped usage if model is in a quota group
+                    usage_count = self._get_grouped_usage_count(key, model)
+
+                    # Group by priority
+                    if priority not in priority_groups:
+                        priority_groups[priority] = []
+                    priority_groups[priority].append((key, usage_count))
 
                 # Try priority groups in order (1, 2, 3, ...)
                 sorted_priorities = sorted(priority_groups.keys())
@@ -2530,33 +2571,40 @@ class UsageManager:
 
                 tier1_keys, tier2_keys = [], []
 
-                # First, filter the list of available keys to exclude any on cooldown.
+                # First, snapshot cooldown data inside the lock, then release immediately
+                cooldown_snapshot: Dict[str, Tuple[float, float]] = {}
                 async with self._data_lock.read():
                     for key in available_keys:
                         key_data = self._usage_data.get(key, {})
-
-                        # Skip keys on cooldown (use normalized model for lookup)
-                        if (key_data.get("key_cooldown_until") or 0) > now or (
+                        cooldown_snapshot[key] = (
+                            key_data.get("key_cooldown_until") or 0,
                             key_data.get("model_cooldowns", {}).get(normalized_model)
-                            or 0
-                        ) > now:
-                            continue
+                            or 0,
+                        )
 
-                        # Prioritize keys based on their current usage to ensure load balancing.
-                        # Uses grouped usage if model is in a quota group
-                        usage_count = self._get_grouped_usage_count(key, model)
-                        key_state = self.key_states[key]
+                # Filter and tier keys — OUTSIDE the read lock
+                for key in available_keys:
+                    key_cd, model_cd = cooldown_snapshot.get(key, (0, 0))
 
-                        # Tier 1: Keys already active for this model that can accept more concurrent requests.
-                        if (
-                            key_state["models_in_use"].get(model, 0)
-                            < effective_max_concurrent
-                            and key_state["models_in_use"]
-                        ):
-                            tier1_keys.append((key, usage_count))
-                        # Tier 2: Completely idle keys.
-                        elif not key_state["models_in_use"]:
-                            tier2_keys.append((key, usage_count))
+                    # Skip keys on cooldown (use normalized model for lookup)
+                    if key_cd > now or model_cd > now:
+                        continue
+
+                    # Prioritize keys based on their current usage to ensure load balancing.
+                    # Uses grouped usage if model is in a quota group
+                    usage_count = self._get_grouped_usage_count(key, model)
+                    key_state = self.key_states[key]
+
+                    # Tier 1: Keys already active for this model that can accept more concurrent requests.
+                    if (
+                        key_state["models_in_use"].get(model, 0)
+                        < effective_max_concurrent
+                        and key_state["models_in_use"]
+                    ):
+                        tier1_keys.append((key, usage_count))
+                    # Tier 2: Completely idle keys.
+                    elif not key_state["models_in_use"]:
+                        tier2_keys.append((key, usage_count))
 
                 # Fair cycle filtering (non-priority case)
                 if provider and self._is_fair_cycle_enabled(provider, rotation_mode):
@@ -2867,39 +2915,46 @@ class UsageManager:
                 model_data["request_count"] = model_data.get("request_count", 0) + 1
 
                 # Sync request_count across quota group (for providers with shared quota pools)
+                # Uses cached grouped models list (quota groups are stable config).
+                # Only writes siblings whose request_count actually differs to avoid
+                # unnecessary setdefault + dict mutations on hot path.
                 new_request_count = model_data["request_count"]
                 group = self._get_model_quota_group(key, model)
                 if group:
                     grouped_models = self._get_grouped_models(key, group)
+                    window_start = model_data.get("window_start_ts")
+                    max_req = model_data.get("quota_max_requests")
                     for grouped_model in grouped_models:
-                        if grouped_model != model:
-                            other_model_data = key_data["models"].setdefault(
-                                grouped_model,
-                                {
-                                    "window_start_ts": None,
-                                    "quota_reset_ts": None,
-                                    "success_count": 0,
-                                    "failure_count": 0,
-                                    "request_count": 0,
-                                    "prompt_tokens": 0,
-                                    "prompt_tokens_cached": 0,
-                                    "completion_tokens": 0,
-                                    "thinking_tokens": 0,
-                                    "approx_cost": 0.0,
-                                },
+                        if grouped_model == model:
+                            continue
+                        other_model_data = key_data["models"].setdefault(
+                            grouped_model,
+                            {
+                                "window_start_ts": None,
+                                "quota_reset_ts": None,
+                                "success_count": 0,
+                                "failure_count": 0,
+                                "request_count": 0,
+                                "prompt_tokens": 0,
+                                "prompt_tokens_cached": 0,
+                                "completion_tokens": 0,
+                                "thinking_tokens": 0,
+                                "approx_cost": 0.0,
+                            },
+                        )
+                        # Skip write if value already matches
+                        if other_model_data.get("request_count") == new_request_count:
+                            continue
+                        other_model_data["request_count"] = new_request_count
+                        # Sync window timing (shared quota pool = shared window)
+                        if window_start:
+                            other_model_data["window_start_ts"] = window_start
+                        # Also sync quota_max_requests if set
+                        if max_req:
+                            other_model_data["quota_max_requests"] = max_req
+                            other_model_data["quota_display"] = (
+                                f"{new_request_count}/{max_req}"
                             )
-                            other_model_data["request_count"] = new_request_count
-                            # Sync window timing (shared quota pool = shared window)
-                            window_start = model_data.get("window_start_ts")
-                            if window_start:
-                                other_model_data["window_start_ts"] = window_start
-                            # Also sync quota_max_requests if set
-                            max_req = model_data.get("quota_max_requests")
-                            if max_req:
-                                other_model_data["quota_max_requests"] = max_req
-                                other_model_data["quota_display"] = (
-                                    f"{new_request_count}/{max_req}"
-                                )
 
                 # Update quota_display if max_requests is set (Antigravity-specific)
                 max_req = model_data.get("quota_max_requests")

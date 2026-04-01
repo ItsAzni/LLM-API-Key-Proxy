@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import httpx
 
+from ...http_client_pool import get_http_pool
 from .base_quota_tracker import BaseQuotaTracker, QUOTA_DISCOVERY_DELAY_SECONDS
 
 if TYPE_CHECKING:
@@ -405,18 +406,19 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url, headers=headers, json=payload, timeout=60
-                )
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            response = await client.post(
+                url, headers=headers, json=payload, timeout=60
+            )
 
-                if response.status_code == 200:
-                    return {"success": True, "error": None}
-                else:
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status_code}: {response.text[:200]}",
-                    }
+            if response.status_code == 200:
+                return {"success": True, "error": None}
+            else:
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status_code}: {response.text[:200]}",
+                }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -483,12 +485,13 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
             }
             payload = {"project": project_id} if project_id else {}
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url, headers=headers, json=payload, timeout=30
-                )
-                response.raise_for_status()
-                data = response.json()
+            pool = await get_http_pool()
+            client = await pool.get_client_async()
+            response = await client.post(
+                url, headers=headers, json=payload, timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
 
             # Parse models
             models_data = {}

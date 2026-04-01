@@ -3580,8 +3580,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         candidate = candidates[0]
         content_parts = candidate.get("content", {}).get("parts", [])
 
-        text_content = ""
-        reasoning_content = ""
+        text_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_calls = []
         # Use accumulator's tool_idx if available, otherwise use local counter
         tool_idx = accumulator.get("tool_idx", 0) if accumulator else 0
@@ -3606,11 +3606,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             if has_text:
                 text = part["text"]
                 if is_thought:
-                    reasoning_content += text
+                    reasoning_parts.append(text)
                     if accumulator is not None:
                         accumulator["reasoning_content"] += text
                 else:
-                    text_content += text
+                    text_parts.append(text)
                     if accumulator is not None:
                         accumulator["text_content"] += text
 
@@ -3629,6 +3629,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 tool_idx += 1
 
         # Build delta
+        text_content = "".join(text_parts)
+        reasoning_content = "".join(reasoning_parts)
         delta = {}
         if text_content:
             delta["content"] = text_content
@@ -4180,8 +4182,8 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         Collect all chunks from a streaming generator into a single non-streaming
         ModelResponse. Used when client requests stream=False.
         """
-        collected_content = ""
-        collected_reasoning = ""
+        content_chunks: List[str] = []
+        reasoning_chunks: List[str] = []
         collected_tool_calls: List[Dict[str, Any]] = []
         last_chunk = None
         usage_info = None
@@ -4194,18 +4196,18 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 if isinstance(delta, dict):
                     # Handle as dict
                     if delta.get("content"):
-                        collected_content += delta["content"]
+                        content_chunks.append(delta["content"])
                     if delta.get("reasoning_content"):
-                        collected_reasoning += delta["reasoning_content"]
+                        reasoning_chunks.append(delta["reasoning_content"])
                     if delta.get("tool_calls"):
                         for tc in delta["tool_calls"]:
                             self._accumulate_tool_call(tc, collected_tool_calls)
                 else:
                     # Handle as object with attributes
                     if hasattr(delta, "content") and delta.content:
-                        collected_content += delta.content
+                        content_chunks.append(delta.content)
                     if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        collected_reasoning += delta.reasoning_content
+                        reasoning_chunks.append(delta.reasoning_content)
                     if hasattr(delta, "tool_calls") and delta.tool_calls:
                         for tc in delta.tool_calls:
                             self._accumulate_tool_call(tc, collected_tool_calls)
@@ -4217,6 +4219,14 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if last_chunk and hasattr(last_chunk, "choices") and last_chunk.choices:
             finish_reason = last_chunk.choices[0].finish_reason or "stop"
 
+        # Resolve chunk-accumulated args
+        for tc in collected_tool_calls:
+            fn = tc["function"]
+            if "_args_chunks" in fn:
+                fn["arguments"] = "".join(fn.pop("_args_chunks"))
+
+        collected_content = "".join(content_chunks)
+        collected_reasoning = "".join(reasoning_chunks)
         message_dict: Dict[str, Any] = {"role": "assistant"}
         if collected_content:
             message_dict["content"] = collected_content
@@ -4316,7 +4326,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if tc_func_name:
             collected_tool_calls[tc_index]["function"]["name"] = tc_func_name
         if tc_func_args:
-            collected_tool_calls[tc_index]["function"]["arguments"] += tc_func_args
+            if "_args_chunks" not in collected_tool_calls[tc_index]["function"]:
+                collected_tool_calls[tc_index]["function"]["_args_chunks"] = []
+            collected_tool_calls[tc_index]["function"]["_args_chunks"].append(tc_func_args)
 
     def _inject_tool_hardening_instruction(
         self, payload: Dict[str, Any], instruction_text: str
