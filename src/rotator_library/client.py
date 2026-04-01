@@ -3349,13 +3349,7 @@ class RotatingClient:
                                     f"Cred {mask_credential(current_cred)} {classified_error.error_type} "
                                     f"(HTTP {classified_error.status_code}). Rotating."
                                 )
-                                break  # Break inner try to rotate to next credential
-
-                            # Truly non-recoverable error
-                            lib_logger.error(
-                                f"Non-recoverable error ({classified_error.error_type}) during litellm stream. Failing."
-                            )
-                            raise last_exception
+                                break  # Rotate to next credential
 
                             try:
                                 # The full error JSON is in the string representation of the exception.
