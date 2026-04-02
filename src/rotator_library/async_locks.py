@@ -8,8 +8,6 @@ Optimized async locking primitives for high-throughput scenarios.
 Provides alternatives to asyncio.Lock with better performance
 for specific access patterns:
 - ReadWriteLock: Multiple readers, single writer
-- RateLimitedLock: Lock with built-in rate limiting
-- AsyncRWLock: Async-friendly read-write lock
 """
 
 import asyncio
