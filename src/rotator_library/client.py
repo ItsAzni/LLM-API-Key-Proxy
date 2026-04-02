@@ -110,7 +110,7 @@ _patch_aiohttp_connector()
 
 import asyncio
 import fnmatch
-import json
+import orjson
 import re
 import codecs
 import time
@@ -1168,7 +1168,7 @@ class RotatingClient:
         nested_keys = ["kwargs", "litellm_params", "model_info", "proxy_server_request"]
 
         # Create a deep copy to avoid modifying the original log object in memory
-        clean_data = json.loads(json.dumps(log_data, default=str))
+        clean_data = orjson.loads(orjson.dumps(log_data))
 
         def clean_recursively(data_dict):
             if not isinstance(data_dict, dict):
@@ -1398,7 +1398,7 @@ class RotatingClient:
         if provider_headers:
             try:
                 # Parse headers from JSON format
-                headers_dict = json.loads(provider_headers)
+                headers_dict = orjson.loads(provider_headers)
                 if isinstance(headers_dict, dict):
                     # Use headers parameter if available, otherwise create it
                     if "headers" not in litellm_kwargs:
@@ -1412,7 +1412,7 @@ class RotatingClient:
                     lib_logger.debug(
                         f"Applied provider headers from {provider_headers_key} for provider '{provider}'"
                     )
-            except (json.JSONDecodeError, TypeError) as e:
+            except (orjson.JSONDecodeError, TypeError) as e:
                 lib_logger.warning(
                     f"Failed to parse {provider_headers_key}: {e}. Expected JSON format."
                 )
@@ -1681,7 +1681,7 @@ class RotatingClient:
                             # (litellm.ModelResponse defaults to "stop" which is wrong)
                             choice["finish_reason"] = None
 
-                    yield f"data: {json.dumps(chunk_dict)}\n\n"
+                    yield f"data: {orjson.dumps(chunk_dict).decode()}\n\n"
 
                     if hasattr(chunk, "usage") and chunk.usage:
                         last_usage = chunk.usage
@@ -1800,7 +1800,7 @@ class RotatingClient:
                         if raw_chunk and '"error"' in raw_chunk:
                             # Try to parse error immediately instead of buffering
                             try:
-                                potential_error = json.loads(raw_chunk)
+                                potential_error = orjson.loads(raw_chunk)
                                 if "error" in potential_error:
                                     error_obj = potential_error.get("error", {})
                                     error_message = error_obj.get(
@@ -1812,7 +1812,7 @@ class RotatingClient:
                                     raise StreamedAPIError(
                                         error_message, data=potential_error
                                     )
-                            except json.JSONDecodeError:
+                            except orjson.JSONDecodeError:
                                 pass  # Not a complete JSON, continue normal buffering
 
                         if not raw_chunk:
@@ -1822,7 +1822,7 @@ class RotatingClient:
 
                         # Append the clean chunk to the buffer and try to parse.
                         json_buffer += raw_chunk
-                        parsed_data = json.loads(json_buffer)
+                        parsed_data = orjson.loads(json_buffer)
 
                         # If parsing succeeds, we have the complete object.
                         lib_logger.info(
@@ -1834,7 +1834,7 @@ class RotatingClient:
                             "Provider error received in stream", data=parsed_data
                         )
 
-                    except json.JSONDecodeError:
+                    except orjson.JSONDecodeError:
                         # This is the expected outcome if the JSON in the buffer is not yet complete.
                         lib_logger.info(
                             f"Buffer still incomplete. Waiting for more chunks: {json_buffer}"
@@ -1919,10 +1919,10 @@ class RotatingClient:
                     content = chunk_str[len("data:") :].strip()
                     if content and content != "[DONE]":
                         try:
-                            chunk_data = json.loads(content)
+                            chunk_data = orjson.loads(content)
                             chunks.append(chunk_data)
                             transaction_logger.log_stream_chunk(chunk_data)
-                        except json.JSONDecodeError:
+                        except orjson.JSONDecodeError:
                             lib_logger.warning(
                                 f"TransactionLogger: Failed to parse chunk: {content[:100]}"
                             )
@@ -3384,8 +3384,8 @@ class RotatingClient:
                                     cleaned_str = codecs.decode(
                                         json_str_match.group(1), "unicode_escape"
                                     )
-                                    error_payload = json.loads(cleaned_str)
-                            except (json.JSONDecodeError, TypeError):
+                                    error_payload = orjson.loads(cleaned_str)
+                            except (orjson.JSONDecodeError, TypeError):
                                 error_payload = {}
 
                             log_failure(
@@ -3449,7 +3449,7 @@ class RotatingClient:
                                     lib_logger.error(
                                         f"Fatal quota error for {mask_credential(current_cred)}. ID: {quota_id}, Limit: {quota_value}"
                                     )
-                                    yield f"data: {json.dumps({'error': {'message': client_error_message, 'type': 'proxy_fatal_quota_error'}})}\n\n"
+                                    yield f"data: {orjson.dumps({'error': {'message': client_error_message, 'type': 'proxy_fatal_quota_error'}}).decode()}\n\n"
                                     yield "data: [DONE]\n\n"
                                     return
                                 else:
@@ -3634,7 +3634,7 @@ class RotatingClient:
                 }
                 lib_logger.error(final_error_message)
 
-            yield f"data: {json.dumps(error_data)}\n\n"
+            yield f"data: {orjson.dumps(error_data).decode()}\n\n"
             yield "data: [DONE]\n\n"
 
         except NoAvailableKeysError as e:
@@ -3642,7 +3642,7 @@ class RotatingClient:
                 f"A streaming request failed because no keys were available within the time budget: {e}"
             )
             error_data = {"error": {"message": str(e), "type": "proxy_busy"}}
-            yield f"data: {json.dumps(error_data)}\n\n"
+            yield f"data: {orjson.dumps(error_data).decode()}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             # This will now only catch fatal errors that should be raised, like invalid requests.
@@ -3656,7 +3656,7 @@ class RotatingClient:
                     "type": "proxy_internal_error",
                 }
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
+            yield f"data: {orjson.dumps(error_data).decode()}\n\n"
             yield "data: [DONE]\n\n"
 
     def acompletion(
@@ -4490,7 +4490,7 @@ class RotatingClient:
             )
             if openai_tools:
                 # Serialize tools to count their token contribution
-                tools_text = json.dumps(openai_tools)
+                tools_text = orjson.dumps(openai_tools).decode()
                 tool_tokens = self.token_count(
                     model=request.model,
                     text=tools_text,
