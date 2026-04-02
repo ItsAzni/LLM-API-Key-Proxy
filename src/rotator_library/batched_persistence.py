@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, field
 
+import aiofiles
+
 from .config import env_bool as _env_bool, env_float as _env_float
 from .utils.resilient_io import safe_write_json
 
@@ -131,9 +133,9 @@ class BatchedPersistence:
             return
 
         try:
-            with open(self._file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            self._state = json.loads(content)
+            async with aiofiles.open(self._file_path, "r", encoding="utf-8") as f:
+               content = await f.read()
+               self._state = json.loads(content)
             lib_logger.debug(f"Loaded state from {self._file_path.name}")
         except (json.JSONDecodeError, IOError, OSError) as e:
             lib_logger.warning(f"Failed to load state from {self._file_path.name}: {e}")

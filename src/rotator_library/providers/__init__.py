@@ -20,12 +20,12 @@ class DynamicOpenAICompatibleProvider:
     that are NOT known LiteLLM providers.
 
     Environment variable pattern:
-        <NAME>_API_BASE - The API base URL (required)
-        <NAME>_API_KEY  - The API key
+    <NAME>_API_BASE - The API base URL (required)
+    <NAME>_API_KEY - The API key
 
     Example:
-        MYSERVER_API_BASE=http://localhost:8000/v1
-        MYSERVER_API_KEY=sk-xxx
+    MYSERVER_API_BASE=http://localhost:8000/v1
+    MYSERVER_API_KEY=sk-xxx
 
     Note: For known providers (openai, anthropic, etc.), setting _API_BASE
     will override their default endpoint without creating a custom provider.
@@ -73,47 +73,107 @@ class DynamicOpenAICompatibleProvider:
         return {"Authorization": f"Bearer {credential_identifier}"}
 
 
-def _register_providers():
-    """
-    Dynamically discovers and imports provider plugins from this directory.
-    Also creates dynamic plugins for custom OpenAI-compatible providers.
-    """
-    package_path = __path__
-    package_name = __name__
+# --- Lazy Provider Loading ---
 
-    # First, register file-based providers
-    for _, module_name, _ in pkgutil.iter_modules(package_path):
-        # Construct the full module path
-        full_module_path = f"{package_name}.{module_name}"
+# Cache for loaded provider modules
+_provider_registry: Dict[str, object] = {}
 
-        # Import the module
+# Track which providers have been fully registered
+_registered_providers: set = set()
+
+
+def _get_provider_module_name(provider_name: str) -> str:
+    """Convert provider name to module name."""
+    # Handle special case: nvidia_nim -> nvidia_provider
+    if provider_name == "nvidia_nim":
+        return "nvidia_provider"
+    return f"{provider_name}_provider"
+
+
+def _load_provider(provider_name: str):
+    """
+    Lazily load a single provider by name.
+    Returns the provider class or None if not found.
+    """
+    if provider_name in _provider_registry:
+        return _provider_registry[provider_name]
+
+    module_name = _get_provider_module_name(provider_name)
+    full_module_path = f"{__name__}.{module_name}"
+
+    try:
         module = importlib.import_module(full_module_path)
+    except ImportError:
+        return None
 
-        # Look for a class that inherits from ProviderInterface
-        for attribute_name in dir(module):
-            attribute = getattr(module, attribute_name)
-            if (
-                isinstance(attribute, type)
-                and issubclass(attribute, ProviderInterface)
-                and attribute is not ProviderInterface
-            ):
-                # Derives 'gemini_cli' from 'gemini_cli_provider.py'
-                # Remap 'nvidia' to 'nvidia_nim' to align with litellm's provider name
-                provider_name = module_name.replace("_provider", "")
-                if provider_name == "nvidia":
-                    provider_name = "nvidia_nim"
-                PROVIDER_PLUGINS[provider_name] = attribute
-                import logging
+    # Look for a class that inherits from ProviderInterface
+    for attribute_name in dir(module):
+        attribute = getattr(module, attribute_name)
+        if (
+            isinstance(attribute, type)
+            and issubclass(attribute, ProviderInterface)
+            and attribute is not ProviderInterface
+        ):
+            _provider_registry[provider_name] = attribute
+            PROVIDER_PLUGINS[provider_name] = attribute
+            _registered_providers.add(provider_name)
+            import logging
+            logging.getLogger("rotator_library").debug(
+                f"Lazy-loaded provider: {provider_name}"
+            )
+            return attribute
 
-                logging.getLogger("rotator_library").debug(
-                    f"Registered provider: {provider_name}"
-                )
+    return None
 
-    # Then, create dynamic plugins for custom OpenAI-compatible providers
-    # These use the pattern: <NAME>_API_BASE where NAME is not a known LiteLLM provider
-    # Known providers just get their api_base overridden via ProviderConfig
 
-    # Import KNOWN_PROVIDERS to check against
+def get_provider(name: str):
+    """
+    Lazy load provider by name.
+
+    Args:
+        name: Provider name (e.g., 'openai', 'anthropic', 'gemini_cli')
+
+    Returns:
+        Provider class or None if not found
+    """
+    return _load_provider(name)
+
+
+def list_providers():
+    """
+    List available provider names without loading them.
+
+    Returns:
+        List of provider names discovered from provider files
+    """
+    providers = set()
+
+    # Scan for file-based providers
+    for _, module_name, _ in pkgutil.iter_modules(__path__):
+        if module_name.endswith("_provider"):
+            provider_name = module_name[:-9]  # Remove '_provider' suffix
+            # Remap 'nvidia' to 'nvidia_nim' to align with litellm's provider name
+            if provider_name == "nvidia":
+                provider_name = "nvidia_nim"
+            providers.add(provider_name)
+
+    # Add dynamic providers from environment variables
+    from ..provider_config import KNOWN_PROVIDERS
+
+    for env_var in os.environ:
+        if env_var.endswith("_API_BASE"):
+            provider_name = env_var[:-9].lower()  # Remove '_API_BASE' suffix
+            if provider_name not in KNOWN_PROVIDERS:
+                providers.add(provider_name)
+
+    return sorted(providers)
+
+
+def _ensure_dynamic_providers():
+    """
+    Register dynamic OpenAI-compatible providers from environment variables.
+    Called lazily when first provider access happens.
+    """
     from ..provider_config import KNOWN_PROVIDERS
 
     for env_var in os.environ:
@@ -124,8 +184,8 @@ def _register_providers():
             if provider_name in KNOWN_PROVIDERS:
                 continue
 
-            # Skip if this provider name already exists (file-based plugin)
-            if provider_name in PROVIDER_PLUGINS:
+            # Skip if this provider already exists (file-based plugin)
+            if provider_name in _provider_registry or provider_name in _registered_providers:
                 continue
 
             # Create a dynamic plugin class
@@ -138,13 +198,29 @@ def _register_providers():
 
             # Create and register the plugin class
             plugin_class = create_plugin_class(provider_name)
+            _provider_registry[provider_name] = plugin_class
             PROVIDER_PLUGINS[provider_name] = plugin_class
+            _registered_providers.add(provider_name)
             import logging
-
             logging.getLogger("rotator_library").debug(
                 f"Registered dynamic provider: {provider_name}"
             )
 
 
-# Discover and register providers when the package is imported
-_register_providers()
+def get_all_providers() -> Dict[str, Type[ProviderInterface]]:
+    """
+    Get all available providers, loading them lazily as needed.
+    Maintains backward compatibility with code expecting PROVIDER_PLUGINS.
+
+    Returns:
+        Dictionary mapping provider names to provider classes
+    """
+    # Register dynamic providers first
+    _ensure_dynamic_providers()
+
+    # Load any file-based providers that haven't been loaded yet
+    for provider_name in list_providers():
+        if provider_name not in _provider_registry:
+            _load_provider(provider_name)
+
+    return PROVIDER_PLUGINS

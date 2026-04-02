@@ -81,7 +81,7 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
             if content_len >= self._compress_min_size:
                 content_type = request.headers.get("content-type", "")
                 if "application/json" in content_type:
-                    if "content-encoding" not in [k.lower() for k in request.headers.keys()]:
+                    if "content-encoding" not in {k.lower() for k in request.headers}:
                         compressed = gzip.compress(request.content)
 
                         if len(compressed) < content_len * 0.9:

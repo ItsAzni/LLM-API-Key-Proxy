@@ -10,6 +10,7 @@ import random
 from datetime import date, datetime, timezone, time as dt_time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from collections import OrderedDict
 import aiofiles
 import litellm
 
@@ -33,6 +34,9 @@ from .config import (
 )
 
 lib_logger = logging.getLogger("rotator_library")
+
+# Maximum entries per cache before eviction
+MAX_CACHE_ENTRIES = 5000
 
 
 class UsageManager:
@@ -167,12 +171,12 @@ class UsageManager:
         self._timeout_lock = asyncio.Lock()
         self._claimed_on_timeout: Set[str] = set()
 
-        # Lazy caches for stable quota group config
+        # Lazy caches for stable quota group config (OrderedDict for LRU eviction)
         # (key, model) -> group_name or None
-        self._quota_group_cache: Dict[str, Dict[str, Optional[str]]] = {}
+        self._quota_group_cache: "OrderedDict[str, OrderedDict[str, Optional[str]]]" = OrderedDict()
         # (key, group) -> (models_list, request_count_at_snapshot)
         # Used by record_success to skip syncing siblings when count unchanged
-        self._grouped_models_cache: Dict[str, Dict[str, Tuple[List[str], int]]] = {}
+        self._grouped_models_cache: "OrderedDict[str, OrderedDict[str, Tuple[List[str], int]]]" = OrderedDict()
 
         # Resilient writer for usage data persistence
         self._state_writer = ResilientStateWriter(file_path, lib_logger)
@@ -1029,6 +1033,8 @@ class UsageManager:
         # Check cache
         key_cache = self._quota_group_cache.get(credential)
         if key_cache is not None and model in key_cache:
+            # Move to end for LRU
+            key_cache.move_to_end(model)
             return key_cache[model]
 
         provider = self._get_provider_from_credential(credential)
@@ -1038,10 +1044,11 @@ class UsageManager:
         if plugin_instance and hasattr(plugin_instance, "get_model_quota_group"):
             result = plugin_instance.get_model_quota_group(model)
 
-        # Populate cache
+        # Populate cache with eviction check
         if credential not in self._quota_group_cache:
-            self._quota_group_cache[credential] = {}
+            self._quota_group_cache[credential] = OrderedDict()
         self._quota_group_cache[credential][model] = result
+        self._cleanup_caches()
         return result
 
     def _get_grouped_models(self, credential: str, group: str) -> List[str]:
@@ -1063,6 +1070,8 @@ class UsageManager:
         # Check cache
         group_key_cache = self._grouped_models_cache.get(credential)
         if group_key_cache is not None and group in group_key_cache:
+            # Move to end for LRU
+            group_key_cache.move_to_end(group)
             models_list, _ = group_key_cache[group]
             return models_list
 
@@ -1083,18 +1092,43 @@ class UsageManager:
                         seen.add(norm)
                         normalized.append(norm)
                 if credential not in self._grouped_models_cache:
-                    self._grouped_models_cache[credential] = {}
+                    self._grouped_models_cache[credential] = OrderedDict()
                 self._grouped_models_cache[credential][group] = (normalized, -1)
+                self._cleanup_caches()
                 return normalized
 
             # Fallback: just add provider prefix
             result = [f"{provider}/{m}" for m in models]
             if credential not in self._grouped_models_cache:
-                self._grouped_models_cache[credential] = {}
+                self._grouped_models_cache[credential] = OrderedDict()
             self._grouped_models_cache[credential][group] = (result, -1)
+            self._cleanup_caches()
             return result
 
         return []
+
+    def _cleanup_caches(self) -> None:
+        """
+        Evict oldest 20% of cache entries if total exceeds MAX_CACHE_ENTRIES.
+
+        Called after each cache population to prevent unbounded growth.
+        Uses LRU eviction: oldest entries (at the front of OrderedDict) are removed.
+        """
+        total_entries = sum(len(v) for v in self._quota_group_cache.values())
+        total_entries += sum(len(v) for v in self._grouped_models_cache.values())
+
+        if total_entries <= MAX_CACHE_ENTRIES:
+            return
+
+        # Evict 20% from each cache
+        evict_ratio = 0.2
+
+        for cache in (self._quota_group_cache, self._grouped_models_cache):
+            entries_to_evict = int(len(cache) * evict_ratio)
+            if entries_to_evict > 0:
+                for _ in range(entries_to_evict):
+                    if cache:
+                        cache.popitem(last=False)
 
     def _get_model_usage_weight(self, credential: str, model: str) -> int:
         """
@@ -1580,7 +1614,7 @@ class UsageManager:
                 self._batch_persistence.update_usage(self._usage_data)
             else:
                 # Hand off to resilient writer - handles retries and disk failures
-                self._state_writer.write(self._usage_data)
+                await self._state_writer.write(self._usage_data)
 
     async def _get_usage_data_snapshot(self) -> Dict[str, Any]:
         """

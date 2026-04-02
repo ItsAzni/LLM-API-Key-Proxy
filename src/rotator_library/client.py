@@ -191,6 +191,30 @@ from .config import (
 )
 
 
+# Cached environment variables for provider configuration
+# Pre-filtered at module load to avoid repeated O(P*E) scans in __init__
+_PROVIDER_ENV_PREFIXES = (
+    "CONCURRENCY_MULTIPLIER_",
+    "CUSTOM_CAP_",
+    "CUSTOM_CAP_COOLDOWN_",
+    "FAIR_CYCLE_",
+    "FAIR_CYCLE_TRACKING_MODE_",
+    "FAIR_CYCLE_CROSS_TIER_",
+    "FAIR_CYCLE_DURATION_",
+    "EXHAUSTION_COOLDOWN_THRESHOLD_",
+    "_API_HEADERS",
+)
+
+_provider_env_cache: Dict[str, str] = {
+    k: v for k, v in os.environ.items()
+    if any(k.startswith(p) or k.endswith(p) for p in _PROVIDER_ENV_PREFIXES)
+}
+
+# Add global exhaustion cooldown threshold (no provider suffix)
+if "EXHAUSTION_COOLDOWN_THRESHOLD" in os.environ:
+    _provider_env_cache["EXHAUSTION_COOLDOWN_THRESHOLD"] = os.environ["EXHAUSTION_COOLDOWN_THRESHOLD"]
+
+
 class StreamedAPIError(Exception):
     """Custom exception to signal an API error received over a stream."""
 
@@ -327,7 +351,7 @@ class RotatingClient:
             else:
                 # Fallback: check environment variable directly
                 env_key = f"ROTATION_MODE_{provider.upper()}"
-                mode = os.getenv(env_key, "balanced")
+                mode = _provider_env_cache.get(env_key, "balanced")
 
             provider_rotation_modes[provider] = mode
             if mode != "balanced":
@@ -361,7 +385,7 @@ class RotatingClient:
             # Override with environment variables
             # Format: CONCURRENCY_MULTIPLIER_<PROVIDER>_PRIORITY_<N>=<multiplier>
             # Format: CONCURRENCY_MULTIPLIER_<PROVIDER>_PRIORITY_<N>_<MODE>=<multiplier>
-            for key, value in os.environ.items():
+            for key, value in _provider_env_cache.items():
                 prefix = f"CONCURRENCY_MULTIPLIER_{provider.upper()}_PRIORITY_"
                 if key.startswith(prefix):
                     remainder = key[len(prefix) :]
@@ -428,7 +452,7 @@ class RotatingClient:
 
             # Fair cycle enabled - check env, then provider default, then derive from rotation mode
             env_key = f"FAIR_CYCLE_{provider.upper()}"
-            env_val = os.getenv(env_key)
+            env_val = _provider_env_cache.get(env_key)
             if env_val is not None:
                 fair_cycle_enabled[provider] = env_val.lower() in ("true", "1", "yes")
             elif provider_class and hasattr(
@@ -442,7 +466,7 @@ class RotatingClient:
 
             # Tracking mode - check env, then provider default
             env_key = f"FAIR_CYCLE_TRACKING_MODE_{provider.upper()}"
-            env_val = os.getenv(env_key)
+            env_val = _provider_env_cache.get(env_key)
             if env_val is not None and env_val.lower() in ("model_group", "credential"):
                 fair_cycle_tracking_mode[provider] = env_val.lower()
             elif provider_class and hasattr(
@@ -454,7 +478,7 @@ class RotatingClient:
 
             # Cross-tier - check env, then provider default
             env_key = f"FAIR_CYCLE_CROSS_TIER_{provider.upper()}"
-            env_val = os.getenv(env_key)
+            env_val = _provider_env_cache.get(env_key)
             if env_val is not None:
                 fair_cycle_cross_tier[provider] = env_val.lower() in (
                     "true",
@@ -469,7 +493,7 @@ class RotatingClient:
 
             # Duration - check provider-specific env, then provider default
             env_key = f"FAIR_CYCLE_DURATION_{provider.upper()}"
-            env_val = os.getenv(env_key)
+            env_val = _provider_env_cache.get(env_key)
             if env_val is not None:
                 try:
                     fair_cycle_duration[provider] = int(env_val)
@@ -489,7 +513,7 @@ class RotatingClient:
         # Build exhaustion cooldown threshold per provider
         # Check global env first, then per-provider env, then provider class default
         exhaustion_cooldown_threshold: Dict[str, int] = {}
-        global_threshold_str = os.getenv("EXHAUSTION_COOLDOWN_THRESHOLD")
+        global_threshold_str = _provider_env_cache.get("EXHAUSTION_COOLDOWN_THRESHOLD")
         global_threshold = DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD
         if global_threshold_str:
             try:
@@ -504,7 +528,7 @@ class RotatingClient:
 
             # Check per-provider env var first
             env_key = f"EXHAUSTION_COOLDOWN_THRESHOLD_{provider.upper()}"
-            env_val = os.getenv(env_key)
+            env_val = _provider_env_cache.get(env_key)
             if env_val is not None:
                 try:
                     exhaustion_cooldown_threshold[provider] = int(env_val)
@@ -560,7 +584,7 @@ class RotatingClient:
             cap_prefix = f"CUSTOM_CAP_{provider_upper}_T"
             cooldown_prefix = f"CUSTOM_CAP_COOLDOWN_{provider_upper}_T"
 
-            for env_key, env_value in os.environ.items():
+            for env_key, env_value in _provider_env_cache.items():
                 if env_key.startswith(cap_prefix) and not env_key.startswith(
                     cooldown_prefix
                 ):
@@ -1369,7 +1393,7 @@ class RotatingClient:
         # Add provider-specific headers from environment variables if configured
         # These headers should be used instead of any client-provided ones
         provider_headers_key = f"{provider.upper()}_API_HEADERS"
-        provider_headers = os.environ.get(provider_headers_key)
+        provider_headers = _provider_env_cache.get(provider_headers_key)
 
         if provider_headers:
             try:

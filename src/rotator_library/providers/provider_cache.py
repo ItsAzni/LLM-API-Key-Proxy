@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from ..config import env_bool as _env_bool, env_int as _env_int
 from ..utils.resilient_io import safe_write_json
@@ -80,13 +80,16 @@ class ProviderCache:
         write_interval: Optional[int] = None,
         cleanup_interval: Optional[int] = None,
         env_prefix: str = "PROVIDER_CACHE",
+        max_entries: int = 10000,
     ):
-        # In-memory cache: {cache_key: (data, timestamp)}
-        self._cache: Dict[str, Tuple[str, float]] = {}
+        # In-memory cache: {cache_key: {"value": str, "timestamp": float, "accessed": float}}
+        self._cache: Dict[str, Dict[str, float | str]] = {}
         self._memory_ttl = memory_ttl_seconds
         self._disk_ttl = disk_ttl_seconds
         self._lock = asyncio.Lock()
-        self._disk_lock = asyncio.Lock()
+        self._disk_lock = asyncio.RLock()
+        self._max_entries = max_entries
+        self._evicted_count = 0
 
         # Disk persistence configuration
         self._cache_file = cache_file
@@ -173,7 +176,11 @@ class ProviderCache:
                             "value", entry.get("signature", "")
                         )  # Support both formats
                         if value:
-                            self._cache[cache_key] = (value, entry["timestamp"])
+                            self._cache[cache_key] = {
+                                "value": value,
+                                "timestamp": entry["timestamp"],
+                                "accessed": now,
+                            }
                             loaded += 1
                     else:
                         expired += 1
@@ -215,7 +222,7 @@ class ProviderCache:
                 try:
                     with open(self._cache_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    existing_entries = data.get("entries", {})
+                        existing_entries = data.get("entries", {})
                 except (json.JSONDecodeError, IOError, OSError):
                     pass  # Start fresh if corrupted or unreadable
 
@@ -229,8 +236,8 @@ class ProviderCache:
 
             # Step 3: Merge - memory entries take precedence (fresher timestamps)
             merged_entries = valid_disk_entries.copy()
-            for key, (val, ts) in self._cache.items():
-                merged_entries[key] = {"value": val, "timestamp": ts}
+            for key, entry in self._cache.items():
+                merged_entries[key] = {"value": entry["value"], "timestamp": entry["timestamp"]}
 
             # Count entries that were preserved from disk (not in memory)
             memory_keys = set(self._cache.keys())
@@ -319,8 +326,16 @@ class ProviderCache:
         """
         async with self._lock:
             now = time.time()
+            # Enforce LRU bound before TTL cleanup
+            while len(self._cache) >= self._max_entries:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k]["accessed"])
+                del self._cache[oldest_key]
+                self._evicted_count += 1
+
             expired = [
-                k for k, (_, ts) in self._cache.items() if now - ts > self._memory_ttl
+                k
+                for k, entry in self._cache.items()
+                if now - entry["timestamp"] > self._memory_ttl
             ]
             for k in expired:
                 del self._cache[k]
@@ -347,8 +362,9 @@ class ProviderCache:
 
     async def _async_store(self, key: str, value: str) -> None:
         """Async implementation of store."""
+        now = time.time()
         async with self._lock:
-            self._cache[key] = (value, time.time())
+            self._cache[key] = {"value": value, "timestamp": now, "accessed": now}
             self._dirty = True
 
     async def store_async(self, key: str, value: str) -> None:
@@ -370,10 +386,11 @@ class ProviderCache:
             Cached value if found and not expired, None otherwise
         """
         if key in self._cache:
-            value, timestamp = self._cache[key]
-            if time.time() - timestamp <= self._memory_ttl:
+            entry = self._cache[key]
+            if time.time() - entry["timestamp"] <= self._memory_ttl:
                 self._stats["memory_hits"] += 1
-                return value
+                entry["accessed"] = time.time()
+                return entry["value"]
             else:
                 # Entry expired from memory - remove from memory only
                 # Don't set dirty flag: disk copy should persist until disk_ttl
@@ -393,10 +410,11 @@ class ProviderCache:
         """
         # Check memory first
         if key in self._cache:
-            value, timestamp = self._cache[key]
-            if time.time() - timestamp <= self._memory_ttl:
+            entry = self._cache[key]
+            if time.time() - entry["timestamp"] <= self._memory_ttl:
                 self._stats["memory_hits"] += 1
-                return value
+                entry["accessed"] = time.time()
+                return entry["value"]
             else:
                 # Entry expired from memory - remove from memory only
                 # Don't set dirty flag: disk copy should persist until disk_ttl
@@ -429,11 +447,12 @@ class ProviderCache:
                         value = entry.get("value", entry.get("signature", ""))
                         if value:
                             async with self._lock:
-                                self._cache[key] = (value, ts)
+                                now = time.time()
+                                self._cache[key] = {"value": value, "timestamp": ts, "accessed": now}
                                 self._stats["disk_hits"] += 1
-                            lib_logger.debug(
-                                f"ProviderCache[{self._cache_name}]: Loaded {key} from disk"
-                            )
+                                lib_logger.debug(
+                                    f"ProviderCache[{self._cache_name}]: Loaded {key} from disk"
+                                )
         except Exception as e:
             lib_logger.debug(
                 f"ProviderCache[{self._cache_name}]: Disk fallback failed: {e}"
@@ -458,9 +477,10 @@ class ProviderCache:
                         value = entry.get("value", entry.get("signature", ""))
                         if value:
                             async with self._lock:
-                                self._cache[key] = (value, ts)
-                            self._stats["disk_hits"] += 1
-                            return value
+                                now = time.time()
+                                self._cache[key] = {"value": value, "timestamp": ts, "accessed": now}
+                                self._stats["disk_hits"] += 1
+                                return value
 
             self._stats["misses"] += 1
             return None
@@ -478,8 +498,8 @@ class ProviderCache:
     def contains(self, key: str) -> bool:
         """Check if key exists in memory cache (without updating stats)."""
         if key in self._cache:
-            _, timestamp = self._cache[key]
-            return time.time() - timestamp <= self._memory_ttl
+            entry = self._cache[key]
+            return time.time() - entry["timestamp"] <= self._memory_ttl
         return False
 
     def get_stats(self) -> Dict[str, Any]:
@@ -497,8 +517,8 @@ class ProviderCache:
         async with self._lock:
             self._cache.clear()
             self._dirty = True
-        if self._enable_disk:
-            await self._save_to_disk()
+            if self._enable_disk:
+                await self._save_to_disk()
 
     async def shutdown(self) -> None:
         """Graceful shutdown: flush pending writes and stop background tasks."""

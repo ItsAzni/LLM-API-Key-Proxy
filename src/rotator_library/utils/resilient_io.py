@@ -362,9 +362,9 @@ class ResilientStateWriter:
         self._last_attempt: float = 0
         self._last_success: Optional[float] = None
         self._failure_count = 0
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def write(self, data: Any) -> bool:
+    async def write(self, data: Any) -> bool:
         """
         Update state and attempt disk write.
 
@@ -378,7 +378,7 @@ class ResilientStateWriter:
         Returns:
             True if disk write succeeded, False if failed (data still in memory)
         """
-        with self._lock:
+        async with self._lock:
             self._current_state = data
 
             # If disk is unhealthy, only retry after retry_interval has passed
@@ -390,7 +390,7 @@ class ResilientStateWriter:
 
             return self._try_disk_write()
 
-    def retry_if_needed(self) -> bool:
+    async def retry_if_needed(self) -> bool:
         """
         Retry disk write if unhealthy and retry interval has passed.
 
@@ -400,7 +400,7 @@ class ResilientStateWriter:
         Returns:
             True if healthy (no retry needed or retry succeeded)
         """
-        with self._lock:
+        async with self._lock:
             if self._disk_healthy:
                 return True
 
