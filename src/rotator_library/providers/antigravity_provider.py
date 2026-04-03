@@ -2722,18 +2722,24 @@ class AntigravityProvider(
     # =========================================================================
 
     def _apply_gemini3_namespace(
-        self, tools: List[Dict[str, Any]]
+        self, tools: List[Dict[str, Any]], copy_tools: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Add namespace prefix to tool names for Gemini 3.
 
         Also renames certain tools that conflict with Gemini's internal behavior
         (e.g., "batch" triggers MALFORMED_FUNCTION_CALL errors).
+
+        Args:
+            tools: List of tool definitions to modify.
+            copy_tools: If True, create a deep copy before modifying.
+                       Set False when called after other tool transformers
+                       to avoid redundant copying.
         """
         if not tools:
             return tools
 
-        modified = copy.deepcopy(tools)
+        modified = copy.deepcopy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 name = func_decl.get("name", "")
@@ -2746,7 +2752,7 @@ class AntigravityProvider(
         return modified
 
     def _enforce_strict_schema_on_tools(
-        self, tools: List[Dict[str, Any]]
+        self, tools: List[Dict[str, Any]], copy_tools: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Apply strict schema enforcement to all tools in a list.
@@ -2754,11 +2760,17 @@ class AntigravityProvider(
         Wraps the mixin's _enforce_strict_schema() method to operate on a list of tools,
         applying 'additionalProperties: false' to each tool's schema.
         Supports both 'parametersJsonSchema' and 'parameters' keys.
+
+        Args:
+            tools: List of tool definitions to modify.
+            copy_tools: If True, create a deep copy before modifying.
+                       Set False when called after other tool transformers
+                       to avoid redundant copying.
         """
         if not tools:
             return tools
 
-        modified = copy.deepcopy(tools)
+        modified = copy.deepcopy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 # Support both parametersJsonSchema and parameters keys
@@ -2773,13 +2785,20 @@ class AntigravityProvider(
         return modified
 
     def _inject_signature_into_descriptions(
-        self, tools: List[Dict[str, Any]], description_prompt: Optional[str] = None
+        self, tools: List[Dict[str, Any]], description_prompt: Optional[str] = None, copy_tools: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Apply signature injection to all tools in a list.
 
         Wraps the mixin's _inject_signature_into_description() method to operate
         on a list of tools, injecting parameter signatures into each tool's description.
+
+        Args:
+            tools: List of tool definitions to modify.
+            description_prompt: Optional prompt template for signature injection.
+            copy_tools: If True, create a deep copy before modifying.
+                       Set False when called after other tool transformers
+                       to avoid redundant copying.
         """
         if not tools:
             return tools
@@ -2787,7 +2806,7 @@ class AntigravityProvider(
         # Use provided prompt or default to Gemini 3 prompt
         prompt_template = description_prompt or self._gemini3_description_prompt
 
-        modified = copy.deepcopy(tools)
+        modified = copy.deepcopy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 # Delegate to mixin's singular _inject_signature_into_description method

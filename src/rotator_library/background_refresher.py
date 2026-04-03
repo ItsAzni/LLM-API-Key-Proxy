@@ -285,12 +285,16 @@ class BackgroundRefresher:
                     if provider_plugin and hasattr(
                         provider_plugin, "proactively_refresh"
                     ):
-                        for path in paths:
-                            try:
-                                await provider_plugin.proactively_refresh(path)
-                            except Exception as e:
+                        refresh_tasks = [
+                            provider_plugin.proactively_refresh(path) for path in paths
+                        ]
+                        results = await asyncio.gather(
+                            *refresh_tasks, return_exceptions=True
+                        )
+                        for path, result in zip(paths, results):
+                            if isinstance(result, Exception):
                                 lib_logger.error(
-                                    f"Error during proactive refresh for '{path}': {e}"
+                                    f"Error during proactive refresh for '{path}': {result}"
                                 )
 
                 await asyncio.sleep(self._interval)

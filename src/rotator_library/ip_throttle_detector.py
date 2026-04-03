@@ -14,6 +14,7 @@ Detection heuristics:
 
 import hashlib
 import logging
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -124,6 +125,9 @@ class IPThrottleDetector:
         self.ip_cooldown = ip_cooldown
         self.credential_cooldown = credential_cooldown
 
+        # Thread-safety lock for _records access
+        self._records_lock = threading.RLock()
+
         # Per-provider tracking: provider -> list of _ThrottleRecord
         self._records: Dict[str, List[_ThrottleRecord]] = defaultdict(list)
 
@@ -146,14 +150,15 @@ class IPThrottleDetector:
     def _cleanup_old_records(self, provider: str) -> None:
         """Remove records older than the detection window and enforce memory limit."""
         cutoff = time.time() - self.window_seconds
-        self._records[provider] = [
-            r for r in self._records[provider] if r.timestamp > cutoff
-        ]
-        # FIFO eviction if records exceed memory limit
-        if len(self._records[provider]) > self.MAX_RECORDS_PER_PROVIDER:
-            self._records[provider] = self._records[provider][
-                -self.MAX_RECORDS_PER_PROVIDER :
+        with self._records_lock:
+            self._records[provider] = [
+                r for r in self._records[provider] if r.timestamp > cutoff
             ]
+            # FIFO eviction if records exceed memory limit
+            if len(self._records[provider]) > self.MAX_RECORDS_PER_PROVIDER:
+                self._records[provider] = self._records[provider][
+                    -self.MAX_RECORDS_PER_PROVIDER :
+                ]
 
     def record_429(
         self,
