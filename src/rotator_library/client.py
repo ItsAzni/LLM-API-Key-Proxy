@@ -728,7 +728,7 @@ class RotatingClient:
         headers = getattr(request, "headers", None)
         return dict(headers) if headers else {}
 
-    def _prepare_request_kwargs(
+    async def _prepare_request_kwargs(
         self,
         base_kwargs: Dict[str, Any],
         provider: str,
@@ -741,7 +741,7 @@ class RotatingClient:
         litellm_kwargs = base_kwargs.copy()
 
         self._strip_client_headers(litellm_kwargs)
-        self._apply_provider_headers(litellm_kwargs, provider, credential)
+        await self._apply_provider_headers(litellm_kwargs, provider, credential)
 
         if include_reasoning_effort and "reasoning_effort" in base_kwargs:
             litellm_kwargs["reasoning_effort"] = base_kwargs["reasoning_effort"]
@@ -1376,7 +1376,7 @@ class RotatingClient:
             if should_remove:
                 litellm_kwargs.pop(key, None)
 
-    def _apply_provider_headers(
+    async def _apply_provider_headers(
         self, litellm_kwargs: Dict[str, Any], provider: str, credential: str
     ):
         """
@@ -1481,7 +1481,7 @@ class RotatingClient:
         provider_instance = self._get_provider_instance(provider)
         if provider_instance and hasattr(provider_instance, "get_auth_header"):
             try:
-                auth_headers = provider_instance.get_auth_header(credential)
+                auth_headers = await provider_instance.get_auth_header(credential)
                 if auth_headers and isinstance(auth_headers, dict):
                     if "headers" not in litellm_kwargs:
                         litellm_kwargs["headers"] = {}
@@ -2245,7 +2245,7 @@ class RotatingClient:
                 key_acquired = True
                 tried_creds.add(current_cred)
 
-                litellm_kwargs = self._prepare_request_kwargs(
+                litellm_kwargs = await self._prepare_request_kwargs(
                     kwargs, provider, current_cred, model
                 )
 
@@ -2438,7 +2438,7 @@ class RotatingClient:
                     # [FIX] Remove problematic headers and add correct provider headers
                     # This ensures that authorization/x-api-key from client requests
                     # are replaced with the correct values from configuration
-                    self._apply_provider_headers(litellm_kwargs, provider, current_cred)
+                    await self._apply_provider_headers(litellm_kwargs, provider, current_cred)
 
                     provider_instance = self._get_provider_instance(provider)
                     if provider_instance:
@@ -3217,7 +3217,7 @@ class RotatingClient:
                     # [FIX] Remove problematic headers and add correct provider headers
                     # This ensures that authorization/x-api-key from client requests
                     # are replaced with the correct values from configuration
-                    self._apply_provider_headers(litellm_kwargs, provider, current_cred)
+                    await self._apply_provider_headers(litellm_kwargs, provider, current_cred)
 
                     provider_instance = self._get_provider_instance(provider)
                     if provider_instance:

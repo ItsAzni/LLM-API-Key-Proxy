@@ -25,7 +25,7 @@ class OpencodeProvider(ProviderInterface):
 
     skip_cost_calculation = True  # Skip cost calculation for OpenCode
 
-    def get_auth_header(self, credential_identifier: str) -> Dict[str, str]:
+    async def get_auth_header(self, credential_identifier: str) -> Dict[str, str]:
         """
         Returns authentication headers for OpenCode API.
 
