@@ -2532,9 +2532,8 @@ class RotatingClient:
                             )
 
                             # Inject custom provider settings (e.g., KILOCODE_API_BASE)
-                            all_providers = get_all_providers()
-                            if all_providers.is_custom_provider(model):
-                                final_kwargs = all_providers.get_provider_kwargs(
+                            if self.provider_config.is_custom_provider(model):
+                                final_kwargs = self.provider_config.get_provider_kwargs(
                                     **final_kwargs
                                 )
                                 # Force OpenAI-compatible mode for custom providers
@@ -3304,9 +3303,8 @@ class RotatingClient:
                             )
 
                             # Inject custom provider settings (e.g., KILOCODE_API_BASE)
-                            all_providers = get_all_providers()
-                            if all_providers.is_custom_provider(model):
-                                final_kwargs = all_providers.get_provider_kwargs(
+                            if self.provider_config.is_custom_provider(model):
+                                final_kwargs = self.provider_config.get_provider_kwargs(
                                     **final_kwargs
                                 )
                                 # Force OpenAI-compatible mode for custom providers
