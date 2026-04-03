@@ -13,6 +13,7 @@ generalized for any state data.
 import asyncio
 import json
 import logging
+import orjson
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional

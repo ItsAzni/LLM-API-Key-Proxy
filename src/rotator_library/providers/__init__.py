@@ -12,6 +12,9 @@ from .iflow_auth_base import IFlowAuthBase
 from .antigravity_auth_base import AntigravityAuthBase
 from .colin_provider import ColinProvider
 
+# Shared base class for streaming response deduplication
+from .base_streaming_provider import StreamingResponseMixin
+
 # --- Provider Plugin System ---
 
 # Dictionary to hold discovered provider classes, mapping provider name to class

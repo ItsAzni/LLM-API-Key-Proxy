@@ -23,6 +23,7 @@ from .resilient_io import (
 )
 from .suppress_litellm_warnings import suppress_litellm_serialization_warnings
 from .http_retry import exponential_backoff_with_jitter
+from .json_utils import json_dumps, json_dumps_str, json_loads
 
 __all__ = [
     "is_headless_environment",
@@ -42,4 +43,7 @@ __all__ = [
     "safe_mkdir",
     "suppress_litellm_serialization_warnings",
     "exponential_backoff_with_jitter",
+    "json_dumps",
+    "json_dumps_str",
+    "json_loads",
 ]

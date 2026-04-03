@@ -280,22 +280,31 @@ class BackgroundRefresher:
         while True:
             try:
                 oauth_configs = self._client.get_oauth_credentials()
+
+                # Build all refresh tasks across all providers in parallel
+                refresh_tasks = []
+                refresh_labels = []  # (provider, path) for error reporting
                 for provider, paths in oauth_configs.items():
                     provider_plugin = self._client._get_provider_instance(provider)
                     if provider_plugin and hasattr(
                         provider_plugin, "proactively_refresh"
                     ):
-                        refresh_tasks = [
-                            provider_plugin.proactively_refresh(path) for path in paths
-                        ]
-                        results = await asyncio.gather(
-                            *refresh_tasks, return_exceptions=True
-                        )
-                        for path, result in zip(paths, results):
-                            if isinstance(result, Exception):
-                                lib_logger.error(
-                                    f"Error during proactive refresh for '{path}': {result}"
-                                )
+                        for path in paths:
+                            refresh_tasks.append(
+                                provider_plugin.proactively_refresh(path)
+                            )
+                            refresh_labels.append((provider, path))
+
+                if refresh_tasks:
+                    results = await asyncio.gather(
+                        *refresh_tasks, return_exceptions=True
+                    )
+                    for (provider, path), result in zip(refresh_labels, results):
+                        if isinstance(result, Exception):
+                            lib_logger.error(
+                                f"Error during proactive refresh for {provider} "
+                                f"'{path}': {result}"
+                            )
 
                 await asyncio.sleep(self._interval)
             except asyncio.CancelledError:

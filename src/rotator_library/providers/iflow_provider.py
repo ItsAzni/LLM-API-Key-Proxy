@@ -3,7 +3,6 @@
 
 # src/rotator_library/providers/iflow_provider.py
 
-import copy
 import json
 import time
 import os
@@ -12,6 +11,7 @@ import logging
 from typing import Union, AsyncGenerator, List, Dict, Any
 from .provider_interface import ProviderInterface
 from .iflow_auth_base import IFlowAuthBase
+from .base_streaming_provider import StreamingResponseMixin
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 from ..transaction_logger import ProviderLogger
@@ -79,7 +79,7 @@ REASONING_BUDGETS = {
 }
 
 
-class IFlowProvider(IFlowAuthBase, ProviderInterface):
+class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
     """
     iFlow provider using OAuth authentication with local callback server.
     API requests use the derived API key (NOT OAuth access_token).
@@ -186,53 +186,6 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
             pass
 
         return models
-
-    def _clean_tool_schemas(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Removes unsupported properties from tool schemas to prevent API errors.
-        Similar to Qwen Code implementation.
-        """
-        cleaned_tools = []
-
-        for tool in tools:
-            cleaned_tool = copy.deepcopy(tool)
-
-            if "function" in cleaned_tool:
-                func = cleaned_tool["function"]
-
-                # Remove strict mode (may not be supported)
-                func.pop("strict", None)
-
-                # Clean parameter schema if present
-                if "parameters" in func and isinstance(func["parameters"], dict):
-                    params = func["parameters"]
-
-                    # Remove additionalProperties if present
-                    params.pop("additionalProperties", None)
-
-                    # Recursively clean nested properties
-                    if "properties" in params:
-                        self._clean_schema_properties(params["properties"])
-
-            cleaned_tools.append(cleaned_tool)
-
-        return cleaned_tools
-
-    def _clean_schema_properties(self, properties: Dict[str, Any]) -> None:
-        """Recursively cleans schema properties."""
-        for prop_name, prop_schema in properties.items():
-            if isinstance(prop_schema, dict):
-                # Remove unsupported fields
-                prop_schema.pop("strict", None)
-                prop_schema.pop("additionalProperties", None)
-
-                # Recurse into nested properties
-                if "properties" in prop_schema:
-                    self._clean_schema_properties(prop_schema["properties"])
-
-                # Recurse into array items
-                if "items" in prop_schema and isinstance(prop_schema["items"], dict):
-                    self._clean_schema_properties({"item": prop_schema["items"]})
 
     def _handle_thinking_parameter(self, payload: Dict[str, Any], model: str) -> None:
         """
@@ -474,165 +427,6 @@ class IFlowProvider(IFlowAuthBase, ProviderInterface):
                 "id": chunk_id,
                 "created": chunk_created,
             }
-
-    def _stream_to_completion_response(
-        self, chunks: List[litellm.ModelResponse]
-    ) -> litellm.ModelResponse:
-        """
-        Manually reassembles streaming chunks into a complete response.
-
-        Key improvements:
-        - Determines finish_reason based on accumulated state (tool_calls vs stop)
-        - Properly initializes tool_calls with type field
-        - Handles usage data extraction from chunks
-        """
-        if not chunks:
-            raise ValueError("No chunks provided for reassembly")
-
-        # Initialize the final response structure
-        final_message = {"role": "assistant"}
-        aggregated_tool_calls = {}
-        usage_data = None
-        chunk_finish_reason = (
-            None  # Track finish_reason from chunks (but we'll override)
-        )
-
-        # Get the first chunk for basic response metadata
-        first_chunk = chunks[0]
-
-        # Process each chunk to aggregate content
-        for chunk in chunks:
-            if not hasattr(chunk, "choices") or not chunk.choices:
-                continue
-
-            choice = chunk.choices[0]
-            delta = choice.get("delta", {})
-
-            # Aggregate content
-            if "content" in delta and delta["content"] is not None:
-                if "content" not in final_message:
-                    final_message["content"] = ""
-                final_message["content"] += delta["content"]
-
-            # Aggregate reasoning content (if supported by iFlow)
-            if "reasoning_content" in delta and delta["reasoning_content"] is not None:
-                if "reasoning_content" not in final_message:
-                    final_message["reasoning_content"] = ""
-                final_message["reasoning_content"] += delta["reasoning_content"]
-
-            # Aggregate tool calls with proper initialization
-            if "tool_calls" in delta and delta["tool_calls"]:
-                for tc_chunk in delta["tool_calls"]:
-                    index = tc_chunk.get("index", 0)
-                    if index not in aggregated_tool_calls:
-                        # Initialize with type field for OpenAI compatibility
-                        aggregated_tool_calls[index] = {
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    if "id" in tc_chunk:
-                        aggregated_tool_calls[index]["id"] = tc_chunk["id"]
-                    if "type" in tc_chunk:
-                        aggregated_tool_calls[index]["type"] = tc_chunk["type"]
-                    if "function" in tc_chunk:
-                        if (
-                            "name" in tc_chunk["function"]
-                            and tc_chunk["function"]["name"] is not None
-                        ):
-                            tc_fn = aggregated_tool_calls[index]["function"]
-                            if "_name_chunks" not in tc_fn:
-                                tc_fn["_name_chunks"] = []
-                            tc_fn["_name_chunks"].append(tc_chunk["function"]["name"])
-                        if (
-                            "arguments" in tc_chunk["function"]
-                            and tc_chunk["function"]["arguments"] is not None
-                        ):
-                            tc_fn = aggregated_tool_calls[index]["function"]
-                            if "_args_chunks" not in tc_fn:
-                                tc_fn["_args_chunks"] = []
-                            tc_fn["_args_chunks"].append(
-                                tc_chunk["function"]["arguments"]
-                            )
-
-            # Aggregate function calls (legacy format)
-            if "function_call" in delta and delta["function_call"] is not None:
-                if "function_call" not in final_message:
-                    final_message["function_call"] = {"_name_chunks": [], "_args_chunks": []}
-                if (
-                    "name" in delta["function_call"]
-                    and delta["function_call"]["name"] is not None
-                ):
-                    final_message["function_call"]["_name_chunks"].append(
-                        delta["function_call"]["name"]
-                    )
-                if (
-                    "arguments" in delta["function_call"]
-                    and delta["function_call"]["arguments"] is not None
-                ):
-                    final_message["function_call"]["_args_chunks"].append(
-                        delta["function_call"]["arguments"]
-                    )
-
-            # Track finish_reason from chunks (for reference only)
-            if choice.get("finish_reason"):
-                chunk_finish_reason = choice["finish_reason"]
-
-        # Handle usage data from the last chunk that has it
-        for chunk in reversed(chunks):
-            if hasattr(chunk, "usage") and chunk.usage:
-                usage_data = chunk.usage
-                break
-
-        # Add tool calls to final message if any
-        if aggregated_tool_calls:
-            for tc_index, tc in aggregated_tool_calls.items():
-                fn = tc["function"]
-                if "_name_chunks" in fn:
-                    fn["name"] = "".join(fn.pop("_name_chunks"))
-                if "_args_chunks" in fn:
-                    fn["arguments"] = "".join(fn.pop("_args_chunks"))
-            final_message["tool_calls"] = list(aggregated_tool_calls.values())
-
-        # Resolve function_call chunks
-        if "function_call" in final_message:
-            fc = final_message["function_call"]
-            if "_name_chunks" in fc:
-                fc["name"] = "".join(fc.pop("_name_chunks"))
-            if "_args_chunks" in fc:
-                fc["arguments"] = "".join(fc.pop("_args_chunks"))
-
-        # Ensure standard fields are present for consistent logging
-        for field in ["content", "tool_calls", "function_call"]:
-            if field not in final_message:
-                final_message[field] = None
-
-        # Determine finish_reason based on accumulated state
-        # Priority: tool_calls wins if present, then chunk's finish_reason, then default to "stop"
-        if aggregated_tool_calls:
-            finish_reason = "tool_calls"
-        elif chunk_finish_reason:
-            finish_reason = chunk_finish_reason
-        else:
-            finish_reason = "stop"
-
-        # Construct the final response
-        final_choice = {
-            "index": 0,
-            "message": final_message,
-            "finish_reason": finish_reason,
-        }
-
-        # Create the final ModelResponse
-        final_response_data = {
-            "id": first_chunk.id,
-            "object": "chat.completion",
-            "created": first_chunk.created,
-            "model": first_chunk.model,
-            "choices": [final_choice],
-            "usage": usage_data,
-        }
-
-        return litellm.ModelResponse(**final_response_data)
 
     async def acompletion(
         self, client: httpx.AsyncClient, **kwargs

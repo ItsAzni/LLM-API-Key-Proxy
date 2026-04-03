@@ -14,6 +14,8 @@ os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 import time
 import uuid
 
+import orjson
+
 # Phase 1: Minimal imports for arg parsing and TUI
 import asyncio
 from pathlib import Path
@@ -801,7 +803,7 @@ async def streaming_response_wrapper(
                 content = chunk_str[len("data:") :].strip()
                 if content != "[DONE]":
                     try:
-                        chunk_data = json.loads(content)
+                        chunk_data = orjson.loads(content)
                         response_chunks.append(chunk_data)
                         if logger:
                             logger.log_stream_chunk(chunk_data)
@@ -817,7 +819,7 @@ async def streaming_response_wrapper(
                 "code": 500,
             }
         }
-        yield f"data: {json.dumps(error_payload)}\n\n"
+        yield f"data: {orjson.dumps(error_payload).decode()}\n\n"
         yield "data: [DONE]\n\n"
         # Also log this as a failed request
         if logger:

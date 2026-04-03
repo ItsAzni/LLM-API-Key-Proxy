@@ -3,8 +3,8 @@
 
 # src/rotator_library/providers/gemini_cli_provider.py
 
-import copy
 import json
+import orjson
 import httpx
 import logging
 import time
@@ -271,7 +271,7 @@ class GeminiCliProvider(
         try:
             json_match = regex_module.search(r"\{[\s\S]*\}", body)
             if json_match:
-                data = json.loads(json_match.group(0))
+                data = orjson.loads(json_match.group(0))
                 error_obj = data.get("error", data)
                 details = error_obj.get("details", [])
 
@@ -575,7 +575,7 @@ class GeminiCliProvider(
         - Tool calls and responses
         - Gemini 3 thoughtSignature preservation
         """
-        messages = copy.deepcopy(messages)  # Don't mutate original
+        messages = orjson.loads(orjson.dumps(messages))  # Don't mutate original (faster than copy.deepcopy)
         system_instruction = None
         gemini_contents = []
         is_gemini_3 = self._is_gemini_3(model)
@@ -663,7 +663,7 @@ class GeminiCliProvider(
                     for tool_call in msg["tool_calls"]:
                         if tool_call.get("type") == "function":
                             try:
-                                args_dict = json.loads(
+                                args_dict = orjson.loads(
                                     tool_call["function"]["arguments"]
                                 )
                             except (json.JSONDecodeError, TypeError):
@@ -733,7 +733,7 @@ class GeminiCliProvider(
                 # Try to parse content as JSON first, fall back to string
                 try:
                     parsed_content = (
-                        json.loads(content) if isinstance(content, str) else content
+                        orjson.loads(content) if isinstance(content, str) else content
                     )
                 except (json.JSONDecodeError, TypeError):
                     parsed_content = content
@@ -939,7 +939,7 @@ class GeminiCliProvider(
                     "type": "function",
                     "function": {
                         "name": function_name,
-                        "arguments": json.dumps(tool_args),
+                        "arguments": orjson.dumps(tool_args).decode(),
                     },
                 }
 
@@ -1204,7 +1204,7 @@ class GeminiCliProvider(
 
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
-                new_function = json.loads(json.dumps(tool["function"]))
+                new_function = orjson.loads(orjson.dumps(tool["function"]))
 
                 # The Gemini CLI API does not support the 'strict' property.
                 new_function.pop("strict", None)
@@ -1467,7 +1467,7 @@ class GeminiCliProvider(
                                     if data_str == "[DONE]":
                                         break
                                     try:
-                                        chunk = json.loads(data_str)
+                                        chunk = orjson.loads(data_str)
                                         for (
                                             openai_chunk
                                         ) in self._convert_chunk_to_openai(

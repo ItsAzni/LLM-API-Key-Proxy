@@ -39,6 +39,10 @@ from .config import env_bool as _env_bool, env_float as _env_float, env_int as _
 lib_logger = logging.getLogger("rotator_library")
 
 
+# Module-level DNS resolver cache keyed by (host, port)
+_dns_resolver_cache: Dict[Tuple[str, int], Optional[Any]] = {}
+
+
 # Configuration defaults (overridable via environment)
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = (
     100  # Increased for high-throughput NVIDIA/OpenAI workloads
@@ -168,30 +172,33 @@ def _create_custom_dns_resolver(dns_host: str, dns_port: int = DEFAULT_DNS_PORT)
     Create a custom DNS resolver for httpx.
 
     This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus.
+    Results are cached by (host, port) to avoid redundant imports and instantiation.
 
     Args:
         dns_host: DNS server IP (e.g., "8.8.8.8", "1.1.1.1")
         dns_port: DNS server port (default: 53)
 
     Returns:
-        httpx.AsyncDNSResolver instance
+        DNS resolver instance (or None if creation fails)
     """
-    try:
-        import httpx
+    cache_key = (dns_host, dns_port)
+    if cache_key in _dns_resolver_cache:
+        return _dns_resolver_cache[cache_key]
 
-        # httpx.AsyncDNSResolver uses aiodns by default
-        # We need to create a custom resolver that uses the specified DNS server
+    try:
         resolver = httpx.AsyncDNSResolver(
             host=dns_host,
             port=dns_port,
         )
         lib_logger.info(f"Created custom DNS resolver: {dns_host}:{dns_port}")
+        _dns_resolver_cache[cache_key] = resolver
         return resolver
     except Exception as e:
         lib_logger.warning(
             f"Failed to create custom DNS resolver {dns_host}:{dns_port}: {e}. "
             f"Falling back to system DNS."
         )
+        _dns_resolver_cache[cache_key] = None
         return None
 
 

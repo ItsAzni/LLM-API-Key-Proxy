@@ -1723,7 +1723,7 @@ class AntigravityProvider(
             - sanitized_messages: The cleaned message list
             - force_disable_thinking: If True, thinking must be disabled for this request
         """
-        messages = copy.deepcopy(messages)
+        messages = orjson.loads(orjson.dumps(messages))
         state = self._analyze_conversation_state(messages)
 
         lib_logger.debug(
@@ -2396,7 +2396,7 @@ class AntigravityProvider(
         - Claude thinking injection from cache
         - Gemini 3 thoughtSignature preservation
         """
-        messages = copy.deepcopy(messages)
+        messages = orjson.loads(orjson.dumps(messages))
         system_instruction = None
         gemini_contents = []
 
