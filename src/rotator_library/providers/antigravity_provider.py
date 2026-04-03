@@ -4083,10 +4083,10 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
                 if self._gemini3_enforce_strict_schema:
                     gemini_payload["tools"] = self._enforce_strict_schema_on_tools(
-                        gemini_payload["tools"]
+                        gemini_payload["tools"], copy_tools=False
                     )
                 gemini_payload["tools"] = self._inject_signature_into_descriptions(
-                    gemini_payload["tools"], self._gemini3_description_prompt
+                    gemini_payload["tools"], self._gemini3_description_prompt, copy_tools=False
                 )
             elif self._is_claude(model) and self._enable_claude_tool_fix:
                 # Claude: parameter signatures only (no namespace prefix)

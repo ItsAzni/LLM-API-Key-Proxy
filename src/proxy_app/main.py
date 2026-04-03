@@ -470,7 +470,6 @@ async def lifespan(app: FastAPI):
         final_oauth_credentials = {}
 
         # --- Pass 1: Pre-initialization Scan & Deduplication ---
-        # logging.info("Pass 1: Scanning for existing metadata to find duplicates...")
         for provider, paths in oauth_credentials.items():
             if provider not in credentials_to_initialize:
                 credentials_to_initialize[provider] = []
@@ -508,7 +507,6 @@ async def lifespan(app: FastAPI):
                     credentials_to_initialize[provider].append(path)
 
         # --- Pass 2: Parallel Initialization of Filtered Credentials ---
-        # logging.info("Pass 2: Initializing unique credentials and performing final check...")
         async def process_credential(provider: str, path: str, provider_instance):
             """Process a single credential: initialize and fetch user info."""
             try:
