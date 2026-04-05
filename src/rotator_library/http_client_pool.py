@@ -279,6 +279,9 @@ class HttpClientPool:
                 f"HTTP client pool: SSL verification disabled for hosts: {self._ssl_verify}"
             )
 
+        # Create SSL context once (optimized - reused for all clients)
+        self._ssl_context = self._create_ssl_context()
+
         # HTTP/2 configuration (can be disabled for problematic providers)
         self._http2_enabled = _env_bool("HTTP2_ENABLED", DEFAULT_HTTP2_ENABLED)
         if not self._http2_enabled:
@@ -317,6 +320,38 @@ class HttpClientPool:
             "reconnects": 0,
         }
 
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """
+        Create SSL context with TLS 1.2+ for Azure compatibility.
+
+        This is called once in __init__ and reused for all clients.
+        Use _refresh_ssl_context() if you need to update SSL settings.
+        """
+        ssl_context = ssl.create_default_context()
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        # Set Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
+        try:
+            ssl_context.set_ciphers(AZURE_COMPATIBLE_CIPHERS)
+        except ssl.SSLError:
+            pass  # Use default ciphers if set_ciphers fails
+
+        if not self._ssl_verify:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        return ssl_context
+
+    def _refresh_ssl_context(self) -> None:
+        """
+        Refresh the SSL context (e.g., after SSL verify config changes).
+
+        Note: This only affects new clients. Existing clients retain
+        their original SSL context until they are recreated.
+        """
+        self._ssl_context = self._create_ssl_context()
+        lib_logger.info("SSL context refreshed")
+
     def _create_limits(self) -> httpx.Limits:
         """Create optimized connection limits."""
         return httpx.Limits(
@@ -339,21 +374,8 @@ class HttpClientPool:
             TimeoutConfig.streaming() if streaming else TimeoutConfig.non_streaming()
         )
 
-        # Create SSL context with TLS 1.2 for compatibility with servers that don't support TLS 1.3
-        ssl_context = ssl.create_default_context()
-        ssl_context.minimum_version = (
-            ssl.TLSVersion.TLSv1_2
-        ) # Allow TLS 1.2 and 1.3 for Azure compatibility
-
-        # Set Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
-        try:
-            ssl_context.set_ciphers(AZURE_COMPATIBLE_CIPHERS)
-        except ssl.SSLError:
-            pass # Use default ciphers if set_ciphers fails
-
-        if not self._ssl_verify:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+        # Use pre-created SSL context (optimized - created once in __init__)
+        ssl_context = self._ssl_context
 
         # Build client kwargs
         client_kwargs = {

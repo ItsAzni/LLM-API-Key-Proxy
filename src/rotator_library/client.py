@@ -1635,7 +1635,7 @@ class RotatingClient:
         last_usage = None
         stream_completed = False
         stream_iterator = stream.__aiter__()
-        json_buffer = ""
+        json_buffer_parts: list[str] = []  # O(n) accumulation via list
         accumulated_finish_reason = None  # Track strongest finish_reason across chunks
         has_tool_calls = False  # Track if ANY tool calls were seen in stream
         chunk_index = 0  # Track chunk count for better error logging
@@ -1656,11 +1656,11 @@ class RotatingClient:
                 try:
                     chunk = await stream_iterator.__anext__()
                     chunk_index += 1
-                    if json_buffer:
+                    if json_buffer_parts:
                         lib_logger.warning(
-                            f"Discarding incomplete JSON buffer from previous chunk: {json_buffer}"
+                            f"Discarding incomplete JSON buffer from previous chunk: {''.join(json_buffer_parts)}"
                         )
-                        json_buffer = ""
+                        json_buffer_parts.clear()
 
                     # Convert chunk to dict, handling both litellm.ModelResponse and raw dicts
                     if hasattr(chunk, "dict"):
@@ -1747,9 +1747,9 @@ class RotatingClient:
 
                 except StopAsyncIteration:
                     stream_completed = True
-                    if json_buffer:
+                    if json_buffer_parts:
                         lib_logger.info(
-                            f"Stream ended with incomplete data in buffer: {json_buffer}"
+                            f"Stream ended with incomplete data in buffer: {''.join(json_buffer_parts)}"
                         )
                     # Reset consecutive quota failures on successful stream completion
                     self.reset_quota_failures(key)
@@ -1880,12 +1880,12 @@ class RotatingClient:
                             raise e
 
                         # Append the clean chunk to the buffer and try to parse.
-                        json_buffer += raw_chunk
-                        parsed_data = orjson.loads(json_buffer)
+                        json_buffer_parts.append(raw_chunk)
+                        parsed_data = orjson.loads(''.join(json_buffer_parts))
 
                         # If parsing succeeds, we have the complete object.
                         lib_logger.info(
-                            f"Successfully reassembled JSON from stream: {json_buffer}"
+                            f"Successfully reassembled JSON from stream: {''.join(json_buffer_parts)}"
                         )
 
                         # Wrap the complete error object and raise it. The outer function will decide how to handle it.
@@ -1896,7 +1896,7 @@ class RotatingClient:
                     except orjson.JSONDecodeError:
                         # This is the expected outcome if the JSON in the buffer is not yet complete.
                         lib_logger.info(
-                            f"Buffer still incomplete. Waiting for more chunks: {json_buffer}"
+                            f"Buffer still incomplete. Waiting for more chunks: {''.join(json_buffer_parts)}"
                         )
                         continue  # Continue to the next loop to get the next chunk.
                     except StreamedAPIError:
@@ -1907,9 +1907,7 @@ class RotatingClient:
                         lib_logger.error(
                             f"Error during stream buffering logic at chunk {chunk_index}: {buffer_exc}. Discarding buffer."
                         )
-                        json_buffer = (
-                            ""  # Clear the corrupted buffer to prevent further issues.
-                        )
+                        json_buffer_parts.clear()  # Clear the corrupted buffer to prevent further issues.
                         raise buffer_exc
 
         except StreamedAPIError:

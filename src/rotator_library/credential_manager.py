@@ -30,6 +30,13 @@ ENV_OAUTH_PROVIDERS = {
     "iflow": "IFLOW",
 }
 
+# Pre-compiled regex patterns for numbered OAuth credential discovery
+# Pattern: PROVIDER_N_ACCESS_TOKEN (e.g., ANTIGRAVITY_1_ACCESS_TOKEN)
+_NUMBERED_OAUTH_PATTERNS: Dict[str, re.Pattern] = {
+    provider: re.compile(rf"^{env_prefix}_(\d+)_ACCESS_TOKEN$")
+    for provider, env_prefix in ENV_OAUTH_PROVIDERS.items()
+}
+
 
 class CredentialManager:
     """
@@ -80,7 +87,7 @@ class CredentialManager:
 
             # Check for numbered credentials (PROVIDER_N_ACCESS_TOKEN pattern)
             # Pattern: ANTIGRAVITY_1_ACCESS_TOKEN, ANTIGRAVITY_2_ACCESS_TOKEN, etc.
-            numbered_pattern = re.compile(rf"^{env_prefix}_(\d+)_ACCESS_TOKEN$")
+            numbered_pattern = _NUMBERED_OAUTH_PATTERNS[provider]
 
             for key in self.env_vars.keys():
                 match = numbered_pattern.match(key)

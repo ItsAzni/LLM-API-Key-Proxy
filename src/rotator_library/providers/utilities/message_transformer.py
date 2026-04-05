@@ -17,6 +17,7 @@ Handles:
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import orjson
@@ -63,7 +64,7 @@ def transform_messages_for_gemini(
         gemini_contents is a list of message dicts in Gemini format.
     """
     # Don't mutate original messages
-    messages = orjson.loads(orjson.dumps(messages))
+    messages = copy.deepcopy(messages)
 
     system_instruction = None
     gemini_contents = []

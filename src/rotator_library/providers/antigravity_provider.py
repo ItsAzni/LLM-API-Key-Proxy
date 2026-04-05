@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import hashlib
 import orjson
 import logging
@@ -701,6 +702,11 @@ def _merge_all_of(schema: Any) -> Any:
     return result
 
 
+# Cache for _clean_claude_schema - memoizes based on schema hash
+_clean_claude_schema_cache: Dict[int, Any] = {}
+_CLEAN_CLAUDE_SCHEMA_CACHE_MAX_SIZE = 256
+
+
 def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     """
     Recursively clean JSON Schema for Antigravity/Google's Proto-based API.
@@ -720,6 +726,13 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     - For Gemini: passes through additionalProperties as-is
     - For Claude: normalizes permissive additionalProperties to true
     """
+    # Memoization: check cache for dict schemas
+    if isinstance(schema, dict):
+        # Create hash key from schema content + for_gemini flag
+        cache_key = hash((orjson.dumps(schema, option=orjson.OPT_SORT_KEYS), for_gemini))
+        if cache_key in _clean_claude_schema_cache:
+            return _clean_claude_schema_cache[cache_key]
+
     if not isinstance(schema, dict):
         return schema
 
@@ -955,7 +968,17 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
             ]
         else:
             cleaned[key] = value
-
+    
+    
+    # Memoization: store result in cache
+    cache_key = hash((orjson.dumps(schema, option=orjson.OPT_SORT_KEYS), for_gemini))
+    if len(_clean_claude_schema_cache) >= _CLEAN_CLAUDE_SCHEMA_CACHE_MAX_SIZE:
+     # Simple eviction: clear half the cache when full
+     keys_to_remove = list(_clean_claude_schema_cache.keys())[:_CLEAN_CLAUDE_SCHEMA_CACHE_MAX_SIZE // 2]
+     for k in keys_to_remove:
+      del _clean_claude_schema_cache[k]
+    _clean_claude_schema_cache[cache_key] = cleaned
+    
     return cleaned
 
 
@@ -1723,7 +1746,7 @@ class AntigravityProvider(
             - sanitized_messages: The cleaned message list
             - force_disable_thinking: If True, thinking must be disabled for this request
         """
-        messages = orjson.loads(orjson.dumps(messages))
+        messages = copy.deepcopy(messages)
         state = self._analyze_conversation_state(messages)
 
         lib_logger.debug(
@@ -2396,7 +2419,7 @@ class AntigravityProvider(
         - Claude thinking injection from cache
         - Gemini 3 thoughtSignature preservation
         """
-        messages = orjson.loads(orjson.dumps(messages))
+        messages = copy.deepcopy(messages)
         system_instruction = None
         gemini_contents = []
 
