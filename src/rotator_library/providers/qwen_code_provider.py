@@ -7,15 +7,11 @@ import time
 import os
 import httpx
 import logging
-from typing import Union, AsyncGenerator, List, Dict, Any
+from typing import List, Dict, Any
 from .provider_interface import ProviderInterface, strip_provider_prefix, build_bearer_headers
 from .qwen_auth_base import QwenAuthBase
-from .base_streaming_provider import StreamingResponseMixin, parse_sse_stream
+from .acompletion_mixin import ACompletionMixin
 from ..model_definitions import ModelDefinitions
-from ..timeout_config import TimeoutConfig
-from ..transaction_logger import ProviderLogger
-import litellm
-from litellm.exceptions import RateLimitError
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -41,9 +37,21 @@ SUPPORTED_PARAMS = {
 }
 
 
-class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
+class QwenCodeProvider(QwenAuthBase, ACompletionMixin, ProviderInterface):
     skip_cost_calculation = True
     REASONING_START_MARKER = "THINK||"
+    provider_name = "Qwen Code"
+    llm_provider = "qwen_code"
+
+    def _get_stream_endpoint(self, model: str) -> str:
+        return "/v1/chat/completions"
+
+    def _get_extra_headers(self) -> dict:
+        return {
+            "User-Agent": "google-api-nodejs-client/9.15.1",
+            "X-Goog-Api-Client": "gl-node/22.17.0",
+            "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+        }
 
     def __init__(self):
         super().__init__()
@@ -293,132 +301,3 @@ class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
                 "created": chunk_created,
             }
 
-    async def acompletion(
-        self, client: httpx.AsyncClient, **kwargs
-    ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
-        credential_path = kwargs.pop("credential_identifier")
-        transaction_context = kwargs.pop("transaction_context", None)
-        model = kwargs["model"]
-
-        # Create provider logger from transaction context
-        file_logger = ProviderLogger(transaction_context)
-
-        async def make_request():
-            """Prepares and makes the actual API call."""
-            api_base, access_token = await self.get_api_details(credential_path)
-
-            # Strip provider prefix from model name (e.g., "qwen_code/qwen3-coder-plus" -> "qwen3-coder-plus")
-            model_name = strip_provider_prefix(model)
-            kwargs_with_stripped_model = {**kwargs, "model": model_name}
-
-            # Build clean payload with only supported parameters
-            payload = self._build_request_payload(**kwargs_with_stripped_model)
-
-            headers = {
-                **build_bearer_headers(access_token),
-                "Accept": "text/event-stream",
-                "User-Agent": "google-api-nodejs-client/9.15.1",
-                "X-Goog-Api-Client": "gl-node/22.17.0",
-                "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
-            }
-
-            url = f"{api_base.rstrip('/')}/v1/chat/completions"
-
-            # Log request to dedicated file
-            file_logger.log_request(payload)
-            lib_logger.debug(f"Qwen Code Request URL: {url}")
-
-            return client.stream(
-                "POST",
-                url,
-                headers=headers,
-                json=payload,
-                timeout=TimeoutConfig.streaming(),
-            )
-
-        async def stream_handler(response_stream, attempt=1):
-            """Handles the streaming response and converts chunks."""
-            try:
-                async with response_stream as response:
-                    # Check for HTTP errors before processing stream
-                    if response.status_code >= 400:
-                        error_text = await response.aread()
-                        error_text = (
-                            error_text.decode("utf-8")
-                            if isinstance(error_text, bytes)
-                            else error_text
-                        )
-
-                        # Handle 401: Force token refresh and retry once
-                        if response.status_code == 401 and attempt == 1:
-                            lib_logger.warning(
-                                "Qwen Code returned 401. Forcing token refresh and retrying once."
-                            )
-                            await self._refresh_token(credential_path, force=True)
-                            retry_stream = await make_request()
-                            async for chunk in stream_handler(retry_stream, attempt=2):
-                                yield chunk
-                            return
-
-                        # Handle 429: Rate limit
-                        elif (
-                            response.status_code == 429
-                            or "slow_down" in error_text.lower()
-                        ):
-                            raise RateLimitError(
-                                f"Qwen Code rate limit exceeded: {error_text}",
-                                llm_provider="qwen_code",
-                                model=model,
-                                response=response,
-                            )
-
-                        # Handle other errors
-                        else:
-                            error_msg = f"Qwen Code HTTP {response.status_code} error: {error_text}"
-                            file_logger.log_error(error_msg)
-                            raise httpx.HTTPStatusError(
-                                f"HTTP {response.status_code}: {error_text}",
-                                request=response.request,
-                                response=response,
-                            )
-
-                    # Process successful streaming response
-                    async for chunk in parse_sse_stream(
-                        response, provider_name="Qwen Code",
-                        on_line=file_logger.log_response_chunk,
-                    ):
-                        for openai_chunk in self._convert_chunk_to_openai(
-                            chunk, model
-                        ):
-                            yield litellm.ModelResponse(**openai_chunk)
-
-            except httpx.HTTPStatusError:
-                raise  # Re-raise HTTP errors we already handled
-            except Exception as e:
-                file_logger.log_error(f"Error during Qwen Code stream processing: {e}")
-                lib_logger.error(
-                    f"Error during Qwen Code stream processing: {e}", exc_info=True
-                )
-                raise
-
-        async def logging_stream_wrapper():
-            """Wraps the stream to log the final reassembled response."""
-            openai_chunks = []
-            try:
-                async for chunk in stream_handler(await make_request()):
-                    openai_chunks.append(chunk)
-                    yield chunk
-            finally:
-                if openai_chunks:
-                    final_response = self._stream_to_completion_response(openai_chunks)
-                    file_logger.log_final_response(final_response.dict())
-
-        if kwargs.get("stream"):
-            return logging_stream_wrapper()
-        else:
-
-            async def non_stream_wrapper():
-                chunks = [chunk async for chunk in logging_stream_wrapper()]
-                return self._stream_to_completion_response(chunks)
-
-            return await non_stream_wrapper()
