@@ -12,6 +12,7 @@ import time
 import asyncio
 from typing import List, Dict, Any, AsyncGenerator, Union, Optional, Tuple
 from .provider_interface import ProviderInterface, QuotaGroupMap, UsageResetConfigDef
+from .base_streaming_provider import parse_sse_stream
 from .gemini_auth_base import GeminiAuthBase
 from .provider_cache import ProviderCache
 from .utilities.gemini_cli_quota_tracker import GeminiCliQuotaTracker
@@ -1284,24 +1285,16 @@ class GeminiCliProvider(
                             # This will raise an HTTPStatusError for 4xx/5xx responses
                             response.raise_for_status()
 
-                            async for line in response.aiter_lines():
-                                file_logger.log_response_chunk(line)
-                                if line.startswith("data: "):
-                                    data_str = line[6:]
-                                    if data_str == "[DONE]":
-                                        break
-                                    try:
-                                        chunk = orjson.loads(data_str)
-                                        for (
-                                            openai_chunk
-                                        ) in self._convert_chunk_to_openai(
-                                            chunk, model, accumulator
-                                        ):
-                                            yield litellm.ModelResponse(**openai_chunk)
-                                    except json.JSONDecodeError:
-                                        lib_logger.warning(
-                                            f"Could not decode JSON from Gemini CLI: {line}"
-                                        )
+                            async for chunk in parse_sse_stream(
+                                response, provider_name="Gemini CLI",
+                                on_line=file_logger.log_response_chunk,
+                            ):
+                                for (
+                                    openai_chunk
+                                ) in self._convert_chunk_to_openai(
+                                    chunk, model, accumulator
+                                ):
+                                    yield litellm.ModelResponse(**openai_chunk)
 
                             # Emit final chunk if stream ended without usageMetadata
                             # Client will determine the correct finish_reason

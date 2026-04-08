@@ -46,7 +46,7 @@ from typing import (
 import httpx
 import litellm
 
-from .provider_interface import ProviderInterface, UsageResetConfigDef, QuotaGroupMap
+from .provider_interface import ProviderInterface, UsageResetConfigDef, QuotaGroupMap, build_bearer_headers
 from .antigravity_auth_base import AntigravityAuthBase
 from .provider_cache import ProviderCache
 from .utilities.antigravity_quota_tracker import AntigravityQuotaTracker
@@ -3874,8 +3874,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             url = f"{self._get_base_url()}/fetchAvailableModels"
 
             headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
+                **build_bearer_headers(token),
                 **ANTIGRAVITY_HEADERS,
             }
             payload = {
@@ -4116,8 +4115,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # These headers are REQUIRED for gemini-3-pro-high/low to work
         # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
         headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            **build_bearer_headers(token),
             "Accept": "text/event-stream",
             **ANTIGRAVITY_HEADERS,
         }
@@ -4803,10 +4801,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             }
 
             url = f"{self._get_base_url()}:countTokens"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
+            headers = build_bearer_headers(token)
 
             response = await client.post(
                 url, headers=headers, json=antigravity_payload, timeout=30

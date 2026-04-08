@@ -3,23 +3,19 @@
 
 # src/rotator_library/providers/iflow_provider.py
 
-import json
 import time
 import os
 import httpx
 import logging
 from typing import Union, AsyncGenerator, List, Dict, Any
-from .provider_interface import ProviderInterface
+from .provider_interface import ProviderInterface, strip_provider_prefix, build_bearer_headers
 from .iflow_auth_base import IFlowAuthBase
-from .base_streaming_provider import StreamingResponseMixin
+from .base_streaming_provider import StreamingResponseMixin, parse_sse_stream
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 from ..transaction_logger import ProviderLogger
 import litellm
-from litellm.exceptions import RateLimitError, AuthenticationError
-from pathlib import Path
-import uuid
-from datetime import datetime
+from litellm.exceptions import RateLimitError
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -126,7 +122,7 @@ class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
         if static_models:
             for model in static_models:
                 # Extract model name from "iflow/ModelName" format
-                model_name = model.split("/")[-1] if "/" in model else model
+                model_name = strip_provider_prefix(model)
                 # Get the actual model ID from definitions (which may differ from the name)
                 model_id = self.model_definitions.get_model_id("iflow", model_name)
 
@@ -155,7 +151,7 @@ class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
             models_url = f"{api_base.rstrip('/')}/models"
 
             response = await client.get(
-                models_url, headers={"Authorization": f"Bearer {api_key}"}
+                models_url, headers=build_bearer_headers(api_key)
             )
             response.raise_for_status()
 
@@ -197,7 +193,7 @@ class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
 
         Only applies to models that support extended thinking.
         """
-        model_id = model.split("/")[-1] if "/" in model else model
+        model_id = strip_provider_prefix(model)
 
         # Check if model supports thinking
         if model_id not in THINKING_SUPPORTED_MODELS:
@@ -444,15 +440,14 @@ class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
             api_base, api_key = await self.get_api_details(credential_path)
 
             # Strip provider prefix from model name (e.g., "iflow/Qwen3-Coder-Plus" -> "Qwen3-Coder-Plus")
-            model_name = model.split("/")[-1]
+            model_name = strip_provider_prefix(model)
             kwargs_with_stripped_model = {**kwargs, "model": model_name}
 
             # Build clean payload with only supported parameters
             payload = self._build_request_payload(**kwargs_with_stripped_model)
 
             headers = {
-                "Authorization": f"Bearer {api_key}",  # Uses api_key from user info
-                "Content-Type": "application/json",
+                **build_bearer_headers(api_key),  # Uses api_key from user info
                 "Accept": "text/event-stream",
                 "User-Agent": "iFlow-Cli",
             }
@@ -520,29 +515,14 @@ class IFlowProvider(IFlowAuthBase, StreamingResponseMixin, ProviderInterface):
                             )
 
                     # Process successful streaming response
-                    async for line in response.aiter_lines():
-                        file_logger.log_response_chunk(line)
-
-                        # CRITICAL FIX: Handle both "data:" (no space) and "data: " (with space)
-                        if line.startswith("data:"):
-                            # Extract data after "data:" prefix, handling both formats
-                            if line.startswith("data: "):
-                                data_str = line[6:]  # Skip "data: "
-                            else:
-                                data_str = line[5:]  # Skip "data:"
-
-                            if data_str.strip() == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                for openai_chunk in self._convert_chunk_to_openai(
-                                    chunk, model
-                                ):
-                                    yield litellm.ModelResponse(**openai_chunk)
-                            except json.JSONDecodeError:
-                                lib_logger.warning(
-                                    f"Could not decode JSON from iFlow: {line}"
-                                )
+                    async for chunk in parse_sse_stream(
+                        response, provider_name="iFlow",
+                        on_line=file_logger.log_response_chunk,
+                    ):
+                        for openai_chunk in self._convert_chunk_to_openai(
+                            chunk, model
+                        ):
+                            yield litellm.ModelResponse(**openai_chunk)
 
             except httpx.HTTPStatusError:
                 raise  # Re-raise HTTP errors we already handled

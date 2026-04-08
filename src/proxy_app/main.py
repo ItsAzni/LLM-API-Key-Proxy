@@ -972,6 +972,48 @@ async def streaming_response_wrapper(
             )
 
 
+def handle_litellm_error(e: Exception, error_format: str = "openai") -> HTTPException:
+    """Map litellm exceptions to HTTPException with OpenAI or Anthropic error format."""
+    _ERROR_MAP = [
+        (
+            (litellm.InvalidRequestError, ValueError, litellm.ContextWindowExceededError),
+            400,
+            "Invalid Request",
+            "invalid_request_error",
+        ),
+        ((litellm.AuthenticationError,), 401, "Authentication Error", "authentication_error"),
+        ((litellm.RateLimitError,), 429, "Rate Limit Exceeded", "rate_limit_error"),
+        (
+            (litellm.ServiceUnavailableError, litellm.APIConnectionError),
+            503,
+            "Service Unavailable",
+            "api_error",
+        ),
+        ((litellm.Timeout,), 504, "Gateway Timeout", "api_error"),
+        ((litellm.InternalServerError, litellm.OpenAIError), 502, "Bad Gateway", "api_error"),
+    ]
+
+    for exc_types, status_code, openai_label, anthropic_error_type in _ERROR_MAP:
+        if isinstance(e, exc_types):
+            if error_format == "openai":
+                detail = f"{openai_label}: {str(e)}"
+            else:
+                message = f"Request timed out: {str(e)}" if isinstance(e, litellm.Timeout) else str(e)
+                detail = {
+                    "type": "error",
+                    "error": {"type": anthropic_error_type, "message": message},
+                }
+            return HTTPException(status_code=status_code, detail=detail)
+
+    # Fallback for unmatched litellm errors
+    if error_format == "openai":
+        return HTTPException(status_code=500, detail=str(e))
+    return HTTPException(
+        status_code=500,
+        detail={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+    )
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -1051,6 +1093,11 @@ async def chat_completions(
                     request, request_data, response_generator, raw_logger
                 ),
                 media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
             )
         else:
             response = await client.acompletion(request=request, **request_data)
@@ -1070,23 +1117,12 @@ async def chat_completions(
                 )
             return response
 
-    except (
-        litellm.InvalidRequestError,
-        ValueError,
-        litellm.ContextWindowExceededError,
-    ) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid Request: {str(e)}")
-    except litellm.AuthenticationError as e:
-        raise HTTPException(status_code=401, detail=f"Authentication Error: {str(e)}")
-    except litellm.RateLimitError as e:
-        raise HTTPException(status_code=429, detail=f"Rate Limit Exceeded: {str(e)}")
-    except (litellm.ServiceUnavailableError, litellm.APIConnectionError) as e:
-        raise HTTPException(status_code=503, detail=f"Service Unavailable: {str(e)}")
-    except litellm.Timeout as e:
-        raise HTTPException(status_code=504, detail=f"Gateway Timeout: {str(e)}")
-    except (litellm.InternalServerError, litellm.OpenAIError) as e:
-        raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(e)}")
     except Exception as e:
+        if isinstance(e, (litellm.InvalidRequestError, ValueError, litellm.ContextWindowExceededError,
+                          litellm.AuthenticationError, litellm.RateLimitError,
+                          litellm.ServiceUnavailableError, litellm.APIConnectionError,
+                          litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
+            raise handle_litellm_error(e, error_format="openai")
         logging.error(f"Request failed after all retries: {e}")
         # Optionally log the failed request (request_data already parsed above)
         if ENABLE_REQUEST_LOGGING:
@@ -1162,41 +1198,12 @@ async def anthropic_messages(
                 )
             return JSONResponse(content=result)
 
-    except (
-        litellm.InvalidRequestError,
-        ValueError,
-        litellm.ContextWindowExceededError,
-    ) as e:
-        error_response = {
-            "type": "error",
-            "error": {"type": "invalid_request_error", "message": str(e)},
-        }
-        raise HTTPException(status_code=400, detail=error_response)
-    except litellm.AuthenticationError as e:
-        error_response = {
-            "type": "error",
-            "error": {"type": "authentication_error", "message": str(e)},
-        }
-        raise HTTPException(status_code=401, detail=error_response)
-    except litellm.RateLimitError as e:
-        error_response = {
-            "type": "error",
-            "error": {"type": "rate_limit_error", "message": str(e)},
-        }
-        raise HTTPException(status_code=429, detail=error_response)
-    except (litellm.ServiceUnavailableError, litellm.APIConnectionError) as e:
-        error_response = {
-            "type": "error",
-            "error": {"type": "api_error", "message": str(e)},
-        }
-        raise HTTPException(status_code=503, detail=error_response)
-    except litellm.Timeout as e:
-        error_response = {
-            "type": "error",
-            "error": {"type": "api_error", "message": f"Request timed out: {str(e)}"},
-        }
-        raise HTTPException(status_code=504, detail=error_response)
     except Exception as e:
+        if isinstance(e, (litellm.InvalidRequestError, ValueError, litellm.ContextWindowExceededError,
+                          litellm.AuthenticationError, litellm.RateLimitError,
+                          litellm.ServiceUnavailableError, litellm.APIConnectionError,
+                          litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
+            raise handle_litellm_error(e, error_format="anthropic")
         logging.error(f"Anthropic messages endpoint error: {e}")
         if logger:
             logger.log_final_response(
@@ -1674,13 +1681,23 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
             model_info = litellm.get_model_info(model)
             input_cost = model_info.get("input_cost_per_token", 0)
             output_cost = model_info.get("output_cost_per_token", 0)
+            cache_read_cost = model_info.get("cache_read_input_token_cost", 0) or input_cost * 0.1
+            cache_creation_cost = model_info.get("cache_creation_input_token_cost", 0) or input_cost * 1.25
 
             if input_cost or output_cost:
-                cost = (prompt_tokens * input_cost) + (completion_tokens * output_cost)
+                non_cached_input = max(prompt_tokens - cache_read_tokens - cache_creation_tokens, 0)
+                cost = (
+                    non_cached_input * input_cost
+                    + cache_read_tokens * cache_read_cost
+                    + cache_creation_tokens * cache_creation_cost
+                    + completion_tokens * output_cost
+                )
                 result["cost"] = cost
                 result["pricing"] = {
                     "input_cost_per_token": input_cost,
                     "output_cost_per_token": output_cost,
+                    "cache_read_input_token_cost": cache_read_cost,
+                    "cache_creation_input_token_cost": cache_creation_cost,
                 }
                 result["source"] = "litellm_fallback"
                 return result

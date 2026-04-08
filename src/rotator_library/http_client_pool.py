@@ -39,8 +39,7 @@ from .config import env_bool as _env_bool, env_float as _env_float, env_int as _
 lib_logger = logging.getLogger("rotator_library")
 
 
-# Module-level DNS resolver cache keyed by (host, port)
-_dns_resolver_cache: Dict[Tuple[str, int], Optional[Any]] = {}
+
 
 
 # Configuration defaults (overridable via environment)
@@ -53,8 +52,7 @@ DEFAULT_WARMUP_CONNECTIONS = 3  # Connections to pre-warm per provider
 DEFAULT_WARMUP_TIMEOUT = 10.0  # Max seconds for warmup
 DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
 DEFAULT_HTTP2_ENABLED = True  # HTTP/2 enabled by default
-DEFAULT_DNS_RESOLVER = None  # Custom DNS resolver (e.g., "8.8.8.8")
-DEFAULT_DNS_PORT = 53  # Default DNS port
+
 
 # Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
 # Some Azure endpoints reject TLS 1.3 cipher suites; this list prefers TLS 1.2 suites
@@ -86,7 +84,10 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
                 content_type = request.headers.get("content-type", "")
                 if "application/json" in content_type:
                     if "content-encoding" not in {k.lower() for k in request.headers}:
-                        compressed = gzip.compress(request.content)
+                        loop = asyncio.get_event_loop()
+                        compressed = await loop.run_in_executor(
+                            None, gzip.compress, request.content
+                        )
 
                         if len(compressed) < content_len * 0.9:
                             # Create new request with compressed content
@@ -175,39 +176,7 @@ def should_skip_ssl_for_host(host: str, ssl_verify: Union[bool, List[str]]) -> b
     return False
 
 
-def _create_custom_dns_resolver(dns_host: str, dns_port: int = DEFAULT_DNS_PORT):
-    """
-    Create a custom DNS resolver for httpx.
 
-    This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus.
-    Results are cached by (host, port) to avoid redundant imports and instantiation.
-
-    Args:
-    dns_host: DNS server IP (e.g., "8.8.8.8", "1.1.1.1")
-    dns_port: DNS server port (default: 53)
-
-    Returns:
-    DNS resolver instance (or None if creation fails)
-    """
-    cache_key = (dns_host, dns_port)
-    if cache_key in _dns_resolver_cache:
-        return _dns_resolver_cache[cache_key]
-
-    try:
-        resolver = httpx.AsyncDNSResolver(
-            host=dns_host,
-            port=dns_port,
-        )
-        lib_logger.info(f"Created custom DNS resolver: {dns_host}:{dns_port}")
-        _dns_resolver_cache[cache_key] = resolver
-        return resolver
-    except Exception as e:
-        lib_logger.warning(
-            f"Failed to create custom DNS resolver {dns_host}:{dns_port}: {e}. "
-            f"Falling back to system DNS."
-        )
-        _dns_resolver_cache[cache_key] = None
-        return None
 
 
 class HttpClientPool:
@@ -287,13 +256,6 @@ class HttpClientPool:
         if not self._http2_enabled:
             lib_logger.warning(
                 "HTTP/2 is DISABLED via HTTP2_ENABLED. Using HTTP/1.1 only."
-            )
-
-        # Custom DNS resolver (for DNS resolution issues)
-        self._dns_resolver = os.getenv("HTTP_DNS_RESOLVER", DEFAULT_DNS_RESOLVER)
-        if self._dns_resolver:
-            lib_logger.info(
-                f"HTTP client pool: Using custom DNS resolver: {self._dns_resolver}"
             )
 
         # Client instances (lazy initialization)
@@ -395,50 +357,16 @@ class HttpClientPool:
                 http2=self._http2_enabled,
             )
 
-        # Configure custom DNS resolver if specified
-        # This allows bypassing system DNS which may be hijacked by VPN/proxy/antivirus
-        if self._dns_resolver:
-            try:
-                # Parse DNS resolver (format: "host" or "host:port")
-                dns_host = self._dns_resolver
-                dns_port = DEFAULT_DNS_PORT
-
-                if ":" in self._dns_resolver:
-                    parts = self._dns_resolver.rsplit(":", 1)
-                    dns_host = parts[0]
-                    try:
-                        dns_port = int(parts[1])
-                    except ValueError:
-                        pass
-
-                # Create custom transport with DNS resolver
-                transport = httpx.AsyncHTTPTransport(
-                    verify=ssl_context,
-                    limits=self._create_limits(),
-                    http2=self._http2_enabled,
-                    # Note: httpx doesn't support custom DNS resolver directly
-                    # We'll use a workaround by setting the resolver in the environment
-                    # and letting aiohttp handle it
-                )
-
-                lib_logger.info(
-                    f"Using custom DNS resolver: {dns_host}:{dns_port} "
-                    f"(Note: DNS resolution will be handled by aiohttp)"
-                )
-
-            except Exception as e:
-                lib_logger.warning(
-                    f"Failed to configure custom DNS resolver {self._dns_resolver}: {e}. "
-                    f"Falling back to system DNS."
-                )
+        # Note: httpx does not support custom DNS resolver.
+        # DNS resolution is handled by the OS/aiohttp resolver.
+        # If custom DNS is needed, set DNS env vars before process start.
 
         client = httpx.AsyncClient(**client_kwargs)
 
         lib_logger.debug(
             f"Created new HTTP client (streaming={streaming}, "
             f"max_conn={self._max_connections}, keepalive={self._max_keepalive}, "
-            f"ssl_verify={self._ssl_verify}, http2={self._http2_enabled}, "
-            f"dns_resolver={self._dns_resolver})"
+            f"ssl_verify={self._ssl_verify}, http2={self._http2_enabled})"
         )
 
         return client
@@ -712,7 +640,6 @@ class HttpClientPool:
                 "keepalive_expiry": self._keepalive_expiry,
                 "ssl_verify": self._ssl_verify,
                 "http2_enabled": self._http2_enabled,
-                "dns_resolver": self._dns_resolver,
             },
         }
 

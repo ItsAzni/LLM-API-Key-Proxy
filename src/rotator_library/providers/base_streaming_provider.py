@@ -8,12 +8,63 @@ across multiple API providers.
 
 import asyncio
 import copy
+import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
+import orjson
 import litellm
 
 lib_logger = logging.getLogger("rotator_library")
+
+
+async def parse_sse_stream(
+    response: Any,
+    provider_name: str = "",
+    on_line: Optional[Callable[[str], None]] = None,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Async generator that parses SSE (Server-Sent Events) lines from an
+    httpx streaming response and yields decoded JSON chunks.
+
+    Handles both ``data: ...`` (with space) and ``data:...`` (without space)
+    prefixes.  Terminates on ``[DONE]`` sentinel.
+
+    Args:
+        response: An httpx streaming response (already inside ``async with``).
+        provider_name: Name of the calling provider for log messages.
+        on_line: Optional callback invoked for every raw line (useful for
+                 transaction logging, e.g. ``file_logger.log_response_chunk``).
+
+    Yields:
+        Parsed JSON dicts from each SSE ``data`` line.
+    """
+    async for line in response.aiter_lines():
+        if on_line is not None:
+            on_line(line)
+
+        # Skip non-data lines (event:, comments, empty lines)
+        if not line.startswith("data:"):
+            continue
+
+        # Extract data after "data:" prefix, handling both "data: " and "data:"
+        if line.startswith("data: "):
+            data_str = line[6:]
+        else:
+            data_str = line[5:]
+
+        # Check for [DONE] sentinel (with optional surrounding whitespace)
+        if data_str.strip() == "[DONE]":
+            break
+
+        try:
+            chunk = orjson.loads(data_str)
+            yield chunk
+        except (orjson.JSONDecodeError, json.JSONDecodeError):
+            name = provider_name or "unknown"
+            lib_logger.warning(
+                f"Could not decode JSON from {name}: {line}"
+            )
 
 
 class StreamingResponseMixin:

@@ -3,23 +3,19 @@
 
 # src/rotator_library/providers/qwen_code_provider.py
 
-import json
 import time
 import os
 import httpx
 import logging
 from typing import Union, AsyncGenerator, List, Dict, Any
-from .provider_interface import ProviderInterface
+from .provider_interface import ProviderInterface, strip_provider_prefix, build_bearer_headers
 from .qwen_auth_base import QwenAuthBase
-from .base_streaming_provider import StreamingResponseMixin
+from .base_streaming_provider import StreamingResponseMixin, parse_sse_stream
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 from ..transaction_logger import ProviderLogger
 import litellm
-from litellm.exceptions import RateLimitError, AuthenticationError
-from pathlib import Path
-import uuid
-from datetime import datetime
+from litellm.exceptions import RateLimitError
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -88,7 +84,7 @@ class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
         if static_models:
             for model in static_models:
                 # Extract model name from "qwen_code/ModelName" format
-                model_name = model.split("/")[-1] if "/" in model else model
+                model_name = strip_provider_prefix(model)
                 # Get the actual model ID from definitions (which may differ from the name)
                 model_id = self.model_definitions.get_model_id("qwen_code", model_name)
 
@@ -117,7 +113,7 @@ class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
             models_url = f"{api_base.rstrip('/')}/v1/models"
 
             response = await client.get(
-                models_url, headers={"Authorization": f"Bearer {access_token}"}
+                models_url, headers=build_bearer_headers(access_token)
             )
             response.raise_for_status()
 
@@ -312,15 +308,14 @@ class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
             api_base, access_token = await self.get_api_details(credential_path)
 
             # Strip provider prefix from model name (e.g., "qwen_code/qwen3-coder-plus" -> "qwen3-coder-plus")
-            model_name = model.split("/")[-1]
+            model_name = strip_provider_prefix(model)
             kwargs_with_stripped_model = {**kwargs, "model": model_name}
 
             # Build clean payload with only supported parameters
             payload = self._build_request_payload(**kwargs_with_stripped_model)
 
             headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
+                **build_bearer_headers(access_token),
                 "Accept": "text/event-stream",
                 "User-Agent": "google-api-nodejs-client/9.15.1",
                 "X-Goog-Api-Client": "gl-node/22.17.0",
@@ -388,22 +383,14 @@ class QwenCodeProvider(QwenAuthBase, StreamingResponseMixin, ProviderInterface):
                             )
 
                     # Process successful streaming response
-                    async for line in response.aiter_lines():
-                        file_logger.log_response_chunk(line)
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                for openai_chunk in self._convert_chunk_to_openai(
-                                    chunk, model
-                                ):
-                                    yield litellm.ModelResponse(**openai_chunk)
-                            except json.JSONDecodeError:
-                                lib_logger.warning(
-                                    f"Could not decode JSON from Qwen Code: {line}"
-                                )
+                    async for chunk in parse_sse_stream(
+                        response, provider_name="Qwen Code",
+                        on_line=file_logger.log_response_chunk,
+                    ):
+                        for openai_chunk in self._convert_chunk_to_openai(
+                            chunk, model
+                        ):
+                            yield litellm.ModelResponse(**openai_chunk)
 
             except httpx.HTTPStatusError:
                 raise  # Re-raise HTTP errors we already handled

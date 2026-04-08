@@ -14,6 +14,7 @@ import httpx
 
 from ..http_client_pool import get_http_pool
 from .google_oauth_base import GoogleOAuthBase
+from .provider_interface import build_bearer_headers
 from .utilities.gemini_shared_utils import CODE_ASSIST_ENDPOINT
 
 lib_logger = logging.getLogger("rotator_library")
@@ -219,8 +220,7 @@ class GeminiAuthBase(GoogleOAuthBase):
             "No cached or configured project ID found, initiating discovery..."
         )
         headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
+            **build_bearer_headers(access_token),
             **GEMINI_CLI_AUTH_HEADERS,
         }
 

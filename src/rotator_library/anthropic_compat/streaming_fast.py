@@ -16,37 +16,14 @@ Performance optimizations:
 
 import logging
 import time
+from time import monotonic
 import uuid
 from typing import AsyncGenerator, Callable, Optional, Awaitable, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..transaction_logger import TransactionLogger
 
-# Try to import orjson for faster JSON handling
-try:
-    import orjson
-
-    def json_dumps(obj: Any) -> str:
-        """Fast JSON serialization using orjson."""
-        return orjson.dumps(obj).decode('utf-8')
-
-    def json_loads(s: str) -> Any:
-        """Fast JSON parsing using orjson."""
-        return orjson.loads(s)
-
-    HAS_ORJSON = True
-except ImportError:
-    import json
-
-    def json_dumps(obj: Any) -> str:
-        """Fallback JSON serialization using stdlib."""
-        return json.dumps(obj)
-
-    def json_loads(s: str) -> Any:
-        """Fallback JSON parsing using stdlib."""
-        return json.loads(s)
-
-    HAS_ORJSON = False
+from ..utils.json_utils import json_dumps_str as json_dumps, json_loads
 
 logger = logging.getLogger("rotator_library.anthropic_compat")
 
@@ -65,7 +42,7 @@ class ChunkBatcher:
         self.current_size = 0
         self.max_size = max_size
         self.max_delay_ms = max_delay_ms
-        self.last_flush = time.time()
+        self.last_flush = monotonic()
     
     def add(self, event: str) -> Optional[str]:
         """
@@ -81,7 +58,7 @@ class ChunkBatcher:
             return self.flush()
         
         # Check time-based flush
-        elapsed_ms = (time.time() - self.last_flush) * 1000
+        elapsed_ms = (monotonic() - self.last_flush) * 1000
         if elapsed_ms >= self.max_delay_ms:
             return self.flush()
         
@@ -95,20 +72,21 @@ class ChunkBatcher:
         result = "".join(self.buffer)
         self.buffer.clear()
         self.current_size = 0
-        self.last_flush = time.time()
+        self.last_flush = monotonic()
         return result
 
 
 # Pre-built event templates for common operations (reduces allocations)
-def _make_message_start_event(request_id: str, model: str, input_tokens: int = 0, cached_tokens: int = 0) -> str:
+def _make_message_start_event(request_id: str, model: str, input_tokens: int = 0, cached_tokens: int = 0, cache_creation_tokens: int = 0) -> str:
     """Build message_start event string."""
     usage = {
-        "input_tokens": input_tokens - cached_tokens,
+        "input_tokens": input_tokens - cached_tokens - cache_creation_tokens,
         "output_tokens": 0,
     }
     if cached_tokens > 0:
         usage["cache_read_input_tokens"] = cached_tokens
-        usage["cache_creation_input_tokens"] = 0
+    if cache_creation_tokens > 0:
+        usage["cache_creation_input_tokens"] = cache_creation_tokens
 
     message_start = {
         "type": "message_start",
@@ -179,12 +157,13 @@ def _make_content_block_stop_event(index: int) -> str:
     return f'event: content_block_stop\ndata: {{"type": "content_block_stop", "index": {index}}}\n\n'
 
 
-def _make_message_delta_event(stop_reason: str, output_tokens: int = 0, cached_tokens: int = 0) -> str:
+def _make_message_delta_event(stop_reason: str, output_tokens: int = 0, cached_tokens: int = 0, cache_creation_tokens: int = 0) -> str:
     """Build message_delta event string."""
     usage = {"output_tokens": output_tokens}
     if cached_tokens > 0:
         usage["cache_read_input_tokens"] = cached_tokens
-        usage["cache_creation_input_tokens"] = 0
+    if cache_creation_tokens > 0:
+        usage["cache_creation_input_tokens"] = cache_creation_tokens
 
     event = {
         "type": "message_delta",
@@ -253,18 +232,19 @@ async def anthropic_streaming_wrapper_fast(
     input_tokens = precomputed_input_tokens if precomputed_input_tokens is not None else 0
     output_tokens = 0
     cached_tokens = 0
+    cache_creation_tokens = 0
     usage_received_from_provider = False  # Track if we got usage from provider
 
-    # Accumulated content for logging
-    accumulated_text = ""
-    accumulated_thinking = ""
+    # Accumulated content for logging (list + join for O(n) instead of += O(n^2))
+    _text_parts: list[str] = []
+    _thinking_parts: list[str] = []
     stop_reason_final = "end_turn"
     
     # Initialize chunk batcher for improved throughput
     batcher = ChunkBatcher(max_size=4096, max_delay_ms=10)
     
     # Heartbeat tracking to prevent connection timeouts
-    last_event_time = time.time()
+    last_event_time = monotonic()
     HEARTBEAT_INTERVAL = 30  # seconds
 
     try:
@@ -280,7 +260,7 @@ async def anthropic_streaming_wrapper_fast(
             data_content = chunk_str[5:].strip()  # Skip "data:" prefix
 
             # Send heartbeat if no events for a while
-            current_time = time.time()
+            current_time = monotonic()
             if current_time - last_event_time > HEARTBEAT_INTERVAL:
                 yield ": heartbeat\n\n"
                 last_event_time = current_time
@@ -289,7 +269,7 @@ async def anthropic_streaming_wrapper_fast(
             if data_content == "[DONE]":
                 # CRITICAL: Send message_start if we haven't yet
                 if not message_started:
-                    event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                    event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens, cache_creation_tokens)
                     if event := batcher.add(event_str):
                         yield event
                     message_started = True
@@ -322,7 +302,7 @@ async def anthropic_streaming_wrapper_fast(
                 stop_reason_final = stop_reason
 
                 # Send final events
-                event_str = _make_message_delta_event(stop_reason, output_tokens, cached_tokens)
+                event_str = _make_message_delta_event(stop_reason, output_tokens, cached_tokens, cache_creation_tokens)
                 if event := batcher.add(event_str):
                     yield event
                 event_str = _make_message_stop_event()
@@ -337,9 +317,9 @@ async def anthropic_streaming_wrapper_fast(
                 if transaction_logger:
                     _log_anthropic_response(
                         transaction_logger, request_id, original_model,
-                        accumulated_thinking, accumulated_text,
+                        "".join(_thinking_parts), "".join(_text_parts),
                         tool_calls_by_index, input_tokens, output_tokens,
-                        cached_tokens, stop_reason_final
+                        cached_tokens, cache_creation_tokens, stop_reason_final
                     )
                 break
 
@@ -359,13 +339,17 @@ async def anthropic_streaming_wrapper_fast(
                 output_tokens = usage.get("completion_tokens", output_tokens)
                 # Extract cached tokens from prompt_tokens_details
                 if usage.get("prompt_tokens_details"):
-                    cached_tokens = usage["prompt_tokens_details"].get(
+                    prompt_details = usage["prompt_tokens_details"]
+                    cached_tokens = prompt_details.get(
                         "cached_tokens", cached_tokens
+                    )
+                    cache_creation_tokens = prompt_details.get(
+                        "cache_creation_tokens", cache_creation_tokens
                     )
 
             # Send message_start on first chunk
             if not message_started:
-                event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+                event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens, cache_creation_tokens)
                 if event := batcher.add(event_str):
                     yield event
                 message_started = True
@@ -389,7 +373,7 @@ async def anthropic_streaming_wrapper_fast(
                 event_str = _make_thinking_delta_event(current_block_index, reasoning_content)
                 if event := batcher.add(event_str):
                     yield event
-                accumulated_thinking += reasoning_content
+                _thinking_parts.append(reasoning_content)
                 last_event_time = current_time
 
             # Handle text content
@@ -412,7 +396,7 @@ async def anthropic_streaming_wrapper_fast(
                 event_str = _make_text_delta_event(current_block_index, content)
                 if event := batcher.add(event_str):
                     yield event
-                accumulated_text += content
+                _text_parts.append(content)
                 last_event_time = current_time
 
             # Handle tool calls
@@ -476,11 +460,11 @@ async def anthropic_streaming_wrapper_fast(
 
         # Send error as visible text
         if not message_started:
-            event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens)
+            event_str = _make_message_start_event(request_id, original_model, input_tokens, cached_tokens, cache_creation_tokens)
             if event := batcher.add(event_str):
                 yield event
 
-        error_message = f"Error: {str(e)}"
+            error_message = f"Error: {str(e)}"
         event_str = _make_content_block_start_event(current_block_index, "text")
         if event := batcher.add(event_str):
             yield event
@@ -490,7 +474,7 @@ async def anthropic_streaming_wrapper_fast(
         event_str = _make_content_block_stop_event(current_block_index)
         if event := batcher.add(event_str):
             yield event
-        event_str = _make_message_delta_event("end_turn", 0, cached_tokens)
+        event_str = _make_message_delta_event("end_turn", 0, cached_tokens, cache_creation_tokens)
         if event := batcher.add(event_str):
             yield event
         event_str = _make_message_stop_event()
@@ -519,6 +503,7 @@ def _log_anthropic_response(
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int,
+    cache_creation_tokens: int,
     stop_reason: str,
 ) -> None:
     """Log the final Anthropic response."""
@@ -556,12 +541,13 @@ def _log_anthropic_response(
 
     # Build usage
     log_usage = {
-        "input_tokens": input_tokens - cached_tokens,
+        "input_tokens": input_tokens - cached_tokens - cache_creation_tokens,
         "output_tokens": output_tokens,
     }
     if cached_tokens > 0:
         log_usage["cache_read_input_tokens"] = cached_tokens
-        log_usage["cache_creation_input_tokens"] = 0
+    if cache_creation_tokens > 0:
+        log_usage["cache_creation_input_tokens"] = cache_creation_tokens
 
     anthropic_response = {
         "id": request_id,

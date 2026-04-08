@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..usage_manager import UsageManager
 
-from .provider_interface import ProviderInterface, UsageResetConfigDef
+from .provider_interface import ProviderInterface, strip_provider_prefix
 from .utilities.nanogpt_quota_tracker import NanoGptQuotaTracker
 from ..model_definitions import ModelDefinitions
 
@@ -148,7 +148,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
             Quota group name
         """
         # Strip provider prefix if present
-        clean_model = model.split("/")[-1] if "/" in model else model
+        clean_model = strip_provider_prefix(model)
 
         # _daily is for soft limit display only
         if clean_model == "_daily":
@@ -209,7 +209,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
         static_models = self.model_definitions.get_all_provider_models("nanogpt")
         if static_models:
             for model in static_models:
-                model_id = model.split("/")[-1] if "/" in model else model
+                model_id = strip_provider_prefix(model)
                 models.append(model)
                 seen_ids.add(model_id)
             lib_logger.debug(f"Loaded {len(static_models)} static models for nanogpt")
@@ -260,7 +260,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
 
         # Also track static models for quota group sync
         for model in models:
-            model_id = model.split("/")[-1] if "/" in model else model
+            model_id = strip_provider_prefix(model)
             self._discovered_models.add(model_id)
 
         # Fetch subscription-only models for quota tracking

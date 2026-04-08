@@ -26,7 +26,8 @@ import httpx
 import litellm
 from litellm.types.utils import Delta as DeltaType, ChatCompletionMessageToolCall
 
-from .provider_interface import ProviderInterface
+from .provider_interface import ProviderInterface, strip_provider_prefix, build_bearer_headers
+from .base_streaming_provider import parse_sse_stream
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -113,8 +114,7 @@ class ColinProvider(ProviderInterface):
         transaction_context = kwargs.pop("transaction_context", None)
 
         # Remove provider prefix from model if present
-        if "/" in model:
-            model = model.split("/")[-1]
+        model = strip_provider_prefix(model)
 
         # Build request payload for Responses API
         # Convert messages to input format
@@ -154,10 +154,7 @@ class ColinProvider(ProviderInterface):
 
         # Make request
         url = f"{self.api_base}/responses"
-        headers = {
-            "Authorization": f"Bearer {credential_identifier}",
-            "Content-Type": "application/json",
-        }
+        headers = build_bearer_headers(credential_identifier)
 
         if stream:
             payload["stream"] = True
@@ -339,117 +336,98 @@ class ColinProvider(ProviderInterface):
                 error_body = await response.aread()
                 response.raise_for_status()
 
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
+            async for data in parse_sse_stream(response, provider_name="COLIN"):
+                # Parse COLIN SSE format
+                content_delta = ""
 
-                # Handle SSE format: "event: ..." or "data: ..."
-                if line.startswith("event:"):
-                    # Event type line, skip
-                    continue
+                # Pattern 1: response.output_item.added
+                if data.get("type") == "response.output_item.added":
+                    # Output item started, no content yet
+                    pass
 
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        break
+                # Pattern 2: response.content_part.added
+                elif data.get("type") == "response.content_part.added":
+                    # Content part started
+                    pass
 
-                    try:
-                        data = json.loads(data_str)
+                # Pattern 3: response.output_text.delta
+                elif data.get("type") == "response.output_text.delta":
+                    content_delta = data.get("delta", "")
 
-                        # Parse COLIN SSE format
-                        content_delta = ""
-
-                        # Pattern 1: response.output_item.added
-                        if data.get("type") == "response.output_item.added":
-                            # Output item started, no content yet
-                            pass
-
-                        # Pattern 2: response.content_part.added
-                        elif data.get("type") == "response.content_part.added":
-                            # Content part started
-                            pass
-
-                        # Pattern 3: response.output_text.delta
-                        elif data.get("type") == "response.output_text.delta":
-                            content_delta = data.get("delta", "")
-
-                        # Handle function calls in streaming
-                        elif data.get("type") == "response.output_item.done":
-                            output_item = data.get("output", {})
-                            if output_item.get("type") == "function_call":
-                                # Yield tool call chunk
-                                yield litellm.ModelResponse(
-                                    id=data.get("id", f"colin-{model}"),
-                                    choices=[
-                                        litellm.Choices(
-                                            index=0,
-                                            delta=DeltaType(
-                                                role="assistant",
-                                                content=None,
-                                                tool_calls=[
-                                                    {
-                                                        "id": output_item.get(
-                                                            "id", f"call_0"
-                                                        ),
-                                                        "type": "function",
-                                                        "function": {
-                                                            "name": output_item.get(
-                                                                "name", ""
-                                                            ),
-                                                            "arguments": output_item.get(
-                                                                "arguments", "{}"
-                                                            ),
-                                                        },
-                                                    }
-                                                ],
-                                            ),
-                                            finish_reason="tool_calls",
-                                        )
-                                    ],
-                                    created=data.get("created_at", 0),
-                                    model=model,
-                                    object="chat.completion.chunk",
+                # Handle function calls in streaming
+                elif data.get("type") == "response.output_item.done":
+                    output_item = data.get("output", {})
+                    if output_item.get("type") == "function_call":
+                        # Yield tool call chunk
+                        yield litellm.ModelResponse(
+                            id=data.get("id", f"colin-{model}"),
+                            choices=[
+                                litellm.Choices(
+                                    index=0,
+                                    delta=DeltaType(
+                                        role="assistant",
+                                        content=None,
+                                        tool_calls=[
+                                            {
+                                                "id": output_item.get(
+                                                    "id", f"call_0"
+                                                ),
+                                                "type": "function",
+                                                "function": {
+                                                    "name": output_item.get(
+                                                        "name", ""
+                                                    ),
+                                                    "arguments": output_item.get(
+                                                        "arguments", "{}"
+                                                    ),
+                                                },
+                                            }
+                                        ],
+                                    ),
+                                    finish_reason="tool_calls",
                                 )
+                            ],
+                            created=data.get("created_at", 0),
+                            model=model,
+                            object="chat.completion.chunk",
+                        )
 
-                        # Pattern 4: output_text.delta (alternative)
-                        elif "delta" in data:
-                            delta = data["delta"]
-                            if isinstance(delta, dict):
-                                content_delta = delta.get("content", "") or delta.get(
-                                    "text", ""
-                                )
-                            elif isinstance(delta, str):
-                                content_delta = delta
+                # Pattern 4: output_text.delta (alternative)
+                elif "delta" in data:
+                    delta = data["delta"]
+                    if isinstance(delta, dict):
+                        content_delta = delta.get("content", "") or delta.get(
+                            "text", ""
+                        )
+                    elif isinstance(delta, str):
+                        content_delta = delta
 
-                        # Pattern 5: output.content.text delta
-                        if not content_delta and data.get("output"):
-                            for output in data.get("output", []):
-                                if output.get("type") == "output_text":
-                                    content_delta = output.get(
-                                        "delta", ""
-                                    ) or output.get("text", "")
-                                    break
+                # Pattern 5: output.content.text delta
+                if not content_delta and data.get("output"):
+                    for output in data.get("output", []):
+                        if output.get("type") == "output_text":
+                            content_delta = output.get(
+                                "delta", ""
+                            ) or output.get("text", "")
+                            break
 
-                        if content_delta:
-                            yield litellm.ModelResponse(
-                                id=data.get("id", f"colin-{model}"),
-                                choices=[
-                                    litellm.Choices(
-                                        index=0,
-                                        delta=DeltaType(
-                                            role="assistant",
-                                            content=content_delta,
-                                        ),
-                                        finish_reason=None,
-                                    )
-                                ],
-                                created=data.get("created_at", 0),
-                                model=model,
-                                object="chat.completion.chunk",
+                if content_delta:
+                    yield litellm.ModelResponse(
+                        id=data.get("id", f"colin-{model}"),
+                        choices=[
+                            litellm.Choices(
+                                index=0,
+                                delta=DeltaType(
+                                    role="assistant",
+                                    content=content_delta,
+                                ),
+                                finish_reason=None,
                             )
-                    except json.JSONDecodeError:
-                        lib_logger.debug(f"Failed to parse SSE data: {data_str[:100]}")
-                        continue
+                        ],
+                        created=data.get("created_at", 0),
+                        model=model,
+                        object="chat.completion.chunk",
+                    )
 
             # Send final chunk
             yield litellm.ModelResponse(

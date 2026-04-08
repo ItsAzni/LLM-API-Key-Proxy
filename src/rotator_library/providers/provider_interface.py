@@ -34,6 +34,43 @@ from ..config import (
 
 
 # =============================================================================
+# SHARED PROVIDER UTILITIES
+# =============================================================================
+
+
+def strip_provider_prefix(model: str) -> str:
+    """Strip the provider prefix from a model name.
+
+    Converts names like "nanogpt/gpt-4o" to "gpt-4o".
+    Returns the model unchanged if no '/' separator is present.
+
+    Args:
+        model: Model name, optionally with provider prefix (e.g. "provider/model-id").
+
+    Returns:
+        The bare model name without the provider prefix.
+    """
+    return model.split("/")[-1] if "/" in model else model
+
+
+def build_bearer_headers(token: str, content_type: str = "application/json") -> dict:
+    """Build an Authorization + Content-Type header dict.
+
+    Produces ``{"Authorization": f"Bearer {token}", "Content-Type": content_type}``.
+    Useful as a base that can be extended with additional headers via dict spread:
+        ``headers = {**build_bearer_headers(tok), "Accept": "text/event-stream"}``
+
+    Args:
+        token: The bearer token or API key.
+        content_type: MIME type for the Content-Type header.
+
+    Returns:
+        Dict with Authorization and Content-Type headers.
+    """
+    return {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+
+
+# =============================================================================
 # TIER & USAGE CONFIGURATION TYPES
 # =============================================================================
 
@@ -614,7 +651,7 @@ class ProviderInterface(ABC):
             Group name string (e.g., "claude") or None if model is not grouped
         """
         # Strip provider prefix if present
-        clean_model = model.split("/")[-1] if "/" in model else model
+        clean_model = strip_provider_prefix(model)
         return self._find_model_quota_group(clean_model)
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
@@ -646,7 +683,7 @@ class ProviderInterface(ABC):
             Weight multiplier (default 1 if not configured)
         """
         # Strip provider prefix if present
-        clean_model = model.split("/")[-1] if "/" in model else model
+        clean_model = strip_provider_prefix(model)
         return self.model_usage_weights.get(clean_model, 1)
 
     def normalize_model_for_tracking(self, model: str) -> str:

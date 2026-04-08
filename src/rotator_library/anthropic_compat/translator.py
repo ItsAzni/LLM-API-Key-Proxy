@@ -12,27 +12,8 @@ This enables any OpenAI-compatible provider to work with Anthropic clients.
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
-# Try to import orjson for faster JSON handling (3-5x faster than stdlib json)
-try:
-    import orjson
-
-    def _json_dumps(obj) -> str:
-        return orjson.dumps(obj).decode('utf-8')
-
-    def _json_loads(s: str):
-        return orjson.loads(s)
-
-    _json_decode_error = orjson.JSONDecodeError
-except ImportError:
-    import json as _json_fallback
-
-    def _json_dumps(obj) -> str:
-        return _json_fallback.dumps(obj)
-
-    def _json_loads(s: str):
-        return _json_fallback.loads(s)
-
-    _json_decode_error = _json_fallback.JSONDecodeError
+from ..utils.json_utils import json_dumps_str as _json_dumps, json_loads as _json_loads
+from orjson import JSONDecodeError as _json_decode_error
 
 from .models import AnthropicMessagesRequest
 

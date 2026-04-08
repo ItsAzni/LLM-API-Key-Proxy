@@ -116,6 +116,7 @@ import codecs
 import time
 import os
 import random
+import uuid
 import httpx
 import litellm
 from litellm.exceptions import APIConnectionError, BadRequestError, InvalidRequestError
@@ -132,6 +133,13 @@ lib_logger = logging.getLogger("rotator_library")
 lib_logger.propagate = False
 
 DEFAULT_API_KEY_MAX_CONCURRENT_REQUESTS = 40
+
+# Providers that require stream=true when max_tokens exceeds a threshold.
+# {provider_prefix: max_tokens_threshold}
+# Fireworks API returns 400 "Requests with max_tokens > 4096 must have stream=true"
+_STREAM_REQUIRED_PROVIDERS = {
+    "fireworks": 4096,
+}
 
 from .usage_manager import UsageManager
 from .failure_logger import log_failure, configure_failure_logger
@@ -1663,8 +1671,9 @@ class RotatingClient:
                         json_buffer_parts.clear()
 
                     # Convert chunk to dict, handling both litellm.ModelResponse and raw dicts
-                    if hasattr(chunk, "dict"):
-                        chunk_dict = chunk.dict()
+                    # Prefer orjson for speed (avoids Pydantic model_dump overhead per chunk)
+                    if hasattr(chunk, "__class__") and chunk.__class__.__name__ == "ModelResponse":
+                        chunk_dict = orjson.loads(orjson.dumps(chunk))
                     elif hasattr(chunk, "model_dump"):
                         chunk_dict = chunk.model_dump()
                     else:
@@ -3663,6 +3672,184 @@ class RotatingClient:
             yield f"data: {orjson.dumps(error_data).decode()}\n\n"
             yield "data: [DONE]\n\n"
 
+    async def _forced_streaming_acompletion(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        """
+        Execute a streaming request internally but return a non-streaming ModelResponse.
+
+        Used when a provider requires stream=true (e.g., Fireworks with max_tokens > 4096)
+        but the client requested a non-streaming response. This method streams from the
+        provider, collects all chunks, and assembles them into a single ModelResponse
+        identical to what litellm.acompletion(stream=False) would return.
+        """
+        # Get the streaming generator from the normal streaming path
+        stream_generator = self._streaming_acompletion_with_retry(
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
+        # Collect SSE chunks and assemble into a non-streaming response
+        # This mirrors the aggregation logic in main.py's streaming_response_wrapper
+        _content_parts: list = []
+        _generic_str_parts: dict = {}
+        aggregated_tool_calls: dict = {}
+        final_message: dict = {"role": "assistant"}
+        usage_data = None
+        finish_reason = None
+        model_id = None
+        created_ts = None
+        response_id = None
+
+        async for chunk_str in stream_generator:
+            if not chunk_str or not chunk_str.strip() or not chunk_str.startswith("data:"):
+                continue
+            content = chunk_str[len("data:"):].strip()
+            if content == "[DONE]":
+                break
+            try:
+                chunk_data = orjson.loads(content)
+            except (orjson.JSONDecodeError, ValueError):
+                continue
+
+            # Detect error payloads from the streaming retry layer
+            if "error" in chunk_data and "choices" not in chunk_data:
+                error_info = chunk_data["error"]
+                error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                raise litellm.InternalServerError(error_msg)
+
+            # Capture metadata from first chunk
+            if response_id is None and chunk_data.get("id"):
+                response_id = chunk_data["id"]
+            if created_ts is None and chunk_data.get("created"):
+                created_ts = chunk_data["created"]
+            if model_id is None and chunk_data.get("model"):
+                model_id = chunk_data["model"]
+
+            # Aggregate choices
+            if "choices" in chunk_data and chunk_data["choices"]:
+                choice = chunk_data["choices"][0]
+                delta = choice.get("delta", {})
+
+                for key, value in delta.items():
+                    if value is None:
+                        continue
+                    if key == "content":
+                        if value:
+                            _content_parts.append(value)
+                    elif key == "tool_calls":
+                        for tc_chunk in value:
+                            index = tc_chunk["index"]
+                            if index not in aggregated_tool_calls:
+                                aggregated_tool_calls[index] = {
+                                    "type": "function",
+                                    "function": {
+                                        "name_parts": [],
+                                        "args_parts": [],
+                                    },
+                                }
+                            tc = aggregated_tool_calls[index]
+                            if tc_chunk.get("id"):
+                                tc["id"] = tc_chunk["id"]
+                            if "function" in tc_chunk:
+                                fn = tc_chunk["function"]
+                                if fn.get("name") is not None:
+                                    tc["function"]["name_parts"].append(fn["name"])
+                                if fn.get("arguments") is not None:
+                                    tc["function"]["args_parts"].append(fn["arguments"])
+                    elif key == "function_call":
+                        if "function_call" not in final_message:
+                            final_message["function_call"] = {
+                                "_name_parts": [],
+                                "_args_parts": [],
+                            }
+                        if value.get("name") is not None:
+                            final_message["function_call"]["_name_parts"].append(value["name"])
+                        if value.get("arguments") is not None:
+                            final_message["function_call"]["_args_parts"].append(value["arguments"])
+                    else:
+                        if key == "role":
+                            final_message[key] = value
+                        elif isinstance(value, str):
+                            if key not in _generic_str_parts:
+                                _generic_str_parts[key] = []
+                            _generic_str_parts[key].append(value)
+                        else:
+                            final_message[key] = value
+
+                if "finish_reason" in choice and choice["finish_reason"]:
+                    finish_reason = choice["finish_reason"]
+
+            if "usage" in chunk_data and chunk_data["usage"]:
+                usage_data = chunk_data["usage"]
+
+        # Assemble final message content
+        if _content_parts:
+            final_message["content"] = "".join(_content_parts)
+        for key, parts in _generic_str_parts.items():
+            final_message[key] = "".join(parts)
+
+        # Flatten tool_calls
+        if aggregated_tool_calls:
+            tool_calls_list = []
+            for tc in aggregated_tool_calls.values():
+                fn = tc["function"]
+                tool_calls_list.append({
+                    "id": tc.get("id"),
+                    "type": tc["type"],
+                    "function": {
+                        "name": "".join(fn["name_parts"]),
+                        "arguments": "".join(fn["args_parts"]),
+                    },
+                })
+            final_message["tool_calls"] = tool_calls_list
+            finish_reason = "tool_calls"
+
+        if "function_call" in final_message:
+            fc = final_message["function_call"]
+            final_message["function_call"] = {
+                "name": "".join(fc["_name_parts"]),
+                "arguments": "".join(fc["_args_parts"]),
+            }
+
+        # Ensure standard fields
+        for field in ("content", "tool_calls", "function_call"):
+            if field not in final_message:
+                final_message[field] = None
+
+        # Build ModelResponse using litellm's structure
+        from litellm.types.utils import Choices, Message
+
+        message = Message(**final_message)
+        choice = Choices(
+            index=0,
+            message=message,
+            finish_reason=finish_reason or "stop",
+        )
+
+        model_response = litellm.ModelResponse(
+            id=response_id or f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            created=created_ts or int(time.time()),
+            model=model_id or kwargs.get("model", ""),
+            choices=[choice],
+            usage=usage_data or litellm.Usage(
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+            ),
+        )
+
+        lib_logger.info(
+            f"Forced streaming collection complete for {model_id}: "
+            f"finish_reason={finish_reason}, usage={usage_data}"
+        )
+
+        return model_response
+
     def acompletion(
         self,
         request: Optional[Any] = None,
@@ -3700,6 +3887,22 @@ class RotatingClient:
             )
             kwargs.pop("stream_options", None)
 
+        # Check if provider requires forced streaming for high max_tokens
+        # Some providers (e.g., Fireworks) reject non-streaming requests when
+        # max_tokens exceeds a threshold with: "Requests with max_tokens > N must have stream=true"
+        forced_streaming = False
+        if not kwargs.get("stream"):
+            max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+            if max_tokens and provider in _STREAM_REQUIRED_PROVIDERS:
+                threshold = _STREAM_REQUIRED_PROVIDERS[provider]
+                if max_tokens > threshold:
+                    lib_logger.info(
+                        f"Forcing stream=true for {provider} provider "
+                        f"(max_tokens={max_tokens} > threshold={threshold})"
+                    )
+                    kwargs["stream"] = True
+                    forced_streaming = True
+
         if kwargs.get("stream"):
             # Only add stream_options for providers that support it
             if provider not in STREAM_OPTIONS_UNSUPPORTED_PROVIDERS:
@@ -3707,6 +3910,14 @@ class RotatingClient:
                     kwargs["stream_options"] = {}
                 if "include_usage" not in kwargs["stream_options"]:
                     kwargs["stream_options"]["include_usage"] = True
+
+            if forced_streaming:
+                # Internally stream but collect into a non-streaming ModelResponse
+                return self._forced_streaming_acompletion(
+                    request=request,
+                    pre_request_callback=pre_request_callback,
+                    **kwargs,
+                )
 
             return self._streaming_acompletion_with_retry(
                 request=request, pre_request_callback=pre_request_callback, **kwargs

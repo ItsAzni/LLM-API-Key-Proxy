@@ -4,8 +4,7 @@
 import httpx
 import logging
 from typing import List, Dict, Any
-import litellm
-from .provider_interface import ProviderInterface
+from .provider_interface import ProviderInterface  # strip_provider_prefix intentionally not used — nvidia preserves org prefix
 from .utilities.nvidia_quota_tracker import NvidiaQuotaTracker
 
 lib_logger = logging.getLogger('rotator_library')
