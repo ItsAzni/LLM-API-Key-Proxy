@@ -24,6 +24,7 @@ import asyncio
 import functools
 import hashlib
 import orjson
+from rotator_library.utils.json_utils import json_deep_copy
 import logging
 import os
 import random
@@ -2425,7 +2426,7 @@ class AntigravityProvider(
         """
         # Deep copy required: _inject_interleaved_thinking_reminder mutates
         # messages[i]["parts"].append(...) which would corrupt caller data
-        messages = orjson.loads(orjson.dumps(messages))
+        messages = json_deep_copy(messages)
         system_instruction = None
         gemini_contents = []
 
@@ -2738,7 +2739,7 @@ class AntigravityProvider(
         if not tools:
             return tools
 
-        modified = orjson.loads(orjson.dumps(tools)) if copy_tools else tools
+        modified = json_deep_copy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 name = func_decl.get("name", "")
@@ -2769,7 +2770,7 @@ class AntigravityProvider(
         if not tools:
             return tools
 
-        modified = orjson.loads(orjson.dumps(tools)) if copy_tools else tools
+        modified = json_deep_copy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 # Support both parametersJsonSchema and parameters keys
@@ -2805,7 +2806,7 @@ class AntigravityProvider(
         # Use provided prompt or default to Gemini 3 prompt
         prompt_template = description_prompt or self._gemini3_description_prompt
 
-        modified = orjson.loads(orjson.dumps(tools)) if copy_tools else tools
+        modified = json_deep_copy(tools) if copy_tools else tools
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
                 # Delegate to mixin's singular _inject_signature_into_description method
@@ -3400,7 +3401,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             "requestType": "agent",  # Required for agent-style requests
             "requestId": _generate_request_id(),
             "model": internal_model,
-            "request": orjson.loads(orjson.dumps(gemini_payload)),
+            "request": json_deep_copy(gemini_payload),
         }
 
         # Add stable session ID based on first user message

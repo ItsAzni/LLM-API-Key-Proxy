@@ -111,6 +111,7 @@ _patch_aiohttp_connector()
 import asyncio
 import fnmatch
 import orjson
+from rotator_library.utils.json_utils import json_deep_copy
 import re
 import codecs
 import time
@@ -1257,7 +1258,7 @@ class RotatingClient:
         nested_keys = ["kwargs", "litellm_params", "model_info", "proxy_server_request"]
 
         # Create a deep copy to avoid modifying the original log object in memory
-        clean_data = orjson.loads(orjson.dumps(log_data))
+        clean_data = json_deep_copy(log_data)
 
         def clean_recursively(data_dict):
             if not isinstance(data_dict, dict):

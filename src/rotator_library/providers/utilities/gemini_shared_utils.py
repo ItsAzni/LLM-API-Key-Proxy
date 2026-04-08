@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-import orjson
+from rotator_library.utils.json_utils import json_deep_copy
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -181,7 +181,7 @@ def inline_schema_refs(schema: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(ref, str) and ref.startswith(prefix):
                     name = ref[len(prefix) :]
                     if name in defs:
-                        return resolve(orjson.loads(orjson.dumps(defs[name])), seen + (ref,))
+                        return resolve(json_deep_copy(defs[name]), seen + (ref,))
             return {k: resolve(v, seen) for k, v in node.items() if k != "$ref"}
         return {k: resolve(v, seen) for k, v in node.items()}
 

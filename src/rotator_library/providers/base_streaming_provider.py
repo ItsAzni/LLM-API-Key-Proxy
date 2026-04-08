@@ -12,6 +12,7 @@ import logging
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 import orjson
+from rotator_library.utils.json_utils import json_deep_copy
 import litellm
 
 lib_logger = logging.getLogger("rotator_library")
@@ -92,7 +93,7 @@ class StreamingResponseMixin:
             cleaned_tool = dict(tool)
 
             if "function" in cleaned_tool:
-                func = orjson.loads(orjson.dumps(cleaned_tool["function"]))
+                func = json_deep_copy(cleaned_tool["function"])
                 cleaned_tool["function"] = func
 
                 # Remove strict mode (not supported by most providers)
