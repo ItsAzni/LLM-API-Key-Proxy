@@ -11,6 +11,8 @@ client.py, usage_manager.py, and provider modules.
 
 from __future__ import annotations
 
+from typing import Optional
+
 
 def extract_provider_from_model(model: str) -> str:
     """
@@ -43,3 +45,27 @@ def normalize_model_string(model: str) -> str:
     if not isinstance(model, str):
         return ""
     return model.strip()
+
+
+def parse_env_credential_path(path: str) -> Optional[str]:
+    """
+    Parse a virtual ``env://`` path and return the credential index.
+
+    Supported formats:
+    - ``env://provider/0`` — legacy single credential
+    - ``env://provider/1`` — first numbered credential
+
+    Args:
+        path: Credential path string.
+
+    Returns:
+        Credential index as string ("0" for legacy, "1", "2", etc.)
+        or None if path is not an ``env://`` path.
+    """
+    if not isinstance(path, str) or not path.startswith("env://"):
+        return None
+
+    parts = path[6:].split("/")
+    if len(parts) >= 2:
+        return parts[1]
+    return "0"

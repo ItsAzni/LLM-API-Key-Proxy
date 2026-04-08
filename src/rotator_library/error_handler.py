@@ -6,6 +6,7 @@ import json
 import os
 import logging
 import random
+import functools
 from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 import httpx
 
@@ -414,6 +415,7 @@ def is_abnormal_error(classified_error: "ClassifiedError") -> bool:
     return classified_error.error_type in ABNORMAL_ERROR_TYPES
 
 
+@functools.lru_cache(maxsize=512)
 def mask_credential(credential: str) -> str:
     """
     Mask a credential for safe display in logs and error messages.

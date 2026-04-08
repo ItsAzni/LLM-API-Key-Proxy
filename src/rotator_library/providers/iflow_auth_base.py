@@ -28,6 +28,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.markup import escape as rich_escape
 from ..utils.headless_detection import is_headless_environment
+from ..utils.model_utils import parse_env_credential_path
 from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
 from ..error_handler import CredentialNeedsReauthError
@@ -205,23 +206,8 @@ class IFlowAuthBase(AuthQueueMixin, BaseTokenManager):
         super().__init__()
 
     def _parse_env_credential_path(self, path: str) -> Optional[str]:
-        """
-        Parse a virtual env:// path and return the credential index.
-
-        Supported formats:
-        - "env://provider/0" - Legacy single credential (no index in env var names)
-        - "env://provider/1" - First numbered credential (IFLOW_1_ACCESS_TOKEN)
-
-        Returns:
-            The credential index as string, or None if path is not an env:// path
-        """
-        if not path.startswith("env://"):
-            return None
-
-        parts = path[6:].split("/")
-        if len(parts) >= 2:
-            return parts[1]
-        return "0"
+        """Parse a virtual env:// path and return the credential index."""
+        return parse_env_credential_path(path)
 
     def _load_from_env(
         self, credential_index: Optional[str] = None

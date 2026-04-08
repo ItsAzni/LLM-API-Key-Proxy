@@ -26,6 +26,7 @@ from rich.markup import escape as rich_escape
 from ..utils.headless_detection import is_headless_environment
 from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
+from ..utils.model_utils import parse_env_credential_path
 from ..error_handler import CredentialNeedsReauthError
 
 lib_logger = logging.getLogger("rotator_library")
@@ -209,26 +210,8 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
         super().__init__()
 
     def _parse_env_credential_path(self, path: str) -> Optional[str]:
-        """
-        Parse a virtual env:// path and return the credential index.
-
-        Supported formats:
-        - "env://provider/0" - Legacy single credential (no index in env var names)
-        - "env://provider/1" - First numbered credential (PROVIDER_1_ACCESS_TOKEN)
-        - "env://provider/2" - Second numbered credential, etc.
-
-        Returns:
-            The credential index as string ("0" for legacy, "1", "2", etc. for numbered)
-            or None if path is not an env:// path
-        """
-        if not path.startswith("env://"):
-            return None
-
-        # Parse: env://provider/index
-        parts = path[6:].split("/")  # Remove "env://" prefix
-        if len(parts) >= 2:
-            return parts[1]  # Return the index
-        return "0"  # Default to legacy format
+        """Parse a virtual env:// path and return the credential index."""
+        return parse_env_credential_path(path)
 
     def _load_from_env(
         self, credential_index: Optional[str] = None
