@@ -181,6 +181,35 @@ def _get_doh_timeout() -> int:
         return 5  # 5 seconds fallback
 
 
+# =============================================================================
+# PERSISTENT DOH HTTP CLIENT
+# =============================================================================
+_doh_client = None  # lazy-initialized httpx.Client when _HAS_HTTPX
+_doh_client_lock = threading.Lock()
+
+
+def _get_doh_client():
+    """Lazy-initialized persistent httpx.Client for DoH queries.
+
+    Reuses TCP+TLS connections across repeated DoH lookups to the same server,
+    avoiding a full handshake on every request.
+    """
+    global _doh_client
+    if _doh_client is None and _HAS_HTTPX:
+        with _doh_client_lock:
+            if _doh_client is None:
+                _doh_client = _httpx.Client(verify=True, timeout=_get_doh_timeout())
+    return _doh_client
+
+
+def close_doh_client() -> None:
+    """Close the persistent DoH httpx.Client (call during shutdown)."""
+    global _doh_client
+    if _doh_client is not None:
+        _doh_client.close()
+        _doh_client = None
+
+
 def _doh_query(host: str, doh_url: str) -> Optional[str]:
     """
     Query DNS over HTTPS (DoH) for A record.
@@ -197,9 +226,11 @@ def _doh_query(host: str, doh_url: str) -> Optional[str]:
         headers = {"Accept": "application/dns-json"}
 
         if _HAS_HTTPX:
-            with _httpx.Client(verify=True, timeout=_get_doh_timeout()) as client:
-                response = client.get(url, headers=headers)
-                data = response.json()
+            client = _get_doh_client()
+            if client is None:
+                return None
+            response = client.get(url, headers=headers)
+            data = response.json()
         else:
             req = urllib.request.Request(url, headers=headers)
             ctx = ssl.create_default_context()

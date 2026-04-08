@@ -7,6 +7,7 @@ across multiple API providers.
 """
 
 import asyncio
+import copy
 import json
 import logging
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
@@ -87,10 +88,13 @@ class StreamingResponseMixin:
         cleaned_tools = []
 
         for tool in tools:
-            cleaned_tool = orjson.loads(orjson.dumps(tool))
+            # Shallow copy top-level dict, then deep-copy only the "function" value
+            # if it needs mutation. Avoids full orjson round-trip serialization.
+            cleaned_tool = dict(tool)
 
             if "function" in cleaned_tool:
-                func = cleaned_tool["function"]
+                func = copy.deepcopy(cleaned_tool["function"])
+                cleaned_tool["function"] = func
 
                 # Remove strict mode (not supported by most providers)
                 func.pop("strict", None)

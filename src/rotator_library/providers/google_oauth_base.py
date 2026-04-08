@@ -551,26 +551,6 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
                     f"Refreshed credentials missing required fields: {missing_fields}"
                 )
 
-            # [VALIDATION] Optional: Test that the refreshed token is actually usable
-            try:
-                pool = await get_http_pool()
-                client = await pool.get_client_async()
-                test_response = await client.get(
-                    self.USER_INFO_URI,
-                    headers={"Authorization": f"Bearer {creds['access_token']}"},
-                    timeout=5.0,
-                )
-                test_response.raise_for_status()
-                lib_logger.debug(
-                    f"Token validation successful for '{Path(path).name}'"
-                )
-            except Exception as e:
-                lib_logger.warning(
-                    f"Refreshed token validation failed for '{Path(path).name}': {e}"
-                )
-                # Don't fail the refresh - the token might still work for other endpoints
-                # But log it for debugging purposes
-
             await self._save_credentials(path, creds)
             lib_logger.debug(
                 f"Successfully refreshed {self.ENV_PREFIX} OAuth token for '{Path(path).name}'."

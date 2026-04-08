@@ -1726,7 +1726,7 @@ class AntigravityProvider(
         parts = msg.get("parts", [])
         return any(isinstance(p, dict) and "functionCall" in p for p in parts)
 
-    def _sanitize_thinking_for_claude(
+    async def _sanitize_thinking_for_claude(
         self, messages: List[Dict[str, Any]], thinking_enabled: bool
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """
@@ -1767,7 +1767,7 @@ class AntigravityProvider(
         # Thinking is enabled
         # Always try to recover thinking for ALL model messages in current turn
         if state["turn_start_idx"] >= 0:
-            recovered = self._recover_all_turn_thinking(
+            recovered = await self._recover_all_turn_thinking(
                 messages, state["turn_start_idx"]
             )
             if recovered > 0:
@@ -2043,7 +2043,7 @@ class AntigravityProvider(
 
         return False
 
-    def _try_recover_thinking_from_cache(
+    async def _try_recover_thinking_from_cache(
         self, messages: List[Dict[str, Any]], turn_start_idx: int
     ) -> bool:
         """
@@ -2087,7 +2087,7 @@ class AntigravityProvider(
         if not cache_key:
             return False
 
-        cached_json = self._thinking_cache.retrieve(cache_key)
+        cached_json = await self._thinking_cache.retrieve_async(cache_key)
         if not cached_json:
             lib_logger.debug(
                 f"[Thinking Sanitization] No cached thinking found for key: {cache_key}"
@@ -2125,7 +2125,7 @@ class AntigravityProvider(
             )
             return False
 
-    def _recover_all_turn_thinking(
+    async def _recover_all_turn_thinking(
         self, messages: List[Dict[str, Any]], turn_start_idx: int
     ) -> int:
         """
@@ -2189,7 +2189,7 @@ class AntigravityProvider(
             if not cache_key:
                 continue
 
-            cached_json = self._thinking_cache.retrieve(cache_key)
+            cached_json = await self._thinking_cache.retrieve_async(cache_key)
             if not cached_json:
                 continue
 
@@ -2410,7 +2410,7 @@ class AntigravityProvider(
     # MESSAGE TRANSFORMATION (OpenAI → Gemini)
     # =========================================================================
 
-    def _transform_messages(
+    async def _transform_messages(
         self, messages: List[Dict[str, Any]], model: str
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
         """
@@ -2423,9 +2423,9 @@ class AntigravityProvider(
         - Claude thinking injection from cache
         - Gemini 3 thoughtSignature preservation
         """
-        # Only the outer list is mutated (pop(0) for system messages);
-        # individual message dicts are read-only, so shallow copy suffices
-        messages = list(messages)
+        # Deep copy required: _inject_interleaved_thinking_reminder mutates
+        # messages[i]["parts"].append(...) which would corrupt caller data
+        messages = orjson.loads(orjson.dumps(messages))
         system_instruction = None
         gemini_contents = []
 
@@ -2469,7 +2469,7 @@ class AntigravityProvider(
             if role == "user":
                 parts = self._transform_user_message(content)
             elif role == "assistant":
-                parts = self._transform_assistant_message(msg, model, tool_id_to_name)
+                parts = await self._transform_assistant_message(msg, model, tool_id_to_name)
             elif role == "tool":
                 tool_parts = self._transform_tool_message(msg, model, tool_id_to_name)
                 # Accumulate tool responses instead of adding individually
@@ -2526,7 +2526,7 @@ class AntigravityProvider(
         """Transform user message content to Gemini parts."""
         return self._parse_content_parts(content)
 
-    def _transform_assistant_message(
+    async def _transform_assistant_message(
         self, msg: Dict[str, Any], model: str, _tool_id_to_name: Dict[str, str]
     ) -> List[Dict[str, Any]]:
         """Transform assistant message including tool calls and thinking injection."""
@@ -2548,7 +2548,7 @@ class AntigravityProvider(
             )
             cached_sig = None
             if cache_key:
-                cached_json = self._thinking_cache.retrieve(cache_key)
+                cached_json = await self._thinking_cache.retrieve_async(cache_key)
                 if cached_json:
                     try:
                         cached_data = orjson.loads(cached_json)
@@ -2575,7 +2575,7 @@ class AntigravityProvider(
             and not reasoning_content
         ):
             # Fallback: Try to inject cached thinking for Claude (original behavior)
-            thinking_parts = self._get_cached_thinking(content, tool_calls)
+            thinking_parts = await self._get_cached_thinking(content, tool_calls)
             parts.extend(thinking_parts)
 
         # Add regular content
@@ -2618,7 +2618,7 @@ class AntigravityProvider(
             if self._is_gemini_3(model):
                 sig = tc.get("thought_signature")
                 if not sig and tool_id and self._enable_signature_cache:
-                    sig = self._signature_cache.retrieve(tool_id)
+                    sig = await self._signature_cache.retrieve_async(tool_id)
 
                 if sig:
                     func_part["thoughtSignature"] = sig
@@ -2646,7 +2646,7 @@ class AntigravityProvider(
 
         return parts
 
-    def _get_cached_thinking(
+    async def _get_cached_thinking(
         self, content: Any, tool_calls: List[Dict]
     ) -> List[Dict[str, Any]]:
         """Retrieve and format cached thinking content for Claude."""
@@ -2657,7 +2657,7 @@ class AntigravityProvider(
         if not cache_key:
             return parts
 
-        cached_json = self._thinking_cache.retrieve(cache_key)
+        cached_json = await self._thinking_cache.retrieve_async(cache_key)
         if not cached_json:
             return parts
 
@@ -3973,7 +3973,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         # Transform messages to Gemini format FIRST
         # This restores thinking from cache if reasoning_content was stripped by client
-        system_instruction, gemini_contents = self._transform_messages(messages, model)
+        system_instruction, gemini_contents = await self._transform_messages(messages, model)
         gemini_contents = self._fix_tool_response_grouping(gemini_contents)
 
         # Sanitize thinking blocks for Claude AFTER transformation
@@ -3982,7 +3982,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         force_disable_thinking = False
         if self._is_claude(model) and self._enable_thinking_sanitization:
             gemini_contents, force_disable_thinking = (
-                self._sanitize_thinking_for_claude(gemini_contents, thinking_enabled)
+                await self._sanitize_thinking_for_claude(gemini_contents, thinking_enabled)
             )
 
             # If we're in a mid-turn thinking toggle situation, we MUST disable thinking
@@ -4787,7 +4787,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                 credential_path, token, litellm_params or {}
             )
 
-            system_instruction, contents = self._transform_messages(
+            system_instruction, contents = await self._transform_messages(
                 messages, internal_model
             )
             contents = self._fix_tool_response_grouping(contents)

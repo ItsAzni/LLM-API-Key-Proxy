@@ -778,10 +778,8 @@ class RotatingClient:
         self, attempt: int, deadline: float, classified_error: "ClassifiedError"
     ) -> bool:
         """Sleep using shared retry policy when remaining budget allows it."""
-        base_wait = classified_error.retry_after or (2**attempt)
+        base_wait = classified_error.retry_after or (2**attempt * random.uniform(0.5, 1.5))
         wait_time = base_wait
-        if classified_error.retry_after is None:
-            wait_time += random.uniform(0, base_wait * 0.1)
 
         remaining_budget = deadline - time.time()
         if wait_time > remaining_budget:
@@ -1649,7 +1647,8 @@ class RotatingClient:
 
         try:
             while True:
-                if request and await request.is_disconnected():
+                # Check disconnection every 20 chunks to avoid per-chunk syscall overhead
+                if chunk_index % 20 == 0 and request and await request.is_disconnected():
                     lib_logger.info(
                         f"Client disconnected. Aborting stream for credential {mask_credential(key)}."
                     )
@@ -2663,9 +2662,8 @@ class RotatingClient:
                                 break  # Move to the next key
 
                             # For temporary errors, wait before retrying with the same key.
-                            base_wait = classified_error.retry_after or (2**attempt)
-                            jitter = random.uniform(0, base_wait * 0.1)
-                            wait_time = base_wait + jitter
+                            base_wait = classified_error.retry_after or (2**attempt * random.uniform(0.5, 1.5))
+                            wait_time = base_wait
                             remaining_budget = deadline - time.time()
 
                             # If the required wait time exceeds the budget, don't wait; rotate to the next key immediately.
@@ -2741,9 +2739,8 @@ class RotatingClient:
                                 should_retry_same_key(classified_error)
                                 and attempt < self.max_retries - 1
                             ):
-                                base_wait = classified_error.retry_after or (2**attempt)
-                                jitter = random.uniform(0, base_wait * 0.1)
-                                wait_time = base_wait + jitter
+                                base_wait = classified_error.retry_after or (2**attempt * random.uniform(0.5, 1.5))
+                                wait_time = base_wait
                                 remaining_budget = deadline - time.time()
                                 if wait_time <= remaining_budget:
                                     lib_logger.warning(
@@ -3149,9 +3146,8 @@ class RotatingClient:
                                 ) and "client has been closed" in str(e):
                                     self._reset_litellm_client_cache()
 
-                                base_wait = classified_error.retry_after or (2**attempt)
-                                jitter = random.uniform(0, base_wait * 0.1)
-                                wait_time = base_wait + jitter
+                                base_wait = classified_error.retry_after or (2**attempt * random.uniform(0.5, 1.5))
+                                wait_time = base_wait
                                 remaining_budget = deadline - time.time()
                                 if wait_time > remaining_budget:
                                     error_accumulator.record_error(
@@ -3390,10 +3386,10 @@ class RotatingClient:
                                 )
 
                                 # Add exponential backoff delay before retry
-                                wait_time = 2**attempt
+                                wait_time = 2**attempt * random.uniform(0.5, 1.5)
                                 lib_logger.warning(
                                     f"Rate limit ({classified_error.error_type}) during litellm stream. "
-                                    f"Waiting {wait_time}s before retry."
+                                    f"Waiting {wait_time:.2f}s before retry."
                                 )
                                 await asyncio.sleep(wait_time)
 

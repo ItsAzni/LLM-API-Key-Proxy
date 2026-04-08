@@ -177,6 +177,7 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library import RotatingClient
     from rotator_library.credential_manager import CredentialManager
     from rotator_library.background_refresher import BackgroundRefresher
+    from rotator_library.dns_fix import close_doh_client
     from rotator_library.model_info_service import init_model_info_service
     from proxy_app.request_logger import log_request_to_console
     from proxy_app.batch_manager import EmbeddingBatcher
@@ -698,6 +699,7 @@ async def lifespan(app: FastAPI):
     yield
 
     await client.background_refresher.stop()  # Stop the background task on shutdown
+    close_doh_client()  # Close persistent DoH httpx.Client
     if app.state.embedding_batcher:
         await app.state.embedding_batcher.stop()
     await client.close()
@@ -888,7 +890,7 @@ async def streaming_response_wrapper(
                         if "usage" in chunk_data and chunk_data["usage"]:
                             usage_data = chunk_data["usage"]
 
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, orjson.JSONDecodeError):
                         pass
     except Exception as e:
         logging.error(f"An error occurred during the response stream: {e}")
@@ -1032,8 +1034,8 @@ async def chat_completions(
     try:
         # Read and parse the request body only once at the beginning.
         try:
-            request_data = await request.json()
-        except json.JSONDecodeError:
+            request_data = orjson.loads(await request.body())
+        except orjson.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON in request body.")
 
         # Global temperature=0 override (controlled by .env variable, default: OFF)
@@ -1595,7 +1597,7 @@ async def token_count(
     Calculates the token count for a given list of messages and a model.
     """
     try:
-        data = await request.json()
+        data = orjson.loads(await request.body())
         model = data.get("model")
         messages = data.get("messages")
 
@@ -1639,7 +1641,7 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
         }
     """
     try:
-        data = await request.json()
+        data = orjson.loads(await request.body())
         model = data.get("model")
         prompt_tokens = data.get("prompt_tokens", 0)
         completion_tokens = data.get("completion_tokens", 0)
