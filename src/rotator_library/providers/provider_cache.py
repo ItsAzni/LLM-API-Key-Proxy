@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -83,8 +84,8 @@ class ProviderCache:
         env_prefix: str = "PROVIDER_CACHE",
         max_entries: int = 10000,
     ):
-        # In-memory cache: {cache_key: {"value": str, "timestamp": float, "accessed": float}}
-        self._cache: Dict[str, Dict[str, float | str]] = {}
+        # In-memory cache (OrderedDict for O(1) LRU eviction): {cache_key: {"value", "timestamp", "accessed"}}
+        self._cache: OrderedDict[str, Dict[str, float | str]] = OrderedDict()
         self._memory_ttl = memory_ttl_seconds
         self._disk_ttl = disk_ttl_seconds
         self._rw_lock = ReadWriteLock()
@@ -186,6 +187,7 @@ class ProviderCache:
                                 "timestamp": entry["timestamp"],
                                 "accessed": now,
                             }
+                            self._cache.move_to_end(cache_key)  # Maintain LRU order
                             loaded += 1
                     else:
                         expired += 1
@@ -333,10 +335,10 @@ class ProviderCache:
         """
         async with self._rw_lock.write():
             now = time.time()
-            # Enforce LRU bound before TTL cleanup
+            # Enforce LRU bound before TTL cleanup (O(1) via OrderedDict)
             while len(self._cache) >= self._max_entries:
-                oldest_key = min(self._cache, key=lambda k: self._cache[k]["accessed"])
-                del self._cache[oldest_key]
+                # popitem(last=False) removes the least-recently-used entry
+                self._cache.popitem(last=False)
                 self._evicted_count += 1
 
             expired = [
@@ -372,6 +374,7 @@ class ProviderCache:
         now = time.time()
         async with self._rw_lock.write():
             self._cache[key] = {"value": value, "timestamp": now, "accessed": now}
+            self._cache.move_to_end(key)  # Mark as most-recently-used
             self._dirty = True
 
     async def store_async(self, key: str, value: str) -> None:
@@ -402,6 +405,7 @@ class ProviderCache:
             if time.time() - entry["timestamp"] <= self._memory_ttl:
                 self._stats["memory_hits"] += 1
                 entry["accessed"] = time.time()
+                self._cache.move_to_end(key)  # Mark as most-recently-used
                 return entry["value"]
             else:
                 # Entry expired from memory - remove from memory only
@@ -461,6 +465,7 @@ class ProviderCache:
                             async with self._rw_lock.write():
                                 now = time.time()
                                 self._cache[key] = {"value": value, "timestamp": ts, "accessed": now}
+                                self._cache.move_to_end(key)  # Maintain LRU order
                                 self._stats["disk_hits"] += 1
                                 lib_logger.debug(
                                     f"ProviderCache[{self._cache_name}]: Loaded {key} from disk"
@@ -491,6 +496,7 @@ class ProviderCache:
                             async with self._rw_lock.write():
                                 now = time.time()
                                 self._cache[key] = {"value": value, "timestamp": ts, "accessed": now}
+                                self._cache.move_to_end(key)  # Maintain LRU order
                                 self._stats["disk_hits"] += 1
                                 return value
 
