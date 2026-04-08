@@ -245,8 +245,31 @@ class BaseQuotaTracker:
 
         self._learned_costs_loaded = True
 
+    def _write_costs_file(self, costs_file: Path, payload: Dict) -> None:
+        """Sync helper to write costs file (called via run_in_executor)."""
+        with open(costs_file, "w") as f:
+            json.dump(payload, f, indent=2)
+
+    async def _save_learned_costs_async(self) -> None:
+        """Save learned quota costs to cache file (non-blocking)."""
+        if not hasattr(self, "_learned_costs") or not self._learned_costs:
+            return
+
+        costs_file = self._get_learned_costs_file()
+        try:
+            costs_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "costs": self._learned_costs,
+            }
+            await asyncio.to_thread(self._write_costs_file, costs_file, payload)
+            lib_logger.debug(f"Saved learned quota costs to {costs_file}")
+        except Exception as e:
+            lib_logger.warning(f"Failed to save learned quota costs: {e}")
+
     def _save_learned_costs(self) -> None:
-        """Save learned quota costs to cache file."""
+        """Save learned quota costs to cache file (sync, for backward compat)."""
         if not hasattr(self, "_learned_costs") or not self._learned_costs:
             return
 

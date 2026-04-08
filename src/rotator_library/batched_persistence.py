@@ -160,7 +160,7 @@ class BatchedPersistence:
             pass
 
     async def _write_to_disk(self) -> bool:
-        """Write current state to disk."""
+        """Write current state to disk (non-blocking)."""
         if not self._config.enable_disk or self._state is None:
             return True
 
@@ -169,14 +169,15 @@ class BatchedPersistence:
                 # Ensure directory exists
                 self._file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Serialize and write (single serialization path via safe_write_json)
+                # Serialize and write off the event loop to avoid blocking
                 data = self._state if isinstance(self._state, dict) else {"data": self._state}
-                success = safe_write_json(
+                success = await asyncio.to_thread(
+                    safe_write_json,
                     self._file_path,
                     data,
                     lib_logger,
-                    atomic=True,
-                    indent=2,
+                    True,   # atomic
+                    2,     # indent
                 )
 
                 if success:
