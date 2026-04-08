@@ -21,6 +21,7 @@ from .utils.resilient_io import ResilientStateWriter
 from .utils.provider_locks import ProviderLockManager
 from .batched_persistence import UsagePersistenceManager
 from .utils.paths import get_data_file
+from .utils.model_utils import extract_provider_from_model, normalize_model_string
 from .config import (
     DEFAULT_FAIR_CYCLE_DURATION,
     DEFAULT_EXHAUSTION_COOLDOWN_THRESHOLD,
@@ -1173,14 +1174,7 @@ class UsageManager:
 
     def _extract_provider_from_model(self, model: str) -> str:
         """Extract provider name from provider/model string safely."""
-        if not isinstance(model, str):
-            return ""
-
-        normalized_model = model.strip()
-        if not normalized_model or "/" not in normalized_model:
-            return ""
-
-        return normalized_model.split("/", 1)[0].strip().lower()
+        return extract_provider_from_model(model)
 
     # Providers where request_count should be used for credential selection
     # instead of success_count (because failed requests also consume quota)
