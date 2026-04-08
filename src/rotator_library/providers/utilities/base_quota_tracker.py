@@ -77,6 +77,7 @@ class BaseQuotaTracker:
         self._quota_refresh_interval: int = 300  # 5 min default
         self._learned_costs: Dict[str, Dict[str, float]] = {}
         self._learned_costs_loaded: bool = False
+        self._learned_costs_lock: asyncio.Lock = asyncio.Lock()
     """
 
     # =========================================================================
@@ -186,9 +187,34 @@ class BaseQuotaTracker:
     # LEARNED COSTS MANAGEMENT
     # =========================================================================
 
+    async def _load_learned_costs_async(self) -> None:
+        """Load learned quota costs from cache file (async, race-safe)."""
+        async with self._learned_costs_lock:
+            if self._learned_costs_loaded:
+                return
+            costs_file = self._get_learned_costs_file()
+            if costs_file.exists():
+                try:
+                    loop = asyncio.get_event_loop()
+                    data = await loop.run_in_executor(None, self._read_costs_file, costs_file)
+                    if data:
+                        self._learned_costs = data.get("costs", {})
+                        lib_logger.debug(
+                            f"Loaded {sum(len(v) for v in self._learned_costs.values())} "
+                            f"learned cost entries from {costs_file}"
+                        )
+                except Exception as e:
+                    lib_logger.warning(f"Failed to load learned costs: {e}")
+            self._learned_costs_loaded = True
+
+    def _read_costs_file(self, costs_file: Path) -> Optional[Dict]:
+        """Sync helper to read costs file (called via run_in_executor)."""
+        with open(costs_file, "r") as f:
+            return json.load(f)
+
     def _load_learned_costs(self) -> None:
         """
-        Load learned quota costs from cache file.
+        Load learned quota costs from cache file (sync, for backward compat).
 
         Learned costs override the default estimates when available.
         They are populated through manual cost discovery or observation.

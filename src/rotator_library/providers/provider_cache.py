@@ -127,6 +127,8 @@ class ProviderCache:
         # Metadata about this cache instance
         self._cache_name = cache_file.stem if cache_file else "unnamed"
 
+        self._initialized = not self._enable_disk  # Memory-only caches are ready immediately
+
         if self._enable_disk:
             lib_logger.debug(
                 f"ProviderCache[{self._cache_name}]: Disk enabled "
@@ -145,10 +147,12 @@ class ProviderCache:
         try:
             await self._load_from_disk()
             await self._start_background_tasks()
+            self._initialized = True
         except Exception as e:
             lib_logger.error(
                 f"ProviderCache[{self._cache_name}] async init failed: {e}"
             )
+            self._initialized = True  # Allow operation even if init failed
 
     async def _load_from_disk(self) -> None:
         """Load cache from disk file with TTL validation."""
@@ -388,6 +392,11 @@ class ProviderCache:
         Returns:
             Cached value if found and not expired, None otherwise
         """
+        if not self._initialized:
+            lib_logger.warning(
+                f"ProviderCache[{self._cache_name}]: retrieve('{key}') called "
+                "before async init completed — disk data not yet loaded"
+            )
         if key in self._cache:
             entry = self._cache[key]
             if time.time() - entry["timestamp"] <= self._memory_ttl:

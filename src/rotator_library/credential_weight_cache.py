@@ -12,6 +12,7 @@ when usage changes.
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
@@ -331,11 +332,14 @@ class CredentialWeightCache:
 
 # Singleton instance
 _CACHE_INSTANCE: Optional[CredentialWeightCache] = None
+_CACHE_LOCK = threading.Lock()
 
 
 def get_weight_cache() -> CredentialWeightCache:
-    """Get the global weight cache singleton."""
+    """Get the global weight cache singleton (thread-safe)."""
     global _CACHE_INSTANCE
     if _CACHE_INSTANCE is None:
-        _CACHE_INSTANCE = CredentialWeightCache()
+        with _CACHE_LOCK:
+            if _CACHE_INSTANCE is None:
+                _CACHE_INSTANCE = CredentialWeightCache()
     return _CACHE_INSTANCE

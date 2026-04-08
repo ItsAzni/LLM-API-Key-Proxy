@@ -578,7 +578,7 @@ class HttpClientPool:
             timeout=timeout,
             limits=self._create_limits(),
             follow_redirects=True,
-            verify=self._ssl_verify, # SSL verification configuration
+            verify=self._ssl_context, # Reuse pre-built SSL context singleton
         )
 
     async def close(self) -> None:
