@@ -18,10 +18,11 @@ import logging
 import os
 import ssl
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 import httpx
 
 from .config.defaults import HTTP_COMPRESS_MIN_SIZE, HTTP_COMPRESS_REQUESTS
+from .utils.singleton import SingletonMeta
 
 # Disable aiodns before any aiohttp import to fix DNS resolution issues
 # This must be set before aiohttp is imported anywhere in the process
@@ -179,7 +180,7 @@ def should_skip_ssl_for_host(host: str, ssl_verify: Union[bool, List[str]]) -> b
 
 
 
-class HttpClientPool:
+class HttpClientPool(metaclass=SingletonMeta):
     """
     Manages a pool of HTTP clients optimized for LLM API workloads.
 
@@ -729,11 +730,7 @@ class HttpClientPool:
         )
 
 
-# Singleton instance for application-wide use
-_POOL_INSTANCE: Optional[HttpClientPool] = None
-_POOL_LOCK = asyncio.Lock()
-
-
+# Singleton via SingletonMeta
 async def get_http_pool() -> HttpClientPool:
     """
     Get the global HTTP client pool singleton.
@@ -741,20 +738,12 @@ async def get_http_pool() -> HttpClientPool:
     Creates the pool if it doesn't exist. Note: You should still call
     pool.initialize() to pre-warm connections.
     """
-    global _POOL_INSTANCE
-
-    if _POOL_INSTANCE is None:
-        async with _POOL_LOCK:
-            if _POOL_INSTANCE is None:
-                _POOL_INSTANCE = HttpClientPool()
-
-    return _POOL_INSTANCE
+    return HttpClientPool()
 
 
 async def close_http_pool() -> None:
-    """Close the global HTTP client pool."""
-    global _POOL_INSTANCE
-
-    if _POOL_INSTANCE is not None:
-        await _POOL_INSTANCE.close()
-        _POOL_INSTANCE = None
+    """Close the global HTTP client pool and reset the singleton."""
+    pool = HttpClientPool.get_instance()
+    if pool is not None:
+        await pool.close()
+        HttpClientPool.reset()

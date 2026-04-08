@@ -27,6 +27,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
+from .singleton import SingletonMeta
+
 # =============================================================================
 # CONFIGURATION DEFAULTS
 # =============================================================================
@@ -41,7 +43,7 @@ DEFAULT_BUFFERED_WRITE_RETRY_INTERVAL: float = 30.0
 # =============================================================================
 
 
-class BufferedWriteRegistry:
+class BufferedWriteRegistry(metaclass=SingletonMeta):
     """
     Global singleton registry for buffered writes with periodic retry and shutdown flush.
 
@@ -66,8 +68,7 @@ class BufferedWriteRegistry:
         results = registry.flush_all()
     """
 
-    _instance: Optional["BufferedWriteRegistry"] = None
-    _instance_lock = threading.Lock()
+
 
     def __init__(self, retry_interval: float = DEFAULT_BUFFERED_WRITE_RETRY_INTERVAL):
         """
@@ -94,20 +95,8 @@ class BufferedWriteRegistry:
     def get_instance(
         cls, retry_interval: float = DEFAULT_BUFFERED_WRITE_RETRY_INTERVAL
     ) -> "BufferedWriteRegistry":
-        """
-        Get or create the singleton instance.
-
-        Args:
-            retry_interval: Seconds between retry attempts (only used on first call)
-
-        Returns:
-            The singleton BufferedWriteRegistry instance
-        """
-        if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = cls(retry_interval)
-        return cls._instance
+        """Get or create the singleton instance (delegates to SingletonMeta)."""
+        return cls()
 
     def _start_retry_thread(self) -> None:
         """Start the background retry thread."""

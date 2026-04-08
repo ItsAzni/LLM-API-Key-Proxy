@@ -21,6 +21,8 @@ import time
 from typing import Callable, Optional, Dict, Any, Awaitable
 from pathlib import Path
 
+from .singleton import SingletonMeta
+
 lib_logger = logging.getLogger("rotator_library")
 
 # =============================================================================
@@ -36,7 +38,7 @@ DEFAULT_REAUTH_TIMEOUT: float = 300.0  # 5 minutes
 REAUTH_QUEUE_LOG_THRESHOLD: float = 1.0
 
 
-class ReauthCoordinator:
+class ReauthCoordinator(metaclass=SingletonMeta):
     """
     Singleton coordinator for global re-authentication serialization.
 
@@ -47,21 +49,11 @@ class ReauthCoordinator:
     1. Different providers may use the same callback ports
     2. User can only complete one OAuth flow at a time
     3. Prevents race conditions in credential state management
+
+    Singleton via SingletonMeta — thread-safe with reset() support.
     """
 
-    _instance: Optional["ReauthCoordinator"] = None
-    _initialized: bool = False  # Class-level declaration for Pylint
-
-    def __new__(cls):
-        # Singleton pattern - only one coordinator exists
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
-        if self._initialized:
-            return
 
         # Global semaphore - only 1 re-auth at a time
         self._reauth_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
@@ -81,7 +73,6 @@ class ReauthCoordinator:
         self._failed_reauths: int = 0
         self._timeout_reauths: int = 0
 
-        self._initialized = True
         lib_logger.info("Global ReauthCoordinator initialized")
 
     def _get_display_name(self, credential_path: str) -> str:

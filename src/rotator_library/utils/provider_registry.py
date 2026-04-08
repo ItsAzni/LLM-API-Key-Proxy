@@ -19,16 +19,20 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
+from .singleton import SingletonMeta
+
 lib_logger = logging.getLogger("rotator_library")
 
 
-class ProviderRegistry:
+class ProviderRegistry(metaclass=SingletonMeta):
     """
     Global registry of instantiated provider objects.
 
     Providers are lazily created on first access and then cached.
     The registry is process-wide (singleton) so that ``client.py``
     and ``usage_manager.py`` share the same instances.
+
+    Singleton via SingletonMeta — thread-safe with reset() support.
 
     Usage::
 
@@ -114,19 +118,7 @@ class ProviderRegistry:
         return list(self._instances.items())
 
 
-# ---------------------------------------------------------------------------
-# Singleton accessor (thread-safe, double-checked locking)
-# ---------------------------------------------------------------------------
-
-_REGISTRY_INSTANCE: Optional[ProviderRegistry] = None
-_REGISTRY_LOCK = threading.Lock()
-
-
+# Compatibility wrapper for existing callers
 def get_provider_registry() -> ProviderRegistry:
-    """Return the global ``ProviderRegistry`` singleton (thread-safe)."""
-    global _REGISTRY_INSTANCE
-    if _REGISTRY_INSTANCE is None:
-        with _REGISTRY_LOCK:
-            if _REGISTRY_INSTANCE is None:
-                _REGISTRY_INSTANCE = ProviderRegistry()
-    return _REGISTRY_INSTANCE
+    """Return the global ``ProviderRegistry`` singleton (thread-safe via SingletonMeta)."""
+    return ProviderRegistry()

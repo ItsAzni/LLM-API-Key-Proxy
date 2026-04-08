@@ -7,10 +7,12 @@ import logging
 import functools
 from typing import Dict, Any, Optional
 
+from .utils.singleton import SingletonMeta
+
 lib_logger = logging.getLogger("rotator_library")
 
 
-class ModelDefinitions:
+class ModelDefinitions(metaclass=SingletonMeta):
     """
     Simple model definitions loader from environment variables.
 
@@ -26,22 +28,10 @@ class ModelDefinitions:
     - IFLOW_MODELS='{"custom-name": {"id": "actual-id"}}' - dict format with custom ID
     - IFLOW_MODELS='{"model": {"id": "id", "options": {"temperature": 0.7}}}' - with options
 
-    This class is a singleton - instantiated once and shared across all providers.
+    Singleton via SingletonMeta — thread-safe with reset() support.
     """
 
-    _instance: Optional["ModelDefinitions"] = None
-    _initialized: bool = False
-
-    def __new__(cls, config_path: Optional[str] = None):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, config_path: Optional[str] = None):
-        """Initialize model definitions loader (only runs once due to singleton)."""
-        if ModelDefinitions._initialized:
-            return
-        ModelDefinitions._initialized = True
         self.config_path = config_path
         self.definitions = {}
         self._load_definitions()

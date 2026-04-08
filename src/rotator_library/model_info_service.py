@@ -17,8 +17,10 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.request import Request, urlopen
 from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+from .utils.singleton import SingletonMeta
 
 logger = logging.getLogger(__name__)
 
@@ -897,7 +899,7 @@ class DataMerger:
 # ============================================================================
 
 
-class ModelRegistry:
+class ModelRegistry(metaclass=SingletonMeta):
     """
     Central registry for model metadata from external catalogs.
 
@@ -1285,16 +1287,10 @@ class ModelRegistry:
 # The old alias (ModelInfo = ModelMetadata) has been removed
 ModelInfoService = ModelRegistry
 
-# Global singleton
-_registry_instance: Optional[ModelRegistry] = None
-
-
+# Compat wrapper — SingletonMeta handles singleton lifecycle
 def get_model_info_service() -> ModelRegistry:
-    """Get or create the global registry instance."""
-    global _registry_instance
-    if _registry_instance is None:
-        _registry_instance = ModelRegistry()
-    return _registry_instance
+    """Get or create the global registry instance (delegates to SingletonMeta)."""
+    return ModelRegistry()
 
 
 async def init_model_info_service() -> ModelRegistry:
