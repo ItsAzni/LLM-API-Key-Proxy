@@ -24,7 +24,7 @@ currently being executed, incremented on start and decremented on completion.
 import asyncio
 import time
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import logging
 
@@ -183,6 +183,15 @@ class ProviderCircuitBreaker:
         Returns:
         True if request can be attempted, False otherwise
         """
+        # Fast-path: CLOSED (or unseen) providers skip lock acquisition entirely.
+        # dict.get() is atomic for reads in CPython, so this check is safe
+        # without synchronization. A benign race exists: state may change
+        # after this check, but that also applies under lock since can_attempt()
+        # permission is point-in-time, not a reservation.
+        circuit = self._circuits.get(provider)
+        if circuit is None or circuit.state == CircuitState.CLOSED:
+            return True
+
         lock = await self._get_provider_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
@@ -411,21 +420,18 @@ class ProviderCircuitBreaker:
             return circuit.state
 
     async def get_all_states(self) -> Dict[str, CircuitState]:
-        """
-        Get the current state of all provider circuits.
-
-        Returns:
-        Dictionary mapping provider names to their CircuitState
-        """
+        """Get the current state of all provider circuits concurrently."""
         providers = list(self._circuits.keys())
 
-        result = {}
-        for provider in providers:
+        async def _read_state(provider: str) -> Tuple[str, Optional[CircuitState]]:
             lock = await self._get_provider_lock(provider)
             async with lock:
                 if provider in self._circuits:
-                    result[provider] = self._circuits[provider].state
-        return result
+                    return provider, self._circuits[provider].state
+            return provider, None
+
+        results = await asyncio.gather(*[_read_state(p) for p in providers])
+        return {p: s for p, s in results if s is not None}
 
     async def reset_provider(self, provider: str) -> None:
         """

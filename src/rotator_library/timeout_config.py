@@ -15,6 +15,8 @@ All values can be overridden via environment variables:
 
 import os
 import logging
+from typing import Optional
+
 import httpx
 
 lib_logger = logging.getLogger("rotator_library")
@@ -33,6 +35,10 @@ class TimeoutConfig:
     _POOL = 15.0  # Reduced from 60s for faster failure detection
     _READ_STREAMING = 300.0  # 5 minutes between chunks
     _READ_NON_STREAMING = 600.0  # 10 minutes for full response
+
+    # Cached httpx.Timeout instances
+    _STREAMING_TIMEOUT: Optional[httpx.Timeout] = None
+    _DEFAULT_TIMEOUT: Optional[httpx.Timeout] = None
 
     @classmethod
     def _get_env_float(cls, key: str, default: float) -> float:
@@ -73,6 +79,35 @@ class TimeoutConfig:
         return cls._get_env_float("TIMEOUT_READ_NON_STREAMING", cls._READ_NON_STREAMING)
 
     @classmethod
+    def create_timeout(cls, is_streaming: bool = False) -> httpx.Timeout:
+        """
+        Return a cached httpx.Timeout instance based on streaming mode.
+
+        Uses lazy initialization: the Timeout object is created once from
+        current env vars and reused on subsequent calls. Changing TIMEOUT_*
+        env vars at runtime has no effect until process restart — this is
+        intentional, as timeouts are deployment-time configuration.
+        """
+        if is_streaming:
+            if cls._STREAMING_TIMEOUT is None:
+                cls._STREAMING_TIMEOUT = httpx.Timeout(
+                    connect=cls.connect(),
+                    read=cls.read_streaming(),
+                    write=cls.write(),
+                    pool=cls.pool(),
+                )
+            return cls._STREAMING_TIMEOUT
+        else:
+            if cls._DEFAULT_TIMEOUT is None:
+                cls._DEFAULT_TIMEOUT = httpx.Timeout(
+                    connect=cls.connect(),
+                    read=cls.read_non_streaming(),
+                    write=cls.write(),
+                    pool=cls.pool(),
+                )
+            return cls._DEFAULT_TIMEOUT
+
+    @classmethod
     def streaming(cls) -> httpx.Timeout:
         """
         Timeout configuration for streaming LLM requests.
@@ -81,12 +116,7 @@ class TimeoutConfig:
         periodic chunks. If no data arrives for this duration, the
         connection is considered stalled.
         """
-        return httpx.Timeout(
-            connect=cls.connect(),
-            read=cls.read_streaming(),
-            write=cls.write(),
-            pool=cls.pool(),
-        )
+        return cls.create_timeout(is_streaming=True)
 
     @classmethod
     def non_streaming(cls) -> httpx.Timeout:
@@ -97,9 +127,4 @@ class TimeoutConfig:
         may take significant time to generate the complete response
         before sending anything back.
         """
-        return httpx.Timeout(
-            connect=cls.connect(),
-            read=cls.read_non_streaming(),
-            write=cls.write(),
-            pool=cls.pool(),
-        )
+        return cls.create_timeout(is_streaming=False)

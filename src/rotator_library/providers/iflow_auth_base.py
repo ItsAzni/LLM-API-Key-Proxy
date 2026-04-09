@@ -28,7 +28,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.markup import escape as rich_escape
 from ..utils.headless_detection import is_headless_environment
-from ..utils.model_utils import parse_env_credential_path
 from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
 from ..error_handler import CredentialNeedsReauthError
@@ -192,22 +191,24 @@ class OAuthCallbackServer:
             raise TimeoutError("Timeout waiting for OAuth callback")
 
 
-from .base_token_manager import BaseTokenManager
-from .auth_queue_mixin import AuthQueueMixin
+from .google_oauth_base import GoogleOAuthBase
 
 
-class IFlowAuthBase(AuthQueueMixin, BaseTokenManager):
+class IFlowAuthBase(GoogleOAuthBase):
     """
     iFlow OAuth authentication base class.
     Implements authorization code flow with local callback server.
     """
 
+    # Class attributes required by GoogleOAuthBase
+    CLIENT_ID = IFLOW_CLIENT_ID
+    CLIENT_SECRET = IFLOW_CLIENT_SECRET
+    OAUTH_SCOPES = ["read", "write"]
+    ENV_PREFIX = "IFLOW"
+    REFRESH_EXPIRY_BUFFER_SECONDS = 24 * 60 * 60
+
     def __init__(self):
         super().__init__()
-
-    def _parse_env_credential_path(self, path: str) -> Optional[str]:
-        """Parse a virtual env:// path and return the credential index."""
-        return parse_env_credential_path(path)
 
     def _load_from_env(
         self, credential_index: Optional[str] = None
@@ -806,37 +807,7 @@ class IFlowAuthBase(AuthQueueMixin, BaseTokenManager):
         base_url = "https://apis.iflow.cn/v1"
         return base_url, api_key
 
-    async def proactively_refresh(self, credential_identifier: str):
-        """
-        Proactively refreshes tokens if they're close to expiry.
-        Only applies to OAuth credentials (file paths or env:// paths). Direct API keys are skipped.
-        """
-        # lib_logger.debug(f"proactively_refresh called for: {credential_identifier}")
-
-        # Try to load credentials - this will fail for direct API keys
-        # and succeed for OAuth credentials (file paths or env:// paths)
-        try:
-            creds = await self._load_credentials(credential_identifier)
-        except IOError as e:
-            # Not a valid credential path (likely a direct API key string)
-            # lib_logger.debug(
-            #     f"Skipping refresh for '{credential_identifier}' - not an OAuth credential: {e}"
-            # )
-            return
-
-        is_expired = self._is_token_expired(creds)
-        # lib_logger.debug(
-        #     f"Token expired check for '{Path(credential_identifier).name}': {is_expired}"
-        # )
-
-        if is_expired:
-            # lib_logger.debug(
-            #     f"Queueing refresh for '{Path(credential_identifier).name}'"
-            # )
-            # lib_logger.info(f"Proactive refresh triggered for '{Path(credential_identifier).name}'")
-            await self._queue_refresh(
-                credential_identifier, force=False, needs_reauth=False
-            )
+    # proactively_refresh inherited from GoogleOAuthBase (with IOError handling)
 
     async def _process_refresh_queue(self):
         """Background worker that processes normal refresh requests sequentially.

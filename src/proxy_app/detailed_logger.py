@@ -24,7 +24,7 @@ Directory structure:
         metadata.json          # Summary metadata
 """
 
-import json
+import orjson
 import time
 import uuid
 from datetime import datetime
@@ -86,8 +86,6 @@ class RawIOLogger:
             data,
             logging,
             atomic=False,
-            indent=4,
-            ensure_ascii=False,
         )
 
     def log_request(self, headers: Dict[str, Any], body: Dict[str, Any]):
@@ -107,7 +105,7 @@ class RawIOLogger:
             return
 
         log_entry = {"timestamp_utc": datetime.utcnow().isoformat(), "chunk": chunk}
-        content = json.dumps(log_entry, ensure_ascii=False) + "\n"
+        content = orjson.dumps(log_entry).decode() + "\n"
         safe_log_write(self.log_dir / "streaming_chunks.jsonl", content, logging)
 
     def log_final_response(

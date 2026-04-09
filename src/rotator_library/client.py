@@ -978,7 +978,8 @@ class RotatingClient:
             lib_logger.debug(f"Could not reset LiteLLM client cache: {e}")
 
     def _reset_cache_on_auth_error(
-        self, classified_error, raw_exception: Optional[Exception] = None
+        self, classified_error, raw_exception: Optional[Exception] = None,
+        provider=None, credential: Optional[str] = None,
     ) -> bool:
         """Reset LiteLLM client cache if error is auth-related.
 
@@ -989,6 +990,8 @@ class RotatingClient:
         """
         if classified_error.error_type == "authentication":
             self._reset_litellm_client_cache()
+            if provider and hasattr(provider, 'reset_auth_caches') and credential:
+                provider.reset_auth_caches(credential)
             return True
         if raw_exception is not None:
             status = getattr(
@@ -996,6 +999,8 @@ class RotatingClient:
             )
             if status in (401, 403):
                 self._reset_litellm_client_cache()
+                if provider and hasattr(provider, 'reset_auth_caches') and credential:
+                    provider.reset_auth_caches(credential)
                 return True
         return False
 
@@ -2340,7 +2345,7 @@ class RotatingClient:
 
                             # Reset LiteLLM client cache on auth errors (401/403)
                             # Bad credentials can poison cached clients; don't clear on 429/500
-                            self._reset_cache_on_auth_error(classified_error, e)
+                            self._reset_cache_on_auth_error(classified_error, e, provider=provider, credential=current_cred)
 
                             log_failure(
                                 api_key=current_cred,
@@ -2730,7 +2735,7 @@ class RotatingClient:
 
                             # Reset LiteLLM client cache on auth errors (401/403)
                             # Bad credentials can poison cached clients; don't clear on 429/500
-                            self._reset_cache_on_auth_error(classified_error, e)
+                            self._reset_cache_on_auth_error(classified_error, e, provider=provider, credential=current_cred)
 
                             lib_logger.warning(
                                 f"Key {mask_credential(current_cred)} HTTP {e.response.status_code} ({classified_error.error_type})."
@@ -3085,7 +3090,7 @@ class RotatingClient:
                                 error_message = str(original_exc).split("\n")[0]
 
                                 # Reset LiteLLM client cache on auth errors (401/403)
-                                self._reset_cache_on_auth_error(classified_error, original_exc)
+                                self._reset_cache_on_auth_error(classified_error, original_exc, provider=provider, credential=current_cred)
 
                                 log_failure(
                                     api_key=current_cred,
@@ -3395,7 +3400,7 @@ class RotatingClient:
                             )
 
                             # Reset LiteLLM client cache on auth errors (401/403)
-                            self._reset_cache_on_auth_error(classified_error, original_exc)
+                            self._reset_cache_on_auth_error(classified_error, original_exc, provider=provider, credential=current_cred)
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):

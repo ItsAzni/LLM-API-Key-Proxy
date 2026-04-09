@@ -17,7 +17,7 @@ Provides three main patterns:
 
 import asyncio
 import atexit
-import json
+import orjson
 import os
 import shutil
 import tempfile
@@ -344,7 +344,9 @@ class ResilientStateWriter:
         self.path = Path(path)
         self.logger = logger
         self.retry_interval = retry_interval
-        self._serializer = serializer or (lambda d: json.dumps(d, indent=2))
+        self._serializer = serializer or (
+            lambda d: orjson.dumps(d, option=orjson.OPT_INDENT_2).decode()
+        )
 
         self._current_state: Optional[Any] = None
         self._disk_healthy = True
@@ -515,8 +517,6 @@ def safe_write_json(
     data: Dict[str, Any],
     logger: logging.Logger,
     atomic: bool = True,
-    indent: int = 2,
-    ensure_ascii: bool = True,
     secure_permissions: bool = False,
     buffer_on_failure: bool = False,
 ) -> bool:
@@ -527,13 +527,14 @@ def safe_write_json(
     BufferedWriteRegistry for periodic retry and shutdown flush. This ensures
     critical data (like auth tokens) is eventually saved.
 
+    Note: Uses orjson with OPT_INDENT_2 always. orjson never ASCII-escapes
+    (it outputs UTF-8 directly), which is safe for JSON files read as UTF-8.
+
     Args:
         path: File path to write to
         data: JSON-serializable data
         logger: Logger for warnings
         atomic: Use atomic write pattern (tempfile + move)
-        indent: JSON indentation level (default: 2)
-        ensure_ascii: Escape non-ASCII characters (default: True)
         secure_permissions: Set file permissions to 0o600 (default: False)
         buffer_on_failure: Register with BufferedWriteRegistry on failure (default: False)
 
@@ -544,7 +545,7 @@ def safe_write_json(
 
     # Create serializer function that matches the requested formatting
     def serializer(d: Any) -> str:
-        return json.dumps(d, indent=indent, ensure_ascii=ensure_ascii)
+        return orjson.dumps(d, option=orjson.OPT_INDENT_2).decode()
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -709,7 +710,7 @@ class AsyncResilientStateWriter:
                 # Atomic write: temp -> rename
                 temp_path = self.file_path.with_suffix('.tmp')
                 temp_path.write_text(
-                    json.dumps(data, indent=2, default=str),
+                    orjson.dumps(data, option=orjson.OPT_INDENT_2, default=str).decode(),
                     encoding='utf-8'
                 )
                 temp_path.replace(self.file_path)
@@ -717,7 +718,7 @@ class AsyncResilientStateWriter:
                 # Recovery: recreate directory if deleted
                 self.file_path.parent.mkdir(parents=True, exist_ok=True)
                 self.file_path.write_text(
-                    json.dumps(data, indent=2, default=str),
+                    orjson.dumps(data, option=orjson.OPT_INDENT_2, default=str).decode(),
                     encoding='utf-8'
                 )
 

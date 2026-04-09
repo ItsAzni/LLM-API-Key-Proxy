@@ -47,3 +47,14 @@ class BaseTokenManager:
         self._refresh_interval_seconds: int = 30
         self._refresh_max_retries: int = 3
         self._reauth_timeout_seconds: int = 300
+
+    def reset_auth_caches(self, credential: str) -> None:
+        """Clear all cached state for a credential after an auth error.
+
+        Subclasses with additional caches should override and call super()
+        to ensure all caches are cleared consistently.
+        """
+        self._credentials_cache.pop(credential, None)
+        self._unavailable_credentials.pop(credential, None)
+        if credential in self._refresh_locks:
+            del self._refresh_locks[credential]

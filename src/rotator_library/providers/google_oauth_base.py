@@ -209,6 +209,20 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
 
         super().__init__()
 
+        # Staleness counter: tracks how many times a stale/expired token has been
+        # served for a given credential path. After 1 stale serve, the next attempt
+        # marks the credential unavailable instead of retrying (prevents retry storm).
+        self._staleness_counter: Dict[str, int] = {}
+
+    def reset_auth_caches(self, credential: str) -> None:
+        """Clear all cached state for a credential after an auth error.
+
+        Extends base to also clear the staleness counter, so a reset credential
+        gets a fresh chance instead of being immediately marked unavailable.
+        """
+        super().reset_auth_caches(credential)
+        self._staleness_counter.pop(credential, None)
+
     def _parse_env_credential_path(self, path: str) -> Optional[str]:
         """Parse a virtual env:// path and return the credential index."""
         return parse_env_credential_path(path)
@@ -558,10 +572,16 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
             return creds
 
     async def proactively_refresh(self, credential_path: str):
-        """Proactively refresh a credential by queueing it for refresh."""
-        creds = await self._load_credentials(credential_path)
+        """Proactively refresh a credential by queueing it for refresh.
+
+        Handles IOError gracefully: direct API keys cannot be loaded as
+        OAuth credentials, so the refresh is silently skipped.
+        """
+        try:
+            creds = await self._load_credentials(credential_path)
+        except IOError:
+            return
         if self._is_token_expired(creds):
-            # lib_logger.info(f"Proactive refresh triggered for '{Path(credential_path).name}'")
             await self._queue_refresh(credential_path, force=False, needs_reauth=False)
 
     def _is_token_truly_expired(self, creds: Dict[str, Any]) -> bool:
@@ -1020,15 +1040,29 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
             if self._is_token_expired(creds):
                 try:
                     creds = await self._refresh_token(credential_path, creds)
+                    # Successful refresh: reset staleness counter
+                    self._staleness_counter.pop(credential_path, None)
                 except Exception as e:
                     # Check if we have a cached token that might still work
                     cached = self._credentials_cache.get(credential_path)
                     if cached and cached.get("access_token"):
-                        lib_logger.warning(
-                            f"Token refresh failed for {Path(credential_path).name}: {e}. "
-                            "Using cached token (may be expired)."
-                        )
-                        creds = cached
+                        stale_count = self._staleness_counter.get(credential_path, 0)
+                        if stale_count < 1:
+                            self._staleness_counter[credential_path] = stale_count + 1
+                            lib_logger.warning(
+                                f"Token refresh failed for {Path(credential_path).name}: {e}. "
+                                "Using cached token (may be expired)."
+                            )
+                            creds = cached
+                        else:
+                            # Too many stale serves, mark unavailable to prevent retry storm
+                            self._staleness_counter.pop(credential_path, None)
+                            self._unavailable_credentials[credential_path] = time.time()
+                            lib_logger.error(
+                                f"Token refresh failed for {Path(credential_path).name}: {e}. "
+                                "Stale token served too many times, marking credential unavailable."
+                            )
+                            raise
                     else:
                         raise
             return {"Authorization": f"Bearer {creds['access_token']}"}
@@ -1036,11 +1070,22 @@ class GoogleOAuthBase(AuthQueueMixin, BaseTokenManager):
             # Check if any cached credential exists as last resort
             cached = self._credentials_cache.get(credential_path)
             if cached and cached.get("access_token"):
-                lib_logger.error(
-                    f"Credential load failed for {credential_path}: {e}. "
-                    "Using stale cached token as last resort."
-                )
-                return {"Authorization": f"Bearer {cached['access_token']}"}
+                stale_count = self._staleness_counter.get(credential_path, 0)
+                if stale_count < 1:
+                    self._staleness_counter[credential_path] = stale_count + 1
+                    lib_logger.error(
+                        f"Credential load failed for {credential_path}: {e}. "
+                        "Using stale cached token as last resort."
+                    )
+                    return {"Authorization": f"Bearer {cached['access_token']}"}
+                else:
+                    # Too many stale serves, mark unavailable to prevent retry storm
+                    self._staleness_counter.pop(credential_path, None)
+                    self._unavailable_credentials[credential_path] = time.time()
+                    lib_logger.error(
+                        f"Credential load failed for {credential_path}: {e}. "
+                        "Stale token served too many times, marking credential unavailable."
+                    )
             raise
 
     def _extract_project_id_from_response(

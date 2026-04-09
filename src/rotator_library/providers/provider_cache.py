@@ -20,7 +20,7 @@ Usage examples:
 from __future__ import annotations
 
 import asyncio
-import json
+from json import JSONDecodeError
 import logging
 import threading
 import time
@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
 
 from ..async_locks import ReadWriteLock
 from ..config import env_bool as _env_bool, env_int as _env_int
+from ..utils.json_utils import json_loads
 from ..utils.resilient_io import safe_write_json
 
 lib_logger = logging.getLogger("rotator_library")
@@ -165,7 +166,7 @@ class ProviderCache:
         try:
             async with self._disk_lock:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    data = json_loads(f.read())
 
                 if data.get("version") != "1.0":
                     lib_logger.warning(
@@ -198,7 +199,7 @@ class ProviderCache:
                 lib_logger.debug(
                     f"ProviderCache[{self._cache_name}]: Loaded {loaded} entries ({expired} expired)"
                 )
-        except json.JSONDecodeError as e:
+        except JSONDecodeError as e:
             lib_logger.warning(
                 f"ProviderCache[{self._cache_name}]: File corrupted: {e}"
             )
@@ -231,9 +232,9 @@ class ProviderCache:
             if self._cache_file.exists():
                 try:
                     with open(self._cache_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                        data = json_loads(f.read())
                         existing_entries = data.get("entries", {})
-                except (json.JSONDecodeError, IOError, OSError):
+                except (JSONDecodeError, IOError, OSError):
                     pass  # Start fresh if corrupted or unreadable
 
             # Step 2: Filter existing disk entries by disk_ttl (not memory_ttl)
@@ -460,7 +461,7 @@ class ProviderCache:
 
             async with self._disk_lock:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    data = json_loads(f.read())
 
                 entries = data.get("entries", {})
                 if key in entries:
@@ -492,7 +493,7 @@ class ProviderCache:
 
             async with self._disk_lock:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    data = json_loads(f.read())
 
                 entries = data.get("entries", {})
                 if key in entries:

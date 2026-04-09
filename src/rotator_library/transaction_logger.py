@@ -25,6 +25,8 @@ Directory structure:
 from __future__ import annotations
 
 import json
+
+import orjson
 import logging
 import time
 import uuid
@@ -219,7 +221,7 @@ class TransactionLogger:
             "timestamp_utc": datetime.utcnow().isoformat(),
             "chunk": chunk,
         }
-        content = json.dumps(log_entry, ensure_ascii=False) + "\n"
+        content = orjson.dumps(log_entry).decode() + "\n"
         self._append_text("streaming_chunks.jsonl", content)
 
     def log_response(

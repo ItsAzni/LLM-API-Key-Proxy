@@ -51,7 +51,7 @@ class BatchedPersistence:
     Usage:
         persistence = BatchedPersistence(
             file_path=Path("data/state.json"),
-            serializer=lambda data: json.dumps(data, indent=2),
+            serializer=lambda data: orjson.dumps(data, option=orjson.OPT_INDENT_2).decode(),
         )
         await persistence.start()
 
@@ -77,7 +77,7 @@ class BatchedPersistence:
             config: Persistence configuration
         """
         self._file_path = file_path
-        self._serializer = serializer or (lambda d: json.dumps(d, indent=2))
+        self._serializer = serializer or (lambda d: orjson.dumps(d, option=orjson.OPT_INDENT_2).decode())
         self._config = config or PersistenceConfig()
 
         # Override from environment
@@ -177,7 +177,6 @@ class BatchedPersistence:
                     data,
                     lib_logger,
                     True,   # atomic
-                    2,     # indent
                 )
 
                 if success:

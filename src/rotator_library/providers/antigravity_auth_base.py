@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, List
 import httpx
 
 from ..http_client_pool import get_http_pool
+from ..utils.ttl_dict import TTLDict
 from .google_oauth_base import GoogleOAuthBase
 from .provider_interface import build_bearer_headers
 # Note: Endpoint constants are imported by helper methods from gemini_shared_utils
@@ -59,8 +60,8 @@ class AntigravityAuthBase(GoogleOAuthBase):
     def __init__(self):
         super().__init__()
         # Project and tier caches - shared between auth base and provider
-        self.project_id_cache: Dict[str, str] = {}
-        self.project_tier_cache: Dict[str, str] = {}
+        self.project_id_cache: TTLDict = TTLDict(maxsize=500, default_ttl=86400.0)
+        self.project_tier_cache: TTLDict = TTLDict(maxsize=500, default_ttl=86400.0)
 
     # =========================================================================
     # POST-AUTH DISCOVERY HOOK
