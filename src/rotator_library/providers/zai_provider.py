@@ -102,6 +102,7 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
         Parse ZAI 429 error to extract quota reset information.
 
         ZAI returns rate limit errors when hourly quota is exhausted.
+        Error format: {'error': {'code': '1113', 'message': 'Insufficient balance...'}}
         """
         body = error_body or ""
         try:
@@ -109,29 +110,55 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
         except (ValueError, TypeError):
             data = {}
 
-        code = data.get("code")
-        msg = str(data.get("msg", "")).lower()
+        # ZAI nests error info under 'error' key
+        error_obj = data.get("error", {})
+        code = data.get("code") or error_obj.get("code")
+        msg = str(data.get("msg", "") or data.get("message", "") or error_obj.get("message", "")).lower()
 
-        is_quota = code == 429 or "rate" in msg or "limit" in msg or "quota" in msg
+        # Normalize code to int for comparison (API returns string codes like "1113")
+        try:
+            code_int = int(code) if code is not None else None
+        except (ValueError, TypeError):
+            code_int = None
+
+        # ZAI-specific: code 1113 = insufficient balance, plus standard rate/limit/quota keywords
+        is_quota = (
+            code_int == 429
+            or code_int == 1113
+            or "rate" in msg
+            or "limit" in msg
+            or "quota" in msg
+            or "balance" in msg
+            or "recharge" in msg
+            or "insufficient" in msg
+        )
         if not is_quota:
             return None
 
-        retry_after = 60
-        if "retry" in msg:
-            match = re.search(r"(\d+)\s*s", msg)
-            if match:
-                retry_after = int(match.group(1))
-
         now = datetime.now(timezone.utc)
-        next_hour = (now + timedelta(hours=1)).replace(
-            minute=0, second=0, microsecond=0
-        )
-        reset_ts = next_hour.timestamp()
+
+        # Code 1113 / "insufficient balance" = account has no funds,
+        # won't recover at hour boundary — use 24h cooldown.
+        # Standard 429 = hourly quota, resets at next hour boundary.
+        if code_int == 1113 or "balance" in msg or "recharge" in msg:
+            cooldown = timedelta(hours=24)
+            reset_time = now + cooldown
+            retry_after = int(cooldown.total_seconds())
+            reason = "INSUFFICIENT_BALANCE"
+        else:
+            next_hour = (now + timedelta(hours=1)).replace(
+                minute=0, second=0, microsecond=0
+            )
+            reset_time = next_hour
+            retry_after = max(60, int(next_hour.timestamp() - now.timestamp()))
+            reason = "QUOTA_EXHAUSTED"
+
+        reset_ts = reset_time.timestamp()
 
         return {
             "retry_after": retry_after,
-            "reason": "QUOTA_EXHAUSTED",
-            "reset_timestamp": next_hour.isoformat(),
+            "reason": reason,
+            "reset_timestamp": reset_time.isoformat(),
             "quota_reset_timestamp": reset_ts,
         }
 

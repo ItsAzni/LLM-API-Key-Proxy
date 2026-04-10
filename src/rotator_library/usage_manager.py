@@ -1216,6 +1216,40 @@ class UsageManager:
     # instead of success_count (because failed requests also consume quota)
     _REQUEST_COUNT_PROVIDERS = {"antigravity", "gemini_cli", "chutes", "nanogpt", "zai"}
 
+    def _get_baseline_remaining(self, key: str, model: str) -> Optional[float]:
+        """
+        Get baseline_remaining_fraction for a credential's model, checking quota groups.
+
+        Background refresh stores baseline on the virtual _quota model and syncs
+        it across the quota group. This method finds the baseline by checking
+        the requested model first, then falling back to any grouped model.
+
+        Returns None if no baseline data exists (provider not yet refreshed).
+        """
+        key_data = self._usage_data.get(key)
+        if not key_data:
+            return None
+        models_data = key_data.get("models", {})
+        # Direct lookup on the requested model
+        model_stats = models_data.get(model)
+        if model_stats:
+            baseline = model_stats.get("baseline_remaining_fraction")
+            if baseline is not None:
+                return baseline
+        # Check quota group: look for _quota virtual model or any grouped model
+        group = self._get_model_quota_group(key, model)
+        if group:
+            virtual_name = f"{model.split('/')[0] if '/' in model else ''}/_quota"
+            for model_name, stats in models_data.items():
+                if model_name == model:
+                    continue
+                other_group = self._get_model_quota_group(key, model_name)
+                if other_group == group:
+                    baseline = stats.get("baseline_remaining_fraction")
+                    if baseline is not None:
+                        return baseline
+        return None
+
     def _get_grouped_usage_count(self, key: str, model: str) -> int:
         """
         Get usage count for credential selection, considering quota groups.
@@ -2447,6 +2481,13 @@ class UsageManager:
                     if key_cd > now or model_cd > now:
                         continue
 
+                    # Skip keys with confirmed exhausted quota (baseline_remaining_fraction <= 0)
+                    # Background refresh sets this from the provider's quota API,
+                    # so we avoid keys that are known-exhausted even before cooldown kicks in.
+                    baseline = self._get_baseline_remaining(key, normalized_model)
+                    if baseline is not None and baseline <= 0:
+                        continue
+
                     # Get priority for this key (default to 999 if not specified)
                     priority = credential_priorities.get(key, 999)
 
@@ -2693,6 +2734,13 @@ class UsageManager:
 
                     # Skip keys on cooldown (use normalized model for lookup)
                     if key_cd > now or model_cd > now:
+                        continue
+
+                    # Skip keys with confirmed exhausted quota (baseline_remaining_fraction <= 0)
+                    # Background refresh sets this from the provider's quota API,
+                    # so we avoid keys that are known-exhausted even before cooldown kicks in.
+                    baseline = self._get_baseline_remaining(key, normalized_model)
+                    if baseline is not None and baseline <= 0:
                         continue
 
                     # Prioritize keys based on their current usage to ensure load balancing.
