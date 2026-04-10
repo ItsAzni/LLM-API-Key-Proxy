@@ -681,6 +681,7 @@ class RotatingClient:
             fair_cycle_duration=fair_cycle_duration,
             exhaustion_cooldown_threshold=exhaustion_cooldown_threshold,
             custom_caps=custom_caps,
+            credential_to_provider=self._build_credential_to_provider_map(),
         )
         self._model_list_cache = {}
         # Use HttpClientPool singleton for optimized connection management
@@ -1553,6 +1554,14 @@ class RotatingClient:
         """
         return self.provider_config.is_custom_provider(provider_name)
 
+    def _build_credential_to_provider_map(self) -> Dict[str, str]:
+        """Build a reverse mapping from credential identifier to provider name."""
+        mapping: Dict[str, str] = {}
+        for provider, creds in self.all_credentials.items():
+            for cred in creds:
+                mapping[cred] = provider
+        return mapping
+
     def _get_provider_instance(self, provider_name: str):
         """
         Lazily initializes and returns a provider instance.
@@ -1584,7 +1593,15 @@ class RotatingClient:
 
         if provider_name in self._provider_plugins:
             return self._provider_instances.get_or_create(provider_name, self._provider_plugins[provider_name])
-        elif self._is_custom_openai_compatible_provider(provider_name):
+
+        # Lazy-load provider via plugin system (e.g. zai, chutes)
+        from .providers import get_provider as _lazy_get_provider
+        lazy_class = _lazy_get_provider(provider_name)
+        if lazy_class is not None:
+            self._provider_plugins[provider_name] = lazy_class
+            return self._provider_instances.get_or_create(provider_name, lazy_class)
+
+        if self._is_custom_openai_compatible_provider(provider_name):
             # Create a generic OpenAI-compatible provider for custom providers
             try:
                 instance = OpenAICompatibleProvider(provider_name)

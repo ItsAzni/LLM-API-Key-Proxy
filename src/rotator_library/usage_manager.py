@@ -91,6 +91,7 @@ class UsageManager:
         custom_caps: Optional[
             Dict[str, Dict[Union[int, Tuple[int, ...], str], Dict[str, Dict[str, Any]]]]
         ] = None,
+        credential_to_provider: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize the UsageManager.
@@ -144,6 +145,7 @@ class UsageManager:
         self.rotation_tolerance = rotation_tolerance
         self.provider_rotation_modes = provider_rotation_modes or {}
         self.provider_plugins = provider_plugins or PROVIDER_PLUGINS
+        self.credential_to_provider = credential_to_provider or {}
         self.priority_multipliers = priority_multipliers or {}
         self.priority_multipliers_by_mode = priority_multipliers_by_mode or {}
         self.sequential_fallback_multipliers = sequential_fallback_multipliers or {}
@@ -932,6 +934,10 @@ class UsageManager:
             if credential.startswith(prefix):
                 return provider
 
+        # Lookup from credential-to-provider mapping (built at init from all_credentials)
+        if self.credential_to_provider and credential in self.credential_to_provider:
+            return self.credential_to_provider[credential]
+
         # Fallback: For raw API keys, extract provider from model names in usage data
         # This handles providers like firmware, chutes, nanogpt that use credential-level quota
         if self._usage_data and credential in self._usage_data:
@@ -973,7 +979,12 @@ class UsageManager:
 
         plugin_class = self.provider_plugins.get(provider)
         if not plugin_class:
-            return None
+            # Lazy-load provider via plugin system (e.g. zai, chutes)
+            from .providers import get_provider as _lazy_get_provider
+            plugin_class = _lazy_get_provider(provider)
+            if not plugin_class:
+                return None
+            self.provider_plugins[provider] = plugin_class
 
         return self._provider_instances.get_or_create(provider, plugin_class)
 
@@ -1169,9 +1180,41 @@ class UsageManager:
         """Extract provider name from provider/model string safely."""
         return extract_provider_from_model(model)
 
+    def _check_quota_group_cooldown(
+        self,
+        credential: str,
+        model_cooldowns: Dict[str, float],
+        normalized_model: str,
+    ) -> float:
+        """Check if a virtual _quota model cooldown applies to this model.
+
+        Background quota refresh sets cooldowns on the virtual
+        {provider}/_quota model.  Before real models are discovered
+        and added to the quota group, the real model won't have its
+        own cooldown entry.  This helper returns the _quota cooldown
+        if the requested model belongs to a quota group and has no
+        direct cooldown, so callers can treat it as an effective
+        model-level cooldown.
+
+        Returns the _quota cooldown timestamp if applicable, else 0.
+        """
+        if normalized_model in model_cooldowns:
+            return 0  # model has its own cooldown entry — use that
+        provider = self._get_provider_from_credential(credential)
+        if not provider:
+            return 0
+        plugin = self._get_provider_instance(provider)
+        if not plugin or not hasattr(plugin, "get_model_quota_group"):
+            return 0
+        group = plugin.get_model_quota_group(normalized_model)
+        if not group:
+            return 0
+        virtual_name = f"{provider}/_quota"
+        return model_cooldowns.get(virtual_name) or 0
+
     # Providers where request_count should be used for credential selection
     # instead of success_count (because failed requests also consume quota)
-    _REQUEST_COUNT_PROVIDERS = {"antigravity", "gemini_cli", "chutes", "nanogpt"}
+    _REQUEST_COUNT_PROVIDERS = {"antigravity", "gemini_cli", "chutes", "nanogpt", "zai"}
 
     def _get_grouped_usage_count(self, key: str, model: str) -> int:
         """
@@ -1650,9 +1693,13 @@ class UsageManager:
                 normalized_model = self._normalize_model(key, model)
 
                 # Skip if model-specific cooldown is active
-                if (
-                    key_data.get("model_cooldowns", {}).get(normalized_model) or 0
-                ) > now:
+                model_cooldowns = key_data.get("model_cooldowns", {})
+                model_cd = model_cooldowns.get(normalized_model) or 0
+                if model_cd == 0:
+                    model_cd = self._check_quota_group_cooldown(
+                        key, model_cooldowns, normalized_model
+                    )
+                if model_cd > now:
                     continue
 
                 available.append(key)
@@ -1693,12 +1740,21 @@ class UsageManager:
         async with self._data_lock.read():
             for key in credentials:
                 key_data = self._usage_data.get(key, {})
+                model_cooldowns = key_data.get("model_cooldowns", {})
 
                 # Check if key-level or model-level cooldown is active
                 normalized_model = self._normalize_model(key, model)
-                if (key_data.get("key_cooldown_until") or 0) > now or (
-                    key_data.get("model_cooldowns", {}).get(normalized_model) or 0
-                ) > now:
+                model_cd = model_cooldowns.get(normalized_model) or 0
+                if model_cd == 0:
+                    model_cd = self._check_quota_group_cooldown(
+                        key, model_cooldowns, normalized_model
+                    )
+                is_on_cooldown = (
+                    (key_data.get("key_cooldown_until") or 0) > now
+                    or model_cd > now
+                )
+
+                if is_on_cooldown:
                     on_cooldown += 1
                 else:
                     not_on_cooldown.append(key)
@@ -1769,9 +1825,13 @@ class UsageManager:
                         soonest_end = key_cooldown
 
                 # Check model-level cooldown
-                model_cooldown = (
-                    key_data.get("model_cooldowns", {}).get(normalized_model) or 0
-                )
+                model_cooldowns_map = key_data.get("model_cooldowns", {})
+                model_cooldown = model_cooldowns_map.get(normalized_model) or 0
+                if model_cooldown == 0:
+                    model_cooldown = self._check_quota_group_cooldown(
+                        key, model_cooldowns_map, normalized_model
+                    )
+
                 if model_cooldown > now:
                     if soonest_end is None or model_cooldown < soonest_end:
                         soonest_end = model_cooldown
@@ -2274,13 +2334,28 @@ class UsageManager:
     async def _get_key_cooldown_async(
         self, key: str, normalized_model: str
     ) -> Tuple[str, Tuple[float, float]]:
-        """Helper for parallel cooldown lookup."""
+        """Helper for parallel cooldown lookup.
+
+        Checks cooldown for the requested model AND for the virtual
+        quota-baseline model (e.g. zai/_quota) when the model belongs
+        to a quota group.  This ensures that cooldowns placed by the
+        background quota refresh on the virtual model are respected
+        even before real models are discovered and added to the group.
+        """
         async with self._data_lock.read():
             key_data = self._usage_data.get(key, {})
-            return key, (
-                key_data.get("key_cooldown_until") or 0,
-                key_data.get("model_cooldowns", {}).get(normalized_model) or 0,
-            )
+            key_cd = key_data.get("key_cooldown_until") or 0
+            model_cooldowns = key_data.get("model_cooldowns", {})
+            model_cd = model_cooldowns.get(normalized_model) or 0
+
+            if model_cd == 0:
+                quota_cd = self._check_quota_group_cooldown(
+                    key, model_cooldowns, normalized_model
+                )
+                if quota_cd > model_cd:
+                    model_cd = quota_cd
+
+            return key, (key_cd, model_cd)
 
     async def acquire_key(
         self,
@@ -3295,6 +3370,11 @@ class UsageManager:
                     # Apply to all models in the same quota group
                     group = self._get_model_quota_group(key, model)
                     if group:
+                        # Invalidate group cache so newly discovered
+                        # models are included in propagation
+                        group_cache = self._grouped_models_cache.get(key)
+                        if group_cache and group in group_cache:
+                            del group_cache[group]
                         grouped_models = self._get_grouped_models(key, group)
                         for grouped_model in grouped_models:
                             group_model_data = models_data.setdefault(
@@ -3684,6 +3764,12 @@ class UsageManager:
             # Sync baseline fields and quota info across quota group
             group = self._get_model_quota_group(credential, model)
             if group:
+                # Invalidate group cache when updating a virtual _quota model
+                # so that newly discovered models are included in propagation
+                if model.endswith("/_quota"):
+                    group_cache = self._grouped_models_cache.get(credential)
+                    if group_cache and group in group_cache:
+                        del group_cache[group]
                 grouped_models = self._get_grouped_models(credential, group)
                 for grouped_model in grouped_models:
                     if grouped_model != model:

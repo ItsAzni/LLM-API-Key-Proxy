@@ -1356,9 +1356,9 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
     # Try provider-specific parsing first for 429/rate limit errors
     if provider:
         try:
-            from .providers import PROVIDER_PLUGINS
+            from .providers import get_provider
 
-            provider_class = PROVIDER_PLUGINS.get(provider)
+            provider_class = get_provider(provider)
 
             if provider_class and hasattr(provider_class, "parse_quota_error"):
                 # Get error body if available

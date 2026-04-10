@@ -96,6 +96,9 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
     },
     "zai": {
         "category": "popular",
+        "extra_vars": [
+            ("ZAI_API_BASE", "API Base URL (default: https://api.z.ai/api/coding/paas/v4)", "https://api.z.ai/api/coding/paas/v4"),
+        ],
     },
     "opencode": {
         "category": "popular",
@@ -636,6 +639,7 @@ KNOWN_PROVIDERS: Set[str] = _build_known_providers_set()
 # Manually add providers with custom plugins that aren't in scraped LiteLLM data
 KNOWN_PROVIDERS.add("trybons")
 KNOWN_PROVIDERS.add("colin")  # COLIN uses OpenAI Responses API format
+KNOWN_PROVIDERS.add("zai")  # ZAI has custom quota tracking provider
 
 
 def get_provider_ui_config(provider_key: str) -> Dict[str, Any]:
