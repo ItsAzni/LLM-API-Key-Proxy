@@ -25,7 +25,7 @@ This project consists of two components:
 
 ### Windows
 
-1. **Download** the latest release from [GitHub Releases](https://github.com/Mirrowel/LLM-API-Key-Proxy/releases/latest)
+1. **Download** the latest release from [GitHub Releases](https://github.com/ShmidtS/LLM-API-Key-Proxy/releases/latest)
 2. **Unzip** the downloaded file
 3. **Run** `proxy_app.exe` — the interactive TUI launcher opens
 
@@ -52,7 +52,7 @@ docker run -d \
   -v $(pwd)/oauth_creds:/app/oauth_creds \
   -v $(pwd)/logs:/app/logs \
   -e SKIP_OAUTH_INIT_CHECK=true \
-  ghcr.io/mirrowel/llm-api-key-proxy:latest
+  ghcr.io/shmids/llm-api-key-proxy:latest
 ```
 
 **Using Docker Compose:**
@@ -71,7 +71,7 @@ docker compose up -d
 ### From Source
 
 ```bash
-git clone https://github.com/Mirrowel/LLM-API-Key-Proxy.git
+git clone https://github.com/ShmidtS/LLM-API-Key-Proxy.git
 cd LLM-API-Key-Proxy
 python3 -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
@@ -954,7 +954,7 @@ docker run -d \
   -v $(pwd)/key_usage.json:/app/key_usage.json \
   -e SKIP_OAUTH_INIT_CHECK=true \
   -e PYTHONUNBUFFERED=1 \
-  ghcr.io/mirrowel/llm-api-key-proxy:latest
+  ghcr.io/shmids/llm-api-key-proxy:latest
 ```
 
 **Development with Local Build:**

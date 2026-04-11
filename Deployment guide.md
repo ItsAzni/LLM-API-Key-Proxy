@@ -1,6 +1,6 @@
 # Easy Guide to Deploying LLM-API-Key-Proxy on Render
 
-This guide walks you through deploying the [LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-API-Key-Proxy) as a hosted service on Render.com. The project provides a universal, OpenAI-compatible API endpoint for all your LLM providers (like Gemini or OpenAI), powered by an intelligent key management library. It's perfect for integrating with platforms like JanitorAI, where you can use it as a custom proxy for highly available and resilient chats.
+This guide walks you through deploying the [LLM-API-Key-Proxy](https://github.com/ShmidtS/LLM-API-Key-Proxy) as a hosted service on Render.com. The project provides a universal, OpenAI-compatible API endpoint for all your LLM providers (like Gemini or OpenAI), powered by an intelligent key management library. It's perfect for integrating with platforms like JanitorAI, where you can use it as a custom proxy for highly available and resilient chats.
 
 The process is beginner-friendly and takes about 15-30 minutes. We'll use Render's free tier (with limitations like sleep after 15 minutes of inactivity) and upload your `.env` file as a secret for easy key management—no manual entry of variables required.
 
@@ -17,7 +17,7 @@ The process is beginner-friendly and takes about 15-30 minutes. We'll use Render
 
 Before deploying, try the proxy locally to ensure your keys work. This uses a pre-built executable that's easy to set up.
 
-1. Go to the repo's [GitHub Releases page](https://github.com/Mirrowel/LLM-API-Key-Proxy/releases).
+1. Go to the repo's [GitHub Releases page](https://github.com/ShmidtS/LLM-API-Key-Proxy/releases).
 2. Download the latest release ZIP file (e.g., for Windows).
 3. Unzip the file.
 4. Double-click `setup_env.bat`. A window will open—follow the prompts to add your PROXY_API_KEY (a strong secret you create) and provider keys. Use the [LiteLLM Providers Documentation](https://docs.litellm.ai/docs/providers) for guidance on key formats (e.g., `GEMINI_API_KEY_1="your-key"`).
@@ -34,7 +34,7 @@ If it works, you're ready to deploy. If not, double-check your keys against Lite
 
 ## Step 2: Fork and Prepare the Repository
 
-1. Go to the original repo: [https://github.com/Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-API-Key-Proxy).
+1. Go to the original repo: [https://github.com/ShmidtS/LLM-API-Key-Proxy](https://github.com/ShmidtS/LLM-API-Key-Proxy).
 2. Click **Fork** in the top-right to create your own copy (this lets you make changes if needed).
 3. Clone your forked repo locally:
 
@@ -191,7 +191,7 @@ This is the **fastest way** to deploy the proxy using Docker.
 
 ```bash
 # Clone the repo (or just download docker-compose.yml and .env.example)
-git clone https://github.com/Mirrowel/LLM-API-Key-Proxy.git
+git clone https://github.com/ShmidtS/LLM-API-Key-Proxy.git
 cd LLM-API-Key-Proxy
 
 # Create your .env file
@@ -243,7 +243,7 @@ docker run -d \
   -v $(pwd)/key_usage.json:/app/key_usage.json \
   -e SKIP_OAUTH_INIT_CHECK=true \
   -e PYTHONUNBUFFERED=1 \
-  ghcr.io/mirrowel/llm-api-key-proxy:latest
+  ghcr.io/shmids/llm-api-key-proxy:latest
 ```
 
 ### Available Image Tags
@@ -257,7 +257,7 @@ docker run -d \
 Example using a specific version:
 
 ```bash
-docker pull ghcr.io/mirrowel/llm-api-key-proxy:20250106-143022-abc1234
+docker pull ghcr.io/shmids/llm-api-key-proxy:20250106-143022-abc1234
 ```
 
 ### Volume Mounts Explained
@@ -278,7 +278,7 @@ OAuth providers (Antigravity, Gemini CLI, Qwen Code, iFlow) require interactive 
 1. **Set up the project locally:**
 
 ```bash
-git clone https://github.com/Mirrowel/LLM-API-Key-Proxy.git
+git clone https://github.com/ShmidtS/LLM-API-Key-Proxy.git
 cd LLM-API-Key-Proxy
 pip install -r requirements.txt
 ```

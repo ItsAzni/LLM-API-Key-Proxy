@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 """
 Interactive TUI launcher for the LLM API Key Proxy.
@@ -372,7 +372,7 @@ class LauncherTUI:
             )
         )
         self.console.print(
-            "[dim]GitHub: [blue underline]https://github.com/Mirrowel/LLM-API-Key-Proxy[/blue underline][/dim]"
+            "[dim]GitHub: [blue underline]https://github.com/ShmidtS/LLM-API-Key-Proxy[/blue underline][/dim]"
         )
 
         # Show warning if .env file doesn't exist
@@ -892,7 +892,7 @@ class LauncherTUI:
         # Show the same header as standalone mode
         self.console.print("━" * 70)
         self.console.print("Interactive Credential Setup Tool")
-        self.console.print("GitHub: https://github.com/Mirrowel/LLM-API-Key-Proxy")
+        self.console.print("GitHub: https://github.com/ShmidtS/LLM-API-Key-Proxy")
         self.console.print("━" * 70)
         self.console.print("Loading credential management components...")
 
@@ -977,7 +977,7 @@ class LauncherTUI:
         self.console.print("   LLM API keys with automatic rotation and OAuth support")
         self.console.print()
         self.console.print(
-            "   [dim]GitHub:[/dim] [blue underline]https://github.com/Mirrowel/LLM-API-Key-Proxy[/blue underline]"
+            "   [dim]GitHub:[/dim] [blue underline]https://github.com/ShmidtS/LLM-API-Key-Proxy[/blue underline]"
         )
 
         self.console.print()

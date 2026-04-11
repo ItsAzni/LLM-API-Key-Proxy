@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 """
 IP Throttle Detector - Detects IP-level throttling via correlation of 429 errors.

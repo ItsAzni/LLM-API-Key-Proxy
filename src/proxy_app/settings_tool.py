@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 """
 Advanced settings configuration tool for the LLM API Key Proxy.

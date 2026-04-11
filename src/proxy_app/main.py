@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 # Disable aiodns BEFORE any aiohttp/litellm imports to fix DNS resolution issues
 # This must be set before aiohttp is imported anywhere in the process
@@ -115,7 +115,7 @@ else:
 print("━" * 70)
 print(f"Starting proxy on {args.host}:{args.port}")
 print(f"Proxy API Key: {key_display}")
-print(f"GitHub: https://github.com/Mirrowel/LLM-API-Key-Proxy")
+print(f"GitHub: https://github.com/ShmidtS/LLM-API-Key-Proxy")
 print("━" * 70)
 print("Loading server components...")
 
@@ -291,7 +291,7 @@ os.system("cls" if os.name == "nt" else "clear")
 print("━" * 70)
 print(f"Starting proxy on {args.host}:{args.port}")
 print(f"Proxy API Key: {key_display}")
-print(f"GitHub: https://github.com/Mirrowel/LLM-API-Key-Proxy")
+print(f"GitHub: https://github.com/ShmidtS/LLM-API-Key-Proxy")
 print("━" * 70)
 print(
     f"✓ Server ready in {_elapsed:.2f}s ({_plugin_count} providers discovered in {_provider_time:.2f}s)"

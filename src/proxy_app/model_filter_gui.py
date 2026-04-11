@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 """
 Model Filter GUI - Visual editor for model ignore/whitelist rules.

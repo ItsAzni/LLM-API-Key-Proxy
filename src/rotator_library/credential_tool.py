@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 # src/rotator_library/credential_tool.py
 
@@ -2686,7 +2686,7 @@ def run_credential_tool(from_launcher=False):
         # Phase 1: Show initial message
         print("━" * 70)
         print("Interactive Credential Setup Tool")
-        print("GitHub: https://github.com/Mirrowel/LLM-API-Key-Proxy")
+        print("GitHub: https://github.com/ShmidtS/LLM-API-Key-Proxy")
         print("━" * 70)
         print("Loading credential management components...")
 

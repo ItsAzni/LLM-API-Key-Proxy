@@ -19,7 +19,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
   llm-proxy:
-    image: ghcr.io/mirrowel/llm-api-key-proxy:latest
+    image: ghcr.io/shmids/llm-api-key-proxy:latest
     container_name: llm-api-proxy-tls
     restart: unless-stopped
     logging:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (c) 2026 Mirrowel
+# Copyright (c) 2026 ShmidtS
 
 import json
 import os
@@ -3729,7 +3729,7 @@ class UsageManager:
             # Sync local request count to API's authoritative value
             # Use max() to prevent API from resetting our count if it returns stale/cached 100%
             # The API can only increase our count (if we missed requests), not decrease it
-            # See: https://github.com/Mirrowel/LLM-API-Key-Proxy/issues/75
+            # See: https://github.com/ShmidtS/LLM-API-Key-Proxy/issues/75
             current_count = model_data.get("request_count", 0)
             synced_count = max(current_count, used_requests)
             model_data["request_count"] = synced_count
