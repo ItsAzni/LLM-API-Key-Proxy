@@ -12,7 +12,7 @@ client.py, usage_manager.py, and provider modules.
 from __future__ import annotations
 
 import functools
-from typing import Optional
+from typing import Any, Optional
 
 
 @functools.lru_cache(maxsize=256)
@@ -85,3 +85,39 @@ def parse_env_credential_path(path: str) -> Optional[str]:
     if len(parts) >= 2:
         return parts[1]
     return "0"
+
+
+def get_or_create_provider_instance(
+    provider_name: str,
+    provider_plugins: dict,
+    provider_registry: Any,
+) -> Any:
+    """
+    Get or create a provider instance via the shared plugin/registry system.
+
+    This consolidates the lazy-load pattern shared between client.py and
+    usage_manager.py: look up the plugin class in *provider_plugins*,
+    falling back to the lazy-load ``providers.get_provider()`` entry point,
+    then delegate creation to *provider_registry*.
+
+    Args:
+        provider_name: Provider identifier (e.g. ``"antigravity"``).
+        provider_plugins: Dict mapping provider names to plugin classes.
+        provider_registry: A ProviderRegistry (or compatible) instance that
+                           supports ``get_or_create(name, entry)``.
+
+    Returns:
+        Provider instance, or None if the provider is unknown.
+    """
+    if not provider_name:
+        return None
+
+    plugin_class = provider_plugins.get(provider_name)
+    if not plugin_class:
+        from ..providers import get_provider as _lazy_get_provider
+        plugin_class = _lazy_get_provider(provider_name)
+        if not plugin_class:
+            return None
+        provider_plugins[provider_name] = plugin_class
+
+    return provider_registry.get_or_create(provider_name, plugin_class)

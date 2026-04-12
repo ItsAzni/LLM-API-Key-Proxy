@@ -16,6 +16,7 @@ from rich.panel import Panel
 from dotenv import set_key, unset_key
 
 from rotator_library.utils.paths import get_data_file
+from rotator_library.utils.terminal_utils import clear_screen
 
 console = Console()
 
@@ -46,26 +47,6 @@ except ImportError:
     IFLOW_DEFAULT_OAUTH_PORT = 11451
 
 
-def clear_screen(subtitle: str = ""):
-    """
-    Cross-platform terminal clear with optional header.
-
-    Uses native OS commands instead of ANSI escape sequences:
-    - Windows (conhost & Windows Terminal): cls
-    - Unix-like systems (Linux, Mac): clear
-
-    Args:
-        subtitle: If provided, displays a header panel with this subtitle.
-                  If empty/None, just clears the screen.
-    """
-    os.system("cls" if os.name == "nt" else "clear")
-    if subtitle:
-        console.print(
-            Panel(
-                f"[bold cyan]{subtitle}[/bold cyan]",
-                title="--- API Key Proxy ---",
-            )
-        )
 
 
 class AdvancedSettings:

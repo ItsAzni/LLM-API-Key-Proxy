@@ -21,7 +21,6 @@ All models share a daily/monthly usage pool at the credential level.
 import asyncio
 import httpx
 from ..http_client_pool import get_http_pool
-import os
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
 
 from .provider_interface import ProviderInterface, strip_provider_prefix
 from .utilities.nanogpt_quota_tracker import NanoGptQuotaTracker
+from ..config.env_utils import env_int
 from ..model_definitions import ModelDefinitions
 
 lib_logger = logging.getLogger("rotator_library")
@@ -91,8 +91,8 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
 
         # Quota tracking cache
         self._subscription_cache: Dict[str, Dict[str, Any]] = {}
-        self._quota_refresh_interval = int(
-            os.getenv("NANOGPT_QUOTA_REFRESH_INTERVAL", "300")
+        self._quota_refresh_interval = env_int(
+            "NANOGPT_QUOTA_REFRESH_INTERVAL", 300
         )
 
         # Tier cache (credential -> tier name)

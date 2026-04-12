@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface
 from .utilities.firmware_quota_tracker import FirmwareQuotaTracker
+from ..config.env_utils import env_int
 
 if TYPE_CHECKING:
     from ..usage_manager import UsageManager
@@ -47,15 +48,9 @@ class FirmwareProvider(QuotaRefreshMixin, FirmwareQuotaTracker, ProviderInterfac
 
         # Quota tracking cache and refresh interval
         self._quota_cache: Dict[str, Dict[str, Any]] = {}
-        try:
-            self._quota_refresh_interval = int(
-                os.environ.get("FIRMWARE_QUOTA_REFRESH_INTERVAL", "300")
-            )
-        except ValueError:
-            lib_logger.warning(
-                "Invalid FIRMWARE_QUOTA_REFRESH_INTERVAL value, using default 300"
-            )
-            self._quota_refresh_interval = 300
+        self._quota_refresh_interval = env_int(
+            "FIRMWARE_QUOTA_REFRESH_INTERVAL", 300
+        )
 
         # API base URL (default to Firmware.ai)
         self.api_base = os.environ.get(

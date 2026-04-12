@@ -814,11 +814,6 @@ class ProviderConfig:
             # Custom provider - route through OpenAI-compatible endpoint
             model_name = model.split("/", 1)[1] if "/" in model else model
 
-            # Inception Labs requires just the model name without any prefix
-            # Their API expects "mercury-2" not "inception/mercury-2" or "openai/inception/mercury-2"
-            if provider == "inception" and "/" in model_name:
-                model_name = model_name.split("/", 1)[1]
-
             # Handle models with embedded slashes (e.g., "openai/gpt-5.4" from "noob/openai/gpt-5.4")
             # If model_name contains a slash, it's already in provider/model format
             if "/" in model_name:

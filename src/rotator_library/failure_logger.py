@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Union
 
-from .error_handler import mask_credential
+from .error_types import mask_credential
 from .utils.paths import get_logs_dir
 from .utils.json_utils import json_dumps_str
 

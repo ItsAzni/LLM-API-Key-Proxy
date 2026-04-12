@@ -15,7 +15,7 @@ import functools
 import json
 import logging
 from .utils.json_utils import json_loads
-import os
+from .config.env_utils import env_int
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -916,9 +916,8 @@ class ModelRegistry(metaclass=SingletonMeta):
         refresh_seconds: Optional[int] = None,
         skip_modelsdev_providers: Optional[List[str]] = None,
     ):
-        interval_env = os.getenv("MODEL_INFO_REFRESH_INTERVAL")
-        self._refresh_interval = refresh_seconds or (
-            int(interval_env) if interval_env else self.REFRESH_INTERVAL_DEFAULT
+        self._refresh_interval = refresh_seconds or env_int(
+            "MODEL_INFO_REFRESH_INTERVAL", self.REFRESH_INTERVAL_DEFAULT
         )
 
         # Configure adapters

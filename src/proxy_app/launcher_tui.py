@@ -19,6 +19,7 @@ from rich.prompt import IntPrompt, Prompt
 from rich.panel import Panel
 from rich.text import Text
 from dotenv import load_dotenv, set_key
+from rotator_library.utils.terminal_utils import clear_screen
 
 console = Console()
 
@@ -37,26 +38,7 @@ def _get_env_file() -> Path:
     return Path.cwd() / ".env"
 
 
-def clear_screen(subtitle: str = ""):
-    """
-    Cross-platform terminal clear with optional header.
 
-    Uses native OS commands instead of ANSI escape sequences:
-    - Windows (conhost & Windows Terminal): cls
-    - Unix-like systems (Linux, Mac): clear
-
-    Args:
-        subtitle: If provided, displays a header panel with this subtitle.
-                  If empty/None, just clears the screen.
-    """
-    os.system("cls" if os.name == "nt" else "clear")
-    if subtitle:
-        console.print(
-            Panel(
-                f"[bold cyan]{subtitle}[/bold cyan]",
-                title="--- API Key Proxy ---",
-            )
-        )
 
 
 class LauncherConfig:

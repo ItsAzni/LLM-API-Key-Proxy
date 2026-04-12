@@ -14,7 +14,7 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import ClassVar, Dict, Any, Tuple, Union, Optional, List
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import urlencode
 
 import httpx
 
@@ -899,73 +899,6 @@ class IFlowAuthBase(GoogleOAuthBase):
 
         finally:
             await callback_server.stop()
-
-    async def initialize_token(
-        self,
-        creds_or_path: Union[Dict[str, Any], str],
-        force_interactive: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Initialize OAuth token, triggering interactive authorization flow if needed.
-
-        If interactive OAuth is required (expired refresh token, missing credentials, etc.),
-        the flow is coordinated globally via ReauthCoordinator to ensure only one
-        interactive OAuth flow runs at a time across all providers.
-
-        Args:
-            creds_or_path: Either a credentials dict or path to credentials file.
-            force_interactive: If True, skip expiry checks and force interactive OAuth.
-                               Use this when the refresh token is known to be invalid
-                               (e.g., after HTTP 400 from token endpoint).
-        """
-        path = creds_or_path if isinstance(creds_or_path, str) else None
-
-        display_name = self._get_display_name(creds_or_path)
-
-        lib_logger.debug(f"Initializing iFlow token for '{display_name}'...")
-
-        try:
-            creds = (
-                await self._load_credentials(creds_or_path) if path else creds_or_path
-            )
-
-            token_expired = self._is_token_expired(creds)
-            needs_interactive, reason = self._should_force_interactive(
-                creds, force_interactive=force_interactive
-            )
-
-            # Expired tokens: try refresh before interactive (unless already
-            # forcing interactive, which means refresh already failed)
-            if token_expired and not needs_interactive:
-                needs_interactive = True
-                reason = "token is expired"
-
-            if needs_interactive:
-                if reason == "token is expired" and creds.get("refresh_token"):
-                    try:
-                        return await self._refresh_token(path)
-                    except Exception as e:
-                        lib_logger.warning(
-                            f"Automatic token refresh for '{display_name}' failed: {e}. Proceeding to interactive login."
-                        )
-
-                lib_logger.warning(
-                    f"iFlow OAuth token for '{display_name}' needs setup: {reason}."
-                )
-
-                return await self._execute_interactive_oauth(
-                    path=path,
-                    creds=creds,
-                    display_name=display_name,
-                    provider_name="IFLOW",
-                    timeout=300.0,
-                )
-
-            lib_logger.info(f"iFlow OAuth token at '{display_name}' is valid.")
-            return creds
-
-        except Exception as e:
-            raise ValueError(f"Failed to initialize iFlow OAuth for '{path}': {e}")
 
     async def get_auth_header(self, credential_path: str) -> Dict[str, str]:
         """

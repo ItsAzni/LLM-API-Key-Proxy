@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.zai_quota_tracker import ZaiQuotaTracker
+from ..config.env_utils import env_int
 
 ZAI_DEFAULT_API_BASE = "https://api.z.ai/api/coding/paas/v4"
 
@@ -67,8 +68,8 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
         super().__init__(*args, **kwargs)
 
         self._quota_cache: Dict[str, Dict[str, Any]] = {}
-        self._quota_refresh_interval: int = int(
-            os.environ.get("ZAI_QUOTA_REFRESH_INTERVAL", "300")
+        self._quota_refresh_interval: int = env_int(
+            "ZAI_QUOTA_REFRESH_INTERVAL", 300
         )
         self._tier_cache: Dict[str, str] = {}
         self._known_models: List[str] = []

@@ -25,86 +25,9 @@ patch_litellm_finish_reason()
 
 # CRITICAL: Patch aiohttp.TCPConnector to use TLS 1.2 and disable SSL verification
 # This fixes ConnectionResetError and SSLCertVerificationError with servers like noobrouterproduction.azurewebsites.net
-import ssl as _ssl_module
-
-# Azure-compatible cipher suites to fix SSLV3_ALERT_HANDSHAKE_FAILURE
-_AZURE_COMPATIBLE_CIPHERS = (
-    "ECDHE-RSA-AES256-GCM-SHA384:"
-    "ECDHE-RSA-AES128-GCM-SHA256:"
-    "ECDHE-ECDSA-AES256-GCM-SHA384:"
-    "ECDHE-ECDSA-AES128-GCM-SHA256:"
-    "AES256-GCM-SHA384:"
-    "AES128-GCM-SHA256"
-)
-
-
-def _patch_aiohttp_connector():
-    """Patch ssl module and aiohttp.TCPConnector to disable SSL verification."""
-    try:
-        _ssl_verify = os.environ.get("HTTP_SSL_VERIFY", "true").lower() != "false"
-
-        if not _ssl_verify:
-            # Global patch: make ssl.create_default_context() return unverified context
-            _original_create_default = _ssl_module.create_default_context
-
-            def _patched_create_default(*args, **kwargs):
-                ctx = _ssl_module._create_unverified_context()
-                ctx.maximum_version = _ssl_module.TLSVersion.TLSv1_2
-                try:
-                    ctx.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                except _ssl_module.SSLError:
-                    pass
-                return ctx
-
-            _ssl_module.create_default_context = _patched_create_default
-
-            # Also patch _create_default_context if it exists
-            if hasattr(_ssl_module, "_create_default_context"):
-                _ssl_module._create_default_context = _patched_create_default
-
-            print(
-                f"[SSL-FIX] Global ssl.create_default_context patched to return unverified TLS 1.2 context"
-            )
-
-        # Patch aiohttp.TCPConnector
-        import aiohttp
-        from aiohttp import TCPConnector as _OriginalTCPConnector
-
-        _original_init = _OriginalTCPConnector.__init__
-
-        def _patched_init(self, *args, **kwargs):
-            if not _ssl_verify:
-                ssl_context = _ssl_module._create_unverified_context()
-                ssl_context.maximum_version = _ssl_module.TLSVersion.TLSv1_2
-                try:
-                    ssl_context.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                except _ssl_module.SSLError:
-                    pass
-                kwargs["ssl"] = ssl_context
-            _original_init(self, *args, **kwargs)
-
-        _OriginalTCPConnector.__init__ = _patched_init
-        print(f"[SSL-FIX] Patched aiohttp.TCPConnector: SSL_VERIFY={_ssl_verify}")
-
-        # Patch aiohttp.ClientSession to disable SSL verification
-        try:
-            _original_request = aiohttp.ClientSession._request
-
-            async def _patched_request(self, *args, **kwargs):
-                # Force ssl=False to disable SSL verification
-                kwargs["ssl"] = False
-                return await _original_request(self, *args, **kwargs)
-
-            aiohttp.ClientSession._request = _patched_request
-            print(f"[SSL-FIX] Patched aiohttp.ClientSession._request to use ssl=False")
-        except Exception as e:
-            print(f"[SSL-FIX] Failed to patch ClientSession: {e}")
-
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"[SSL-FIX] Failed to patch: {e}")
-
+from .ssl_patch import _patch_aiohttp_connector
+from .quota_reporter import QuotaReporter
+from .anthropic_adapter import AnthropicAdapter
 
 _patch_aiohttp_connector()
 
@@ -115,7 +38,6 @@ from rotator_library.utils.json_utils import json_deep_copy
 import re
 import codecs
 import time
-import os
 import random
 import uuid
 import httpx
@@ -123,6 +45,7 @@ import litellm
 from litellm.exceptions import APIConnectionError, BadRequestError, InvalidRequestError
 from litellm.litellm_core_utils.token_counter import token_counter
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, AsyncGenerator, Optional, Union, Tuple
 from urllib.parse import urlparse
@@ -144,23 +67,23 @@ _STREAM_REQUIRED_PROVIDERS = {
 
 from .usage_manager import UsageManager
 from .failure_logger import log_failure, configure_failure_logger
-from .error_handler import (
-    ClassifiedError,
+from .error_types import (
     PreRequestCallbackError,
     CredentialNeedsReauthError,
-    classify_error,
     NoAvailableKeysError,
-    should_rotate_on_error,
-    should_retry_same_key,
     RequestErrorAccumulator,
     mask_credential,
     ContextOverflowError,
+    ClassifiedError,
+)
+from .error_handler import (
+    classify_error,
+    should_rotate_on_error,
+    should_retry_same_key,
     get_retry_backoff,
     handle_429_error,
     ThrottleActionType,
-    get_all_providers,
     is_provider_abort,
-    classify_stream_error,
 )
 from .provider_config import ProviderConfig
 from .http_client_pool import HttpClientPool, get_http_pool, close_http_pool
@@ -168,14 +91,13 @@ from .providers import PROVIDER_PLUGINS
 from .providers.openai_compatible_provider import OpenAICompatibleProvider
 from .providers.utilities import (
     DEFAULT_GENERIC_SAFETY_SETTINGS,
-    DEFAULT_GEMINI_SAFETY_SETTINGS_MAP,
     DEFAULT_SAFETY_SETTINGS,
 )
 from .request_sanitizer import sanitize_request_payload
 from .model_info_service import get_model_info_service
 from .cooldown_manager import CooldownManager
-from .circuit_breaker import ProviderCircuitBreaker, CircuitState
-from .ip_throttle_detector import IPThrottleDetector, ThrottleScope
+from .circuit_breaker import ProviderCircuitBreaker
+from .ip_throttle_detector import IPThrottleDetector
 from .credential_manager import CredentialManager
 from .background_refresher import BackgroundRefresher
 from .anthropic_compat.models import (
@@ -184,9 +106,9 @@ from .anthropic_compat.models import (
 )
 from .model_definitions import ModelDefinitions
 from .transaction_logger import TransactionLogger
-from .utils.paths import get_default_root, get_logs_dir, get_oauth_dir, get_data_file
+from .utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from .utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
-from .utils.model_utils import extract_provider_from_model, normalize_model_string
+from .utils.model_utils import extract_provider_from_model, normalize_model_string, get_or_create_provider_instance
 from .utils.provider_registry import get_provider_registry
 from .config import (
     DEFAULT_MAX_RETRIES,
@@ -235,6 +157,22 @@ class StreamedAPIError(Exception):
 
 
 from .utils.json_utils import STREAM_DONE  # noqa: E402 – after litellm patching
+
+
+@dataclass
+class _RetryContext:
+    model: str
+    provider: str
+    credentials_for_provider: list
+    provider_plugin: Any
+    deadline: float
+    transaction_logger: Any
+    tried_creds: set = field(default_factory=set)
+    last_exception: Optional[Exception] = None
+    parent_log_dir: Optional[str] = None
+    credential_priorities: dict = field(default_factory=dict)
+    credential_tier_names: dict = field(default_factory=dict)
+    error_accumulator: Any = None
 
 
 class RotatingClient:
@@ -1587,36 +1525,25 @@ class RotatingClient:
             )
             return None
 
-        if provider_name in self._provider_plugins:
-            return self._provider_instances.get_or_create(provider_name, self._provider_plugins[provider_name])
+        # Try shared lazy-load path first
+        result = get_or_create_provider_instance(
+            provider_name, self._provider_plugins, self._provider_instances
+        )
+        if result is not None:
+            return result
 
-        # Lazy-load provider via plugin system (e.g. zai, chutes)
-        from .providers import get_provider as _lazy_get_provider
-        lazy_class = _lazy_get_provider(provider_name)
-        if lazy_class is not None:
-            self._provider_plugins[provider_name] = lazy_class
-            return self._provider_instances.get_or_create(provider_name, lazy_class)
-
+        # Client-specific fallback: custom OpenAI-compatible providers
         if self._is_custom_openai_compatible_provider(provider_name):
-            # Create a generic OpenAI-compatible provider for custom providers
             try:
                 instance = OpenAICompatibleProvider(provider_name)
                 self._provider_instances.register(provider_name, instance)
                 return instance
             except ValueError:
-                # If the provider doesn't have the required environment variables, treat it as a standard provider
                 return None
         else:
             # Check if already registered (e.g. by usage_manager)
             return self._provider_instances.get(provider_name)
 
-    def _normalize_model_string(self, model: str) -> str:
-        """Normalize incoming model string for consistent routing and matching."""
-        return normalize_model_string(model)
-
-    def _extract_provider_from_model(self, model: str) -> str:
-        """Extract provider prefix from provider/model format safely."""
-        return extract_provider_from_model(model)
 
     def _resolve_model_id(self, model: str, provider: str) -> str:
         """
@@ -2142,20 +2069,13 @@ class RotatingClient:
             "error_accumulator": error_accumulator,
         }
 
-    async def _execute_with_retry(
-        self,
-        api_call: callable,
-        request: Optional[Any],
-        pre_request_callback: Optional[callable] = None,
-        **kwargs,
-    ) -> Any:
-        """A generic retry mechanism for non-streaming API calls."""
-        model = self._normalize_model_string(kwargs.get("model"))
+    async def _prepare_retry_context(self, **kwargs) -> _RetryContext:
+        model = normalize_model_string(kwargs.get("model"))
         if not model:
             raise ValueError("'model' is a required parameter.")
         kwargs["model"] = model
 
-        provider = self._extract_provider_from_model(model)
+        provider = extract_provider_from_model(model)
         if not provider:
             raise ValueError("'model' must be in 'provider/model' format.")
         if provider not in self.all_credentials:
@@ -2163,13 +2083,9 @@ class RotatingClient:
                 f"No API keys or OAuth credentials configured for provider: {provider}"
             )
 
-        # Extract internal logging parameters (not passed to API)
         parent_log_dir = kwargs.pop("_parent_log_dir", None)
-
-        # Establish a global deadline for the entire request lifecycle.
         deadline = time.time() + self.global_timeout
 
-        # Create transaction logger if request logging is enabled
         transaction_logger = None
         if self.enable_request_logging:
             transaction_logger = TransactionLogger(
@@ -2181,13 +2097,11 @@ class RotatingClient:
             )
             transaction_logger.log_request(kwargs)
 
-        # Create a mutable copy of the keys and rotate it for round-robin selection.
         credentials_for_provider = list(self.all_credentials[provider])
         offset = self._cred_offset.get(provider, 0)
         self._cred_offset[provider] = (offset + 1) % len(credentials_for_provider)
         credentials_for_provider = credentials_for_provider[offset:] + credentials_for_provider[:offset]
 
-        # Filter out credentials that are unavailable (queued for re-auth)
         provider_plugin = self._get_provider_instance(provider)
         if provider_plugin and hasattr(provider_plugin, "is_credential_available"):
             available_creds = [
@@ -2197,22 +2111,47 @@ class RotatingClient:
             ]
             if available_creds:
                 credentials_for_provider = available_creds
-            # If all credentials are unavailable, keep the original list
-            # (better to try unavailable creds than fail immediately)
 
-        tried_creds = set()
-        last_exception = None
-
-        # Prepare common request context (model resolution, tier filtering, priority cache, circuit breaker)
         ctx = await self._prepare_request_context(
             model, provider, credentials_for_provider, provider_plugin
         )
-        model = ctx["model"]
-        kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
-        credentials_for_provider = ctx["credentials"]
-        credential_priorities = ctx["credential_priorities"]
-        credential_tier_names = ctx["credential_tier_names"]
-        error_accumulator = ctx["error_accumulator"]
+
+        return _RetryContext(
+            model=ctx["model"],
+            provider=provider,
+            credentials_for_provider=ctx["credentials"],
+            provider_plugin=provider_plugin,
+            deadline=deadline,
+            transaction_logger=transaction_logger,
+            tried_creds=set(),
+            last_exception=None,
+            parent_log_dir=parent_log_dir,
+            credential_priorities=ctx["credential_priorities"],
+            credential_tier_names=ctx["credential_tier_names"],
+            error_accumulator=ctx["error_accumulator"],
+        )
+
+    async def _execute_with_retry(
+        self,
+        api_call: callable,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        """A generic retry mechanism for non-streaming API calls."""
+        rc = await self._prepare_retry_context(**kwargs)
+        kwargs["model"] = rc.model
+        model = rc.model
+        provider = rc.provider
+        credentials_for_provider = rc.credentials_for_provider
+        provider_plugin = rc.provider_plugin
+        deadline = rc.deadline
+        transaction_logger = rc.transaction_logger
+        tried_creds = rc.tried_creds
+        last_exception = rc.last_exception
+        credential_priorities = rc.credential_priorities
+        credential_tier_names = rc.credential_tier_names
+        error_accumulator = rc.error_accumulator
 
         while (
             len(tried_creds) < len(credentials_for_provider)
@@ -2879,66 +2818,21 @@ class RotatingClient:
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """A dedicated generator for retrying streaming completions with full request preparation and per-key retries."""
-        model = self._normalize_model_string(kwargs.get("model"))
-        if not model:
-            raise ValueError("'model' is a required parameter.")
-        kwargs["model"] = model
-
-        provider = self._extract_provider_from_model(model)
-        if not provider:
-            raise ValueError("'model' must be in 'provider/model' format.")
-
-        # Extract internal logging parameters (not passed to API)
-        parent_log_dir = kwargs.pop("_parent_log_dir", None)
-
-        # Create a mutable copy of the keys and rotate it for round-robin selection.
-        credentials_for_provider = list(self.all_credentials[provider])
-        offset = self._cred_offset.get(provider, 0)
-        self._cred_offset[provider] = (offset + 1) % len(credentials_for_provider)
-        credentials_for_provider = credentials_for_provider[offset:] + credentials_for_provider[:offset]
-
-        # Filter out credentials that are unavailable (queued for re-auth)
-        provider_plugin = self._get_provider_instance(provider)
-        if provider_plugin and hasattr(provider_plugin, "is_credential_available"):
-            available_creds = [
-                cred
-                for cred in credentials_for_provider
-                if provider_plugin.is_credential_available(cred)
-            ]
-            if available_creds:
-                credentials_for_provider = available_creds
-            # If all credentials are unavailable, keep the original list
-            # (better to try unavailable creds than fail immediately)
-
-        deadline = time.time() + self.global_timeout
-
-        # Create transaction logger if request logging is enabled
-        transaction_logger = None
-        if self.enable_request_logging:
-            transaction_logger = TransactionLogger(
-                provider,
-                model,
-                enabled=True,
-                api_format="oai",
-                parent_dir=parent_log_dir,
-            )
-            transaction_logger.log_request(kwargs)
-
-        tried_creds = set()
-        last_exception = None
+        rc = await self._prepare_retry_context(**kwargs)
+        kwargs["model"] = rc.model
+        model = rc.model
+        provider = rc.provider
+        credentials_for_provider = rc.credentials_for_provider
+        provider_plugin = rc.provider_plugin
+        deadline = rc.deadline
+        transaction_logger = rc.transaction_logger
+        tried_creds = rc.tried_creds
+        last_exception = rc.last_exception
+        credential_priorities = rc.credential_priorities
+        credential_tier_names = rc.credential_tier_names
+        error_accumulator = rc.error_accumulator
 
         consecutive_quota_failures = 0
-
-        # Prepare common request context (model resolution, tier filtering, priority cache, circuit breaker)
-        ctx = await self._prepare_request_context(
-            model, provider, credentials_for_provider, provider_plugin
-        )
-        model = ctx["model"]
-        kwargs["model"] = model  # Ensure kwargs has the resolved model for litellm
-        credentials_for_provider = ctx["credentials"]
-        credential_priorities = ctx["credential_priorities"]
-        credential_tier_names = ctx["credential_tier_names"]
-        error_accumulator = ctx["error_accumulator"]
 
         try:
             while (
@@ -3948,9 +3842,9 @@ class RotatingClient:
         # These providers return 400/406 errors when stream_options is sent
         STREAM_OPTIONS_UNSUPPORTED_PROVIDERS = {"iflow", "kilocode"}
 
-        model = self._normalize_model_string(kwargs.get("model", ""))
+        model = normalize_model_string(kwargs.get("model", ""))
         kwargs["model"] = model
-        provider = self._extract_provider_from_model(model)
+        provider = extract_provider_from_model(model)
 
         # Remove stream_options for providers that don't support it
         if (
@@ -4056,7 +3950,7 @@ class RotatingClient:
         # Add preprompt tokens for Antigravity provider
         # The Antigravity provider injects system instructions during actual API calls,
         # so we need to account for those tokens in the count
-        provider = self._extract_provider_from_model(model)
+        provider = extract_provider_from_model(model)
         if provider == "antigravity":
             try:
                 from .providers.antigravity_provider import (
@@ -4173,317 +4067,22 @@ class RotatingClient:
                 flat_models.extend(models)
             return flat_models
 
+    @property
+    def quota_reporter(self):
+        if not hasattr(self, '_quota_reporter_instance'):
+            self._quota_reporter_instance = QuotaReporter(
+                self.usage_manager,
+                self._provider_plugins,
+                self._provider_instances,
+                self.all_credentials,
+            )
+        return self._quota_reporter_instance
+
     async def get_quota_stats(
         self,
         provider_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Get quota and usage stats for all credentials.
-
-        This returns cached/disk data aggregated by provider.
-        For provider-specific quota info (e.g., Antigravity quota groups),
-        it enriches the data from provider plugins.
-
-        Args:
-            provider_filter: If provided, only return stats for this provider
-
-        Returns:
-            Complete stats dict ready for the /v1/quota-stats endpoint
-        """
-        # Get base stats from usage manager
-        stats = await self.usage_manager.get_stats_for_endpoint(provider_filter)
-
-        # Enrich with provider-specific quota data
-        for provider, prov_stats in stats.get("providers", {}).items():
-            provider_class = self._provider_plugins.get(provider)
-            if not provider_class:
-                continue
-
-            # Get or create provider instance
-            provider_instance = self._provider_instances.get_or_create(provider, provider_class)
-            # Check if provider has quota tracking (like Antigravity)
-            if hasattr(provider_instance, "_get_effective_quota_groups"):
-                # Add quota group summary
-                quota_groups = provider_instance._get_effective_quota_groups()
-                prov_stats["quota_groups"] = {}
-
-                for group_name, group_models in quota_groups.items():
-                    group_stats = {
-                        "models": group_models,
-                        "credentials_total": 0,
-                        "credentials_exhausted": 0,
-                        "avg_remaining_pct": 0,
-                        "total_remaining_pcts": [],
-                        # Total requests tracking across all credentials
-                        "total_requests_used": 0,
-                        "total_requests_max": 0,
-                        # Tier breakdown: tier_name -> {"total": N, "active": M}
-                        "tiers": {},
-                    }
-
-                    # Calculate per-credential quota for this group
-                    for cred in prov_stats.get("credentials", []):
-                        models_data = cred.get("models", {})
-                        group_stats["credentials_total"] += 1
-
-                        # Track tier - get directly from provider cache since cred["tier"] not set yet
-                        tier = cred.get("tier")
-                        if not tier and hasattr(
-                            provider_instance, "project_tier_cache"
-                        ):
-                            cred_path = cred.get("full_path", "")
-                            tier = provider_instance.project_tier_cache.get(cred_path)
-                        tier = tier or "unknown"
-
-                        # Initialize tier entry if needed with priority for sorting
-                        if tier not in group_stats["tiers"]:
-                            priority = 10  # default
-                            if hasattr(provider_instance, "_resolve_tier_priority"):
-                                priority = provider_instance._resolve_tier_priority(
-                                    tier
-                                )
-                            group_stats["tiers"][tier] = {
-                                "total": 0,
-                                "active": 0,
-                                "priority": priority,
-                            }
-                        group_stats["tiers"][tier]["total"] += 1
-
-                        # Find model with VALID baseline (not just any model with stats)
-                        model_stats = None
-                        for model in group_models:
-                            candidate = self._find_model_stats_in_data(
-                                models_data, model, provider, provider_instance
-                            )
-                            if candidate:
-                                baseline = candidate.get("baseline_remaining_fraction")
-                                if baseline is not None:
-                                    model_stats = candidate
-                                    break
-                                # Keep first found as fallback (for request counts)
-                                if model_stats is None:
-                                    model_stats = candidate
-
-                        if model_stats:
-                            baseline = model_stats.get("baseline_remaining_fraction")
-                            req_count = model_stats.get("request_count", 0)
-                            max_req = model_stats.get("quota_max_requests") or 0
-
-                            # Accumulate totals (one model per group per credential)
-                            group_stats["total_requests_used"] += req_count
-                            group_stats["total_requests_max"] += max_req
-
-                            if baseline is not None:
-                                remaining_pct = int(baseline * 100)
-                                group_stats["total_remaining_pcts"].append(
-                                    remaining_pct
-                                )
-                                if baseline <= 0:
-                                    group_stats["credentials_exhausted"] += 1
-                                else:
-                                    # Credential is active (has quota remaining)
-                                    group_stats["tiers"][tier]["active"] += 1
-
-                    # Calculate average remaining percentage (per-credential average)
-                    if group_stats["total_remaining_pcts"]:
-                        group_stats["avg_remaining_pct"] = int(
-                            sum(group_stats["total_remaining_pcts"])
-                            / len(group_stats["total_remaining_pcts"])
-                        )
-                    del group_stats["total_remaining_pcts"]
-
-                    # Calculate total remaining percentage (global)
-                    if group_stats["total_requests_max"] > 0:
-                        used = group_stats["total_requests_used"]
-                        max_r = group_stats["total_requests_max"]
-                        group_stats["total_requests_remaining"] = max_r - used
-                        group_stats["total_remaining_pct"] = max(
-                            0, int((1 - used / max_r) * 100)
-                        )
-                    else:
-                        group_stats["total_requests_remaining"] = 0
-                        # Fallback to avg_remaining_pct when max_requests unavailable
-                        # This handles providers like Firmware that only provide percentage
-                        group_stats["total_remaining_pct"] = group_stats.get(
-                            "avg_remaining_pct"
-                        )
-
-                    prov_stats["quota_groups"][group_name] = group_stats
-
-                # Also enrich each credential with formatted quota group info
-                for cred in prov_stats.get("credentials", []):
-                    cred["model_groups"] = {}
-                    models_data = cred.get("models", {})
-
-                    for group_name, group_models in quota_groups.items():
-                        # Find model with VALID baseline (prefer over any model with stats)
-                        # Also track the best reset_ts across all models in the group
-                        model_stats = None
-                        best_reset_ts = None
-
-                        for model in group_models:
-                            candidate = self._find_model_stats_in_data(
-                                models_data, model, provider, provider_instance
-                            )
-                            if candidate:
-                                # Track the best (latest) reset_ts from any model in group
-                                candidate_reset_ts = candidate.get("quota_reset_ts")
-                                if candidate_reset_ts:
-                                    if (
-                                        best_reset_ts is None
-                                        or candidate_reset_ts > best_reset_ts
-                                    ):
-                                        best_reset_ts = candidate_reset_ts
-
-                                baseline = candidate.get("baseline_remaining_fraction")
-                                if baseline is not None:
-                                    model_stats = candidate
-                                    # Don't break - continue to find best reset_ts
-                                # Keep first found as fallback
-                                if model_stats is None:
-                                    model_stats = candidate
-
-                        if model_stats:
-                            baseline = model_stats.get("baseline_remaining_fraction")
-                            max_req = model_stats.get("quota_max_requests")
-                            req_count = model_stats.get("request_count", 0)
-                            # Use best_reset_ts from any model in the group
-                            reset_ts = best_reset_ts or model_stats.get(
-                                "quota_reset_ts"
-                            )
-
-                            remaining_pct = (
-                                int(baseline * 100) if baseline is not None else None
-                            )
-                            is_exhausted = baseline is not None and baseline <= 0
-
-                            # Format reset time
-                            reset_iso = None
-                            if reset_ts:
-                                try:
-                                    from datetime import datetime, timezone
-
-                                    reset_iso = datetime.fromtimestamp(
-                                        reset_ts, tz=timezone.utc
-                                    ).isoformat()
-                                except (ValueError, OSError):
-                                    pass
-
-                            requests_remaining = (
-                                max(0, max_req - req_count) if max_req else 0
-                            )
-
-                            # Determine display format
-                            # Priority: requests (if max known) > percentage (if baseline available) > unknown
-                            if max_req:
-                                display = f"{requests_remaining}/{max_req}"
-                            elif remaining_pct is not None:
-                                display = f"{remaining_pct}%"
-                            else:
-                                display = "?/?"
-
-                            cred["model_groups"][group_name] = {
-                                "remaining_pct": remaining_pct,
-                                "requests_used": req_count,
-                                "requests_remaining": requests_remaining,
-                                "requests_max": max_req,
-                                "display": display,
-                                "is_exhausted": is_exhausted,
-                                "reset_time_iso": reset_iso,
-                                "models": group_models,
-                                "confidence": self._get_baseline_confidence(
-                                    model_stats
-                                ),
-                            }
-
-                    # Recalculate credential's requests from model_groups
-                    # This fixes double-counting when models share quota groups
-                    if cred.get("model_groups"):
-                        group_requests = sum(
-                            g.get("requests_used", 0)
-                            for g in cred["model_groups"].values()
-                        )
-                        cred["requests"] = group_requests
-
-                        # HACK: Fix global requests if present
-                        # This is a simplified fix that sets global.requests = current group_requests.
-                        # TODO: Properly track archived requests per quota group in usage_manager.py
-                        # so that global stats correctly sum: current_period + archived_periods
-                        # without double-counting models that share quota groups.
-                        # See: usage_manager.py lines 2388-2404 where global stats are built
-                        # by iterating all models (causing double-counting for grouped models).
-                        if cred.get("global"):
-                            cred["global"]["requests"] = group_requests
-
-                    # Try to get email from provider's cache
-                    cred_path = cred.get("full_path", "")
-                    if hasattr(provider_instance, "project_tier_cache"):
-                        tier = provider_instance.project_tier_cache.get(cred_path)
-                        if tier:
-                            cred["tier"] = tier
-
-        return stats
-
-    def _find_model_stats_in_data(
-        self,
-        models_data: Dict[str, Any],
-        model: str,
-        provider: str,
-        provider_instance: Any,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Find model stats in models_data, trying various name variants.
-
-        Handles aliased model names (e.g., gemini-3-pro-preview -> gemini-3-pro-high)
-        by using the provider's _user_to_api_model() mapping.
-
-        Args:
-            models_data: Dict of model_name -> stats from credential
-            model: Model name to look up (user-facing name)
-            provider: Provider name for prefixing
-            provider_instance: Provider instance for alias methods
-
-        Returns:
-            Model stats dict if found, None otherwise
-        """
-        # Try direct match with and without provider prefix
-        prefixed_model = f"{provider}/{model}"
-        model_stats = models_data.get(prefixed_model) or models_data.get(model)
-
-        if model_stats:
-            return model_stats
-
-        # Try with API model name (e.g., gemini-3-pro-preview -> gemini-3-pro-high)
-        if hasattr(provider_instance, "_user_to_api_model"):
-            api_model = provider_instance._user_to_api_model(model)
-            if api_model != model:
-                prefixed_api = f"{provider}/{api_model}"
-                model_stats = models_data.get(prefixed_api) or models_data.get(
-                    api_model
-                )
-
-        return model_stats
-
-    def _get_baseline_confidence(self, model_stats: Dict) -> str:
-        """
-        Determine confidence level based on baseline age.
-
-        Args:
-            model_stats: Model statistics dict with baseline_fetched_at
-
-        Returns:
-            "high" | "medium" | "low"
-        """
-        baseline_fetched_at = model_stats.get("baseline_fetched_at")
-        if not baseline_fetched_at:
-            return "low"
-
-        age_seconds = time.time() - baseline_fetched_at
-        if age_seconds < 300:  # 5 minutes
-            return "high"
-        elif age_seconds < 1800:  # 30 minutes
-            return "medium"
-        return "low"
+        return await self.quota_reporter.get_quota_stats(provider_filter)
 
     async def reload_usage_from_disk(self) -> None:
         """
@@ -4498,101 +4097,21 @@ class RotatingClient:
         provider: Optional[str] = None,
         credential: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Force refresh quota from external API.
-
-        For Antigravity, this fetches live quota data from the API.
-        For other providers, this is a no-op (just reloads from disk).
-
-        Args:
-            provider: If specified, only refresh this provider
-            credential: If specified, only refresh this specific credential
-
-        Returns:
-            Refresh result dict with success/failure info
-        """
-        result = {
-            "action": "force_refresh",
-            "scope": (
-                "credential" if credential else ("provider" if provider else "all")
-            ),
-            "provider": provider,
-            "credential": credential,
-            "credentials_refreshed": 0,
-            "success_count": 0,
-            "failed_count": 0,
-            "duration_ms": 0,
-            "errors": [],
-        }
-
-        start_time = time.time()
-
-        # Determine which providers to refresh
-        if provider:
-            providers_to_refresh = (
-                [provider] if provider in self.all_credentials else []
-            )
-        else:
-            providers_to_refresh = list(self.all_credentials.keys())
-
-        for prov in providers_to_refresh:
-            provider_class = self._provider_plugins.get(prov)
-            if not provider_class:
-                continue
-
-            # Get or create provider instance
-            provider_instance = self._provider_instances.get_or_create(prov, provider_class)
-
-            # Check if provider supports quota refresh (like Antigravity)
-            if hasattr(provider_instance, "fetch_initial_baselines"):
-                # Get credentials to refresh
-                if credential:
-                    # Find full path for this credential
-                    creds_to_refresh = []
-                    for cred_path in self.all_credentials.get(prov, []):
-                        if cred_path.endswith(credential) or cred_path == credential:
-                            creds_to_refresh.append(cred_path)
-                            break
-                else:
-                    creds_to_refresh = self.all_credentials.get(prov, [])
-
-                if not creds_to_refresh:
-                    continue
-
-                try:
-                    # Fetch live quota from API for ALL specified credentials
-                    quota_results = await provider_instance.fetch_initial_baselines(
-                        creds_to_refresh
-                    )
-
-                    # Store baselines in usage manager
-                    if hasattr(provider_instance, "_store_baselines_to_usage_manager"):
-                        stored = (
-                            await provider_instance._store_baselines_to_usage_manager(
-                                quota_results, self.usage_manager
-                            )
-                        )
-                        result["success_count"] += stored
-
-                    result["credentials_refreshed"] += len(creds_to_refresh)
-
-                    # Count failures
-                    for cred_path, data in quota_results.items():
-                        if data.get("status") != "success":
-                            result["failed_count"] += 1
-                            result["errors"].append(
-                                f"{Path(cred_path).name}: {data.get('error', 'Unknown error')}"
-                            )
-
-                except Exception as e:
-                    lib_logger.error(f"Failed to refresh quota for {prov}: {e}")
-                    result["errors"].append(f"{prov}: {str(e)}")
-                    result["failed_count"] += len(creds_to_refresh)
-
-        result["duration_ms"] = int((time.time() - start_time) * 1000)
-        return result
+        return await self.quota_reporter.force_refresh_quota(provider, credential)
 
     # --- Anthropic API Compatibility Methods ---
+
+    @property
+    def anthropic_adapter(self):
+        if not hasattr(self, '_anthropic_adapter_instance'):
+            self._anthropic_adapter_instance = AnthropicAdapter(
+                self.acompletion,
+                self.token_count,
+                extract_provider_from_model,
+                self.all_credentials,
+                self.enable_request_logging,
+            )
+        return self._anthropic_adapter_instance
 
     async def anthropic_messages(
         self,
@@ -4601,189 +4120,12 @@ class RotatingClient:
         pre_request_callback: Optional[callable] = None,
         raw_body_data: Optional[dict] = None,
     ) -> Any:
-        """
-        Handle Anthropic Messages API requests.
-
-        This method accepts requests in Anthropic's format, translates them to
-        OpenAI format internally, processes them through the existing acompletion
-        method, and returns responses in Anthropic's format.
-
-        Args:
-            request: An AnthropicMessagesRequest object
-            raw_request: Optional raw request object for disconnect checks
-            pre_request_callback: Optional async callback before each API request
-
-        Returns:
-            For non-streaming: dict in Anthropic Messages format
-            For streaming: AsyncGenerator yielding Anthropic SSE format strings
-        """
-        from .anthropic_compat import (
-            translate_anthropic_request,
-            openai_to_anthropic_response,
-            anthropic_streaming_wrapper,
+        return await self.anthropic_adapter.anthropic_messages(
+            request, raw_request, pre_request_callback, raw_body_data
         )
-        from .token_calculator import count_input_tokens
-        import uuid
-
-        request_id = f"msg_{uuid.uuid4().hex[:24]}"
-        original_model = request.model
-
-        # Extract provider from model for logging
-        provider = self._extract_provider_from_model(original_model) or "unknown"
-
-        # Create Anthropic transaction logger if request logging is enabled
-        anthropic_logger = None
-        if self.enable_request_logging:
-            anthropic_logger = TransactionLogger(
-                provider,
-                original_model,
-                enabled=True,
-                api_format="ant",
-            )
-            # Log original Anthropic request
-            anthropic_logger.log_request(
-                raw_body_data if raw_body_data is not None else request.model_dump(exclude_none=True),
-                filename="anthropic_request.json",
-            )
-
-        # Translate Anthropic request to OpenAI format
-        openai_request = translate_anthropic_request(request)
-
-        # Pass parent log directory to acompletion for nested logging
-        if anthropic_logger and anthropic_logger.log_dir:
-            openai_request["_parent_log_dir"] = anthropic_logger.log_dir
-
-        # [FIX] Don't pass raw_request to LiteLLM - it may contain client headers
-        # (x-api-key, anthropic-version, etc.) that shouldn't be forwarded to providers
-        # We only use raw_request for disconnect checking, not for passing to LiteLLM
-        litellm_request = None  # Don't pass request object to LiteLLM
-
-        if request.stream:
-            # Streaming response
-            # [FIX] Don't pass raw_request to LiteLLM - it may contain client headers
-            # (x-api-key, anthropic-version, etc.) that shouldn't be forwarded to providers
-
-            # Pre-compute input tokens for fallback when provider doesn't return usage
-            # This is critical for Claude Code's context management to work correctly
-            # with providers like Kilocode that don't support stream_options
-            precomputed_input_tokens = None
-            try:
-                messages = openai_request.get("messages", [])
-                tools = openai_request.get("tools")
-                tool_choice = openai_request.get("tool_choice")
-                if messages:
-                    precomputed_input_tokens = count_input_tokens(
-                        messages=messages,
-                        model=original_model,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                    )
-                    lib_logger.debug(
-                        f"Pre-computed input tokens for {original_model}: {precomputed_input_tokens}"
-                    )
-            except Exception as e:
-                lib_logger.warning(f"Failed to pre-compute input tokens: {e}")
-
-            response_generator = self.acompletion(
-                pre_request_callback=pre_request_callback,
-                **openai_request,
-            )
-
-            # Create disconnect checker if raw_request provided
-            is_disconnected = None
-            if raw_request is not None and hasattr(raw_request, "is_disconnected"):
-                is_disconnected = raw_request.is_disconnected
-
-            # Return the streaming wrapper
-            # Note: For streaming, the anthropic response logging happens in the wrapper
-            return anthropic_streaming_wrapper(
-                openai_stream=response_generator,
-                original_model=original_model,
-                request_id=request_id,
-                is_disconnected=is_disconnected,
-                transaction_logger=anthropic_logger,
-                precomputed_input_tokens=precomputed_input_tokens,
-            )
-        else:
-            # Non-streaming response
-            # [FIX] Don't pass raw_request to LiteLLM - it may contain client headers
-            # (x-api-key, anthropic-version, etc.) that shouldn't be forwarded to providers
-            response = await self.acompletion(
-                pre_request_callback=pre_request_callback,
-                **openai_request,
-            )
-
-            # Convert OpenAI response to Anthropic format
-            openai_response = (
-                response.model_dump()
-                if hasattr(response, "model_dump")
-                else dict(response)
-            )
-            anthropic_response = openai_to_anthropic_response(
-                openai_response, original_model
-            )
-
-            # Override the ID with our request ID
-            anthropic_response["id"] = request_id
-
-            # Log Anthropic response
-            if anthropic_logger:
-                anthropic_logger.log_response(
-                    anthropic_response,
-                    filename="anthropic_response.json",
-                )
-
-            return anthropic_response
 
     async def anthropic_count_tokens(
         self,
         request: "AnthropicCountTokensRequest",
     ) -> dict:
-        """
-        Handle Anthropic count_tokens API requests.
-
-        Counts the number of tokens that would be used by a Messages API request.
-        This is useful for estimating costs and managing context windows.
-
-        Args:
-            request: An AnthropicCountTokensRequest object
-
-        Returns:
-            Dict with input_tokens count in Anthropic format
-        """
-        from .anthropic_compat import (
-            anthropic_to_openai_messages,
-            anthropic_to_openai_tools,
-        )
-
-        anthropic_request = request.model_dump(exclude_none=True)
-
-        openai_messages = anthropic_to_openai_messages(
-            anthropic_request.get("messages", []), anthropic_request.get("system")
-        )
-
-        # Count tokens for messages
-        message_tokens = self.token_count(
-            model=request.model,
-            messages=openai_messages,
-        )
-
-        # Count tokens for tools if present
-        tool_tokens = 0
-        if request.tools:
-            # Tools add tokens based on their definitions
-            # Convert to JSON string and count tokens for tool definitions
-            openai_tools = anthropic_to_openai_tools(
-                [tool.model_dump() for tool in request.tools]
-            )
-            if openai_tools:
-                # Serialize tools to count their token contribution
-                tools_text = orjson.dumps(openai_tools).decode()
-                tool_tokens = self.token_count(
-                    model=request.model,
-                    text=tools_text,
-                )
-
-        total_tokens = message_tokens + tool_tokens
-
-        return {"input_tokens": total_tokens}
+        return await self.anthropic_adapter.anthropic_count_tokens(request)

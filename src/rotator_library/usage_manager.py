@@ -15,14 +15,14 @@ from collections import OrderedDict
 import aiofiles
 import litellm
 
-from .error_handler import ClassifiedError, NoAvailableKeysError, mask_credential
+from .error_types import ClassifiedError, NoAvailableKeysError, mask_credential
 from .providers import PROVIDER_PLUGINS
 from .async_locks import ReadWriteLock
 from .utils.resilient_io import ResilientStateWriter
 from .utils.provider_locks import ProviderLockManager
 from .batched_persistence import UsagePersistenceManager
 from .utils.paths import get_data_file
-from .utils.model_utils import extract_provider_from_model, normalize_model_string
+from .utils.model_utils import extract_provider_from_model, normalize_model_string, get_or_create_provider_instance
 from .utils.provider_registry import get_provider_registry
 from .config import (
     DEFAULT_FAIR_CYCLE_DURATION,
@@ -200,21 +200,6 @@ class UsageManager:
             )
         else:
             self.daily_reset_time_utc = None
-
-    async def _get_provider_lock(self, provider: str) -> asyncio.Lock:
-        """
-        Get or create a lock for a specific provider.
-
-        This enables parallel access to different providers' data while
-        maintaining thread-safety within each provider's operations.
-
-        Args:
-            provider: Provider name
-
-        Returns:
-            asyncio.Lock specific to this provider
-        """
-        return await self._provider_lock_manager.get_lock(provider)
 
     def _get_rotation_mode(self, provider: str) -> str:
         """
@@ -975,19 +960,9 @@ class UsageManager:
         Returns:
             Provider plugin instance or None
         """
-        if not provider:
-            return None
-
-        plugin_class = self.provider_plugins.get(provider)
-        if not plugin_class:
-            # Lazy-load provider via plugin system (e.g. zai, chutes)
-            from .providers import get_provider as _lazy_get_provider
-            plugin_class = _lazy_get_provider(provider)
-            if not plugin_class:
-                return None
-            self.provider_plugins[provider] = plugin_class
-
-        return self._provider_instances.get_or_create(provider, plugin_class)
+        return get_or_create_provider_instance(
+            provider, self.provider_plugins, self._provider_instances
+        )
 
     def _get_usage_reset_config(self, credential: str) -> Optional[Dict[str, Any]]:
         """
@@ -1155,7 +1130,7 @@ class UsageManager:
 
         return 1
 
-    def _normalize_model(self, credential: str, model: str) -> str:
+    def _normalize_model_for_tracking(self, credential: str, model: str) -> str:
         """
         Normalize model name using provider's mapping.
 
@@ -1176,10 +1151,6 @@ class UsageManager:
             return plugin_instance.normalize_model_for_tracking(model)
 
         return model
-
-    def _extract_provider_from_model(self, model: str) -> str:
-        """Extract provider name from provider/model string safely."""
-        return extract_provider_from_model(model)
 
     def _check_quota_group_cooldown(
         self,
@@ -1333,7 +1304,7 @@ class UsageManager:
             return "quota: 0/? [100%]"
 
         # Normalize model name for consistent lookup (data is stored under normalized names)
-        model = self._normalize_model(key, model)
+        model = self._normalize_model_for_tracking(key, model)
 
         key_data = self._usage_data.get(key, {})
         model_data = key_data.get("models", {}).get(model, {})
@@ -1400,7 +1371,7 @@ class UsageManager:
             return 0
 
         # Normalize model name for consistent lookup (data is stored under normalized names)
-        model = self._normalize_model(key, model)
+        model = self._normalize_model_for_tracking(key, model)
 
         key_data = self._usage_data.get(key, {})
         reset_mode = self._get_reset_mode(key)
@@ -1725,7 +1696,7 @@ class UsageManager:
                 # (cooldowns are stored under normalized names by record_failure)
                 # For providers without normalize_model_for_tracking (non-Antigravity),
                 # this returns the model unchanged, so cooldown lookups work as before.
-                normalized_model = self._normalize_model(key, model)
+                normalized_model = self._normalize_model_for_tracking(key, model)
 
                 # Skip if model-specific cooldown is active
                 model_cooldowns = key_data.get("model_cooldowns", {})
@@ -1783,7 +1754,7 @@ class UsageManager:
                 model_cooldowns = key_data.get("model_cooldowns", {})
 
                 # Check if key-level or model-level cooldown is active
-                normalized_model = self._normalize_model(key, model)
+                normalized_model = self._normalize_model_for_tracking(key, model)
                 model_cd = model_cooldowns.get(normalized_model) or 0
                 if model_cd == 0:
                     model_cd = self._check_quota_group_cooldown(
@@ -1856,7 +1827,7 @@ class UsageManager:
         async with self._data_lock.read():
             for key in credentials:
                 key_data = self._usage_data.get(key, {})
-                normalized_model = self._normalize_model(key, model)
+                normalized_model = self._normalize_model_for_tracking(key, model)
 
                 # Check key-level cooldown
                 key_cooldown = key_data.get("key_cooldown_until") or 0
@@ -2460,7 +2431,7 @@ class UsageManager:
         # For providers without normalize_model_for_tracking (non-Antigravity),
         # this returns the model unchanged, so cooldown lookups work as before.
         normalized_model = (
-            self._normalize_model(available_keys[0], model) if available_keys else model
+            self._normalize_model_for_tracking(available_keys[0], model) if available_keys else model
         )
 
         # This loop continues as long as the global deadline has not been met.
@@ -2513,7 +2484,7 @@ class UsageManager:
                     keys_in_priority = priority_groups[priority_level]
 
                     # Determine selection method based on provider's rotation mode
-                    provider = self._extract_provider_from_model(model)
+                    provider = extract_provider_from_model(model)
                     rotation_mode = self._get_rotation_mode(provider)
 
                     # Fair cycle filtering
@@ -2711,7 +2682,7 @@ class UsageManager:
                 # Original logic when no priorities specified
 
                 # Determine selection method based on provider's rotation mode
-                provider = self._extract_provider_from_model(model)
+                provider = extract_provider_from_model(model)
                 rotation_mode = self._get_rotation_mode(provider)
 
                 # Calculate effective concurrency for default priority (999)
@@ -3008,7 +2979,7 @@ class UsageManager:
         await self._lazy_init()
 
         # Normalize model name to public-facing name for consistent tracking
-        model = self._normalize_model(key, model)
+        model = self._normalize_model_for_tracking(key, model)
 
         async with self._data_lock.write():
             now_ts = time.time()
@@ -3242,7 +3213,7 @@ class UsageManager:
                     f"Recorded usage from response object for key {mask_credential(key)}"
                 )
                 try:
-                    provider_name = self._extract_provider_from_model(model)
+                    provider_name = extract_provider_from_model(model)
                     provider_instance = self._get_provider_instance(provider_name)
 
                     if not provider_instance or getattr(
@@ -3328,7 +3299,7 @@ class UsageManager:
         await self._lazy_init()
 
         # Normalize model name to public-facing name for consistent tracking
-        model = self._normalize_model(key, model)
+        model = self._normalize_model_for_tracking(key, model)
 
         async with self._data_lock.write():
             now_ts = time.time()

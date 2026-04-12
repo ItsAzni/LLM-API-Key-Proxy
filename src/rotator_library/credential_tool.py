@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .utils.paths import get_oauth_dir, get_data_file
+from .utils.terminal_utils import clear_screen
 from .provider_config import LITELLM_PROVIDERS, PROVIDER_CATEGORIES, PROVIDER_BLACKLIST
 from .litellm_providers import (
     SCRAPED_PROVIDERS,
@@ -1096,27 +1097,7 @@ async def _edit_oauth_credential_menu():
         console.print(f"[bold red]Error: {e}[/bold red]")
 
 
-def clear_screen(subtitle: str = "Interactive Credential Setup"):
-    """
-    Cross-platform terminal clear with header display.
 
-    Clears the terminal and displays the application header with an optional subtitle.
-
-    Args:
-        subtitle: The subtitle text to display in the header panel.
-                  Defaults to "Interactive Credential Setup".
-
-    Uses native OS commands instead of ANSI escape sequences:
-    - Windows (conhost & Windows Terminal): cls
-    - Unix-like systems (Linux, Mac): clear
-    """
-    os.system("cls" if os.name == "nt" else "clear")
-    console.print(
-        Panel(
-            f"[bold cyan]{subtitle}[/bold cyan]",
-            title="--- API Key Proxy ---",
-        )
-    )
 
 
 def ensure_env_defaults():
@@ -2553,11 +2534,11 @@ async def main(clear_on_start=True):
 
     # Only show header if we're clearing (standalone mode)
     if clear_on_start:
-        clear_screen()
+        clear_screen("Interactive Credential Setup")
 
     while True:
         # Clear screen between menu selections for cleaner UX
-        clear_screen()
+        clear_screen("Interactive Credential Setup")
 
         # Display credentials summary at the top
         _display_credentials_summary()

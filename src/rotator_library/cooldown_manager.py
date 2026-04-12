@@ -40,13 +40,6 @@ class CooldownManager:
             return parts[0]
         return credential
 
-    async def _get_provider_lock(self, provider: str) -> asyncio.Lock:
-        """
-        Lazily create and return the lock for a given provider.
-        Uses a meta-lock to safely initialize new per-provider locks.
-        """
-        return await self._provider_lock_manager.get_lock(provider)
-
     async def is_cooling_down(self, credential: str) -> bool:
         """Checks if a credential is currently in a cooldown period."""
         # CPython dict reads are GIL-protected; no lock needed for a single lookup.
@@ -60,7 +53,7 @@ class CooldownManager:
         with different durations always keep the longest cooldown.
         """
         provider = self._extract_provider(credential)
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             new_expiry = time.time() + duration
             existing = self._cooldowns.get(credential, 0)

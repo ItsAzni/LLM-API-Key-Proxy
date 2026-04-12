@@ -60,11 +60,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .quota_viewer_config import QuotaViewerConfig
-
-
-def clear_screen():
-    """Clear the terminal screen."""
-    os.system("cls" if os.name == "nt" else "clear")
+from rotator_library.utils.terminal_utils import clear_screen
 
 
 def format_tokens(count: int) -> str:

@@ -126,7 +126,6 @@ class BaseQuotaTracker:
     # ABSTRACT METHODS - Must implement in subclass
     # =========================================================================
 
-    @abstractmethod
     async def _fetch_quota_for_credential(
         self,
         credential_path: str,
@@ -148,9 +147,10 @@ class BaseQuotaTracker:
                 ... provider-specific fields ...
             }
         """
-        pass
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _fetch_quota_for_credential"
+        )
 
-    @abstractmethod
     def _extract_model_quota_from_response(
         self,
         quota_data: Dict[str, Any],
@@ -169,9 +169,10 @@ class BaseQuotaTracker:
             - remaining_fraction: 0.0 to 1.0
             - max_requests: Optional max requests for this model/tier
         """
-        pass
+        remaining = self.get_remaining_fraction(quota_data)
+        prefix = self._get_provider_prefix()
+        return [(prefix, remaining, None)]
 
-    @abstractmethod
     def _get_provider_prefix(self) -> str:
         """
         Get the provider prefix for model names.
@@ -179,7 +180,7 @@ class BaseQuotaTracker:
         Returns:
             Provider prefix (e.g., "gemini_cli", "antigravity")
         """
-        pass
+        return self.provider_env_prefix.lower() if self.provider_env_prefix else self.cache_subdir
 
     # =========================================================================
     # CACHE DIRECTORY HELPERS
@@ -943,7 +944,6 @@ class BaseQuotaTracker:
         clean_model = model.split("/")[-1] if "/" in model else model
         return self._find_model_quota_group(clean_model)
 
-    @abstractmethod
     async def _make_test_request(
         self,
         credential_path: str,
@@ -959,4 +959,4 @@ class BaseQuotaTracker:
         Returns:
             {"success": bool, "error": str | None}
         """
-        pass
+        return {"success": False, "error": "Not supported by this provider"}

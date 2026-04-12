@@ -128,13 +128,6 @@ class ProviderCircuitBreaker:
             list(self._provider_overrides.keys())
         )
 
-    async def _get_provider_lock(self, provider: str) -> asyncio.Lock:
-        """
-        Lazily create and return the lock for a given provider.
-        Uses a meta-lock to safely initialize new per-provider locks.
-        """
-        return await self._provider_lock_manager.get_lock(provider)
-
     def _get_provider_threshold(self, provider: str) -> int:
         """Get failure threshold for a provider (with overrides)."""
         if provider in self._provider_overrides:
@@ -192,7 +185,7 @@ class ProviderCircuitBreaker:
         if circuit is None or circuit.state == CircuitState.CLOSED:
             return True
 
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
@@ -265,7 +258,7 @@ class ProviderCircuitBreaker:
         Args:
         provider: Provider name that succeeded
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
@@ -306,7 +299,7 @@ class ProviderCircuitBreaker:
         Args:
         provider: Provider name that was throttled
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
@@ -360,7 +353,7 @@ class ProviderCircuitBreaker:
         reason: Reason for immediate opening (for logging)
         duration: Custom recovery timeout in seconds (e.g., from retry-after header)
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
             current_time = time.time()
@@ -400,7 +393,7 @@ class ProviderCircuitBreaker:
         Returns:
         Current CircuitState for the provider
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
 
@@ -424,7 +417,7 @@ class ProviderCircuitBreaker:
         providers = list(self._circuits.keys())
 
         async def _read_state(provider: str) -> Tuple[str, Optional[CircuitState]]:
-            lock = await self._get_provider_lock(provider)
+            lock = await self._provider_lock_manager.get_lock(provider)
             async with lock:
                 if provider in self._circuits:
                     return provider, self._circuits[provider].state
@@ -440,7 +433,7 @@ class ProviderCircuitBreaker:
         Args:
         provider: Provider name to reset
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             if provider in self._circuits:
                 self._circuits[provider].reset()
@@ -451,7 +444,7 @@ class ProviderCircuitBreaker:
         providers = list(self._circuits.keys())
 
         for provider in providers:
-            lock = await self._get_provider_lock(provider)
+            lock = await self._provider_lock_manager.get_lock(provider)
             async with lock:
                 if provider in self._circuits:
                     self._circuits[provider].reset()
@@ -467,7 +460,7 @@ class ProviderCircuitBreaker:
         Returns:
         Dictionary with circuit details
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
 
@@ -503,7 +496,7 @@ class ProviderCircuitBreaker:
         Returns:
         Remaining cooldown time in seconds, or 0 if not cooling down
         """
-        lock = await self._get_provider_lock(provider)
+        lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
             if circuit.state == CircuitState.OPEN and circuit.last_failure_time:
@@ -524,7 +517,7 @@ class ProviderCircuitBreaker:
 
         open_circuits = []
         for provider in providers:
-            lock = await self._get_provider_lock(provider)
+            lock = await self._provider_lock_manager.get_lock(provider)
             async with lock:
                 if provider in self._circuits and self._circuits[provider].state == CircuitState.OPEN:
                     open_circuits.append(provider)
