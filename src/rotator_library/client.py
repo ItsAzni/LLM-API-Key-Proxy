@@ -805,9 +805,9 @@ class RotatingClient:
         """
         Process a rate limit error through the unified 429 handler.
 
-        Returns True if IP-level throttle was detected (caller should set
-        ip_throttle_detected = True, or use this method as the condition:
-        ip_throttle_detected |= await self._process_rate_limit(...)).
+        Returns True if IP-level throttle was detected (circuit breaker opened).
+        The caller can use the return value for logging; rotation loops now
+        rely on circuit_breaker.can_attempt() instead of short-circuiting.
         """
         action = await handle_429_error(
             provider=provider,
@@ -2214,13 +2214,9 @@ class RotatingClient:
         credential_tier_names = ctx["credential_tier_names"]
         error_accumulator = ctx["error_accumulator"]
 
-        # Flag to stop rotation when IP-level throttle is detected
-        ip_throttle_detected = False
-
         while (
             len(tried_creds) < len(credentials_for_provider)
             and time.time() < deadline
-            and not ip_throttle_detected
         ):
             current_cred = None
             key_acquired = False
@@ -2232,11 +2228,16 @@ class RotatingClient:
                     break
 
                 # Check circuit breaker before acquiring key
-                # Skip this iteration if circuit is OPEN, allowing rotation to other keys
+                # Back off briefly if circuit is OPEN, then retry
                 if not await self.circuit_breaker.can_attempt(provider):
-                    lib_logger.warning(
-                        f"Circuit breaker OPEN for provider '{provider}', skipping"
+                    remaining = await self.circuit_breaker.get_cooldown_remaining(provider)
+                    backoff = min(remaining, 5.0)
+                    lib_logger.debug(
+                        f"Circuit breaker OPEN for provider '{provider}', "
+                        f"backing off {backoff:.1f}s (recovery in {remaining:.0f}s)"
                     )
+                    if time.time() + backoff < deadline:
+                        await asyncio.sleep(backoff)
                     continue
 
                 # Get count of credentials not on cooldown for this model
@@ -2368,7 +2369,7 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
                                 lib_logger.error(
@@ -2379,7 +2380,7 @@ class RotatingClient:
                             # Only rate_limit errors can indicate IP-level throttling;
                             # quota_exceeded / invalid_request / auth errors are per-credential
                             if classified_error.error_type == "rate_limit":
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
 
@@ -2642,7 +2643,7 @@ class RotatingClient:
                             # Only rate_limit errors can indicate IP-level throttling;
                             # quota_exceeded / invalid_request / auth errors are per-credential
                             if classified_error.error_type == "rate_limit":
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
 
@@ -2755,7 +2756,7 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
                                 lib_logger.error(
@@ -2771,7 +2772,7 @@ class RotatingClient:
                             # Only rate_limit errors can indicate IP-level throttling;
                             # quota_exceeded / invalid_request / auth errors are per-credential
                             if classified_error.error_type == "rate_limit":
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
 
@@ -2829,7 +2830,7 @@ class RotatingClient:
                             # Only rate_limit errors can indicate IP-level throttling;
                             # quota_exceeded / invalid_request / auth errors are per-credential
                             if classified_error.error_type == "rate_limit":
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
 
@@ -2939,14 +2940,10 @@ class RotatingClient:
         credential_tier_names = ctx["credential_tier_names"]
         error_accumulator = ctx["error_accumulator"]
 
-        # Flag to stop rotation when IP-level throttle is detected
-        ip_throttle_detected = False
-
         try:
             while (
                 len(tried_creds) < len(credentials_for_provider)
                 and time.time() < deadline
-                and not ip_throttle_detected
             ):
                 current_cred = None
                 key_acquired = False
@@ -2959,6 +2956,19 @@ class RotatingClient:
                             f"All credentials for provider {provider} have been tried. No more credentials to rotate to."
                         )
                         break
+
+                    # Check circuit breaker before acquiring key
+                    # Back off briefly if circuit is OPEN, then retry
+                    if not await self.circuit_breaker.can_attempt(provider):
+                        remaining = await self.circuit_breaker.get_cooldown_remaining(provider)
+                        backoff = min(remaining, 5.0)
+                        lib_logger.debug(
+                            f"Circuit breaker OPEN for provider '{provider}', "
+                            f"backing off {backoff:.1f}s (recovery in {remaining:.0f}s)"
+                        )
+                        if time.time() + backoff < deadline:
+                            await asyncio.sleep(backoff)
+                        continue
 
                     # Get count of credentials not on cooldown for this model
                     availability_stats = (
@@ -3129,7 +3139,7 @@ class RotatingClient:
 
                                 # Check if this error should trigger rotation
                                 if not should_rotate_on_error(classified_error):
-                                    ip_throttle_detected |= await self._process_rate_limit(
+                                    await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
                                     )
                                     lib_logger.error(
@@ -3140,7 +3150,7 @@ class RotatingClient:
                                 # Only rate_limit errors can indicate IP-level throttling;
                                 # quota_exceeded / invalid_request / auth errors are per-credential
                                 if classified_error.error_type == "rate_limit":
-                                    ip_throttle_detected |= await self._process_rate_limit(
+                                    await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
                                     )
 
@@ -3241,7 +3251,7 @@ class RotatingClient:
 
                                 # Check if this error should trigger rotation
                                 if not should_rotate_on_error(classified_error):
-                                    ip_throttle_detected |= await self._process_rate_limit(
+                                    await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
                                     )
                                     lib_logger.error(
@@ -3252,7 +3262,7 @@ class RotatingClient:
                                 # Only rate_limit errors can indicate IP-level throttling;
                                 # quota_exceeded / invalid_request / auth errors are per-credential
                                 if classified_error.error_type == "rate_limit":
-                                    ip_throttle_detected |= await self._process_rate_limit(
+                                    await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
                                     )
 
@@ -3436,7 +3446,7 @@ class RotatingClient:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, original_exc,
                                     str(original_exc) if original_exc else None, classified_error
                                 )
@@ -3570,7 +3580,7 @@ class RotatingClient:
                                 # Only rate_limit errors can indicate IP-level throttling;
                                 # quota_exceeded / invalid_request / auth errors are per-credential
                                 if classified_error.error_type == "rate_limit":
-                                    ip_throttle_detected |= await self._process_rate_limit(
+                                    await self._process_rate_limit(
                                         provider, current_cred, original_exc,
                                         str(original_exc) if original_exc else None, classified_error
                                     )
@@ -3667,7 +3677,7 @@ class RotatingClient:
                             # Only rate_limit errors can indicate IP-level throttling;
                             # quota_exceeded / invalid_request / auth errors are per-credential
                             if classified_error.error_type == "rate_limit":
-                                ip_throttle_detected |= await self._process_rate_limit(
+                                await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
 

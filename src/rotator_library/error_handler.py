@@ -1271,9 +1271,35 @@ async def handle_429_error(
             await circuit_breaker.open_immediately(
                 provider, reason=action.reason, duration=action.cooldown_seconds
             )
+        # Apply per-credential cooldowns to all affected credentials
+        # so they are properly tracked when the circuit recovers
+        if cooldown_manager is not None and action.affected_credentials:
+            for affected_cred in action.affected_credentials:
+                await cooldown_manager.start_cooldown(affected_cred, action.cooldown_seconds)
         return action
 
-    # Step 2: Record 429 and correlate with other credentials
+    # Step 2: For PROXY_PROVIDERS, skip IP throttle correlation entirely.
+    # These providers aggregate multiple backends or use shared quotas;
+    # 429 on multiple keys does NOT mean IP-level throttle.
+    if provider and provider in PROXY_PROVIDERS:
+        cooldown = retry_after or RATE_LIMIT_DEFAULT_COOLDOWN
+        lib_logger.debug(
+            f"Skipping IP throttle correlation for proxy provider '{provider}'. "
+            f"Credential-level cooldown: {cooldown}s."
+        )
+        action = ThrottleAction(
+            action_type=ThrottleActionType.CREDENTIAL_COOLDOWN,
+            cooldown_seconds=cooldown,
+            open_circuit_breaker=False,
+            throttle_scope=ThrottleScope.CREDENTIAL,
+            confidence=0.8,
+            reason="Credential-level rate limit (proxy provider, IP correlation skipped)",
+        )
+        if cooldown_manager is not None:
+            await cooldown_manager.start_cooldown(credential, action.cooldown_seconds)
+        return action
+
+    # Step 3: Record 429 and correlate with other credentials
     assessment = ip_throttle_detector.record_429(
         provider=provider,
         credential=mask_credential(credential),
@@ -1281,7 +1307,7 @@ async def handle_429_error(
         retry_after=retry_after,
     )
 
-    # Step 3: Determine action based on assessment scope
+    # Step 4: Determine action based on assessment scope
     cooldown = max(retry_after or 0, assessment.suggested_cooldown)
     if cooldown == 0:
         cooldown = RATE_LIMIT_DEFAULT_COOLDOWN
@@ -1308,6 +1334,11 @@ async def handle_429_error(
             await circuit_breaker.open_immediately(
                 provider, reason=action.reason, duration=action.cooldown_seconds
             )
+        # Apply per-credential cooldowns to all affected credentials
+        # so they are properly tracked when the circuit recovers
+        if cooldown_manager is not None and action.affected_credentials:
+            for affected_cred in action.affected_credentials:
+                await cooldown_manager.start_cooldown(affected_cred, action.cooldown_seconds)
         return action
 
     # Step 4: Single credential throttle
@@ -1818,6 +1849,21 @@ def classify_429_with_throttle_detection(
         ClassifiedError with throttle_assessment populated if IP throttle detected
     """
     retry_after = get_retry_after(e)
+
+    # For PROXY_PROVIDERS, skip IP throttle correlation entirely
+    if provider and provider in PROXY_PROVIDERS:
+        error_body_lower = (error_body or "").lower()
+        if "quota" in error_body_lower or "resource_exhausted" in error_body_lower:
+            error_type = "quota_exceeded"
+        else:
+            error_type = "rate_limit"
+        return ClassifiedError(
+            error_type=error_type,
+            original_exception=e,
+            status_code=429,
+            retry_after=retry_after,
+        )
+
     detector = get_ip_throttle_detector()
 
     # Record the 429 and get throttle assessment

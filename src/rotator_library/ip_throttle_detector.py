@@ -99,7 +99,7 @@ class IPThrottleDetector:
 
     # Configuration constants
     DEFAULT_WINDOW_SECONDS = 10
-    DEFAULT_MIN_CREDENTIALS = 2
+    DEFAULT_MIN_CREDENTIALS = 3
     DEFAULT_IP_COOLDOWN = 30
     DEFAULT_CREDENTIAL_COOLDOWN = 10
     MAX_RECORDS_PER_PROVIDER = 100  # Memory limit per provider
@@ -286,29 +286,6 @@ class IPThrottleDetector:
                     "credentials_throttled": num_unique_credentials,
                     "error_hash_matches": common_hash_count,
                     "window_seconds": self.window_seconds,
-                },
-            )
-
-        # Check for error body correlation with fewer credentials
-        if num_unique_credentials == 2 and common_hash and common_hash_count >= 2:
-            # Two credentials with same error -> likely same throttle source
-            confidence = 0.7
-
-            lib_logger.info(
-                f"Possible IP-level throttle: provider={provider}, "
-                f"credentials={num_unique_credentials}, same_error_body"
-            )
-
-            return ThrottleAssessment(
-                scope=ThrottleScope.IP,
-                confidence=confidence,
-                suggested_cooldown=max(max_retry_after, self.ip_cooldown),
-                affected_credentials=unique_credentials,
-                error_signature=common_hash,
-                details={
-                    "credentials_throttled": num_unique_credentials,
-                    "error_hash_matches": common_hash_count,
-                    "detection_type": "error_body_correlation",
                 },
             )
 
