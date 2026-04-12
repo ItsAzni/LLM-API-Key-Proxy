@@ -3245,11 +3245,12 @@ class UsageManager:
                     provider_name = self._extract_provider_from_model(model)
                     provider_instance = self._get_provider_instance(provider_name)
 
-                    if provider_instance and getattr(
+                    if not provider_instance or getattr(
                         provider_instance, "skip_cost_calculation", False
                     ):
                         lib_logger.debug(
-                            f"Skipping cost calculation for provider '{provider_name}' (custom provider)."
+                            f"Skipping cost calculation for provider '{provider_name}'"
+                            f" ({'no plugin' if not provider_instance else 'custom provider'})."
                         )
                     else:
                         # Suppress LiteLLM's direct print() statements for unknown providers
