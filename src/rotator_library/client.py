@@ -81,8 +81,6 @@ from .error_handler import (
     should_rotate_on_error,
     should_retry_same_key,
     get_retry_backoff,
-    handle_429_error,
-    ThrottleActionType,
     is_provider_abort,
 )
 from .provider_config import ProviderConfig
@@ -95,9 +93,7 @@ from .providers.utilities import (
 )
 from .request_sanitizer import sanitize_request_payload
 from .model_info_service import get_model_info_service
-from .cooldown_manager import CooldownManager
-from .circuit_breaker import ProviderCircuitBreaker
-from .ip_throttle_detector import IPThrottleDetector
+from .resilience import ResilienceOrchestrator
 from .credential_manager import CredentialManager
 from .background_refresher import BackgroundRefresher
 from .anthropic_compat.models import (
@@ -637,14 +633,13 @@ class RotatingClient:
         )  # Track cache validity per provider
 
         self.provider_config = ProviderConfig()
-        self.cooldown_manager = CooldownManager()
-        self.ip_throttle_detector = IPThrottleDetector()
-        self.circuit_breaker = ProviderCircuitBreaker(
-            failure_threshold=CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            recovery_timeout=CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
-            half_open_requests=CIRCUIT_BREAKER_HALF_OPEN_REQUESTS,
+        self._resilience = ResilienceOrchestrator(
             provider_overrides=CIRCUIT_BREAKER_PROVIDER_OVERRIDES,
         )
+        # Expose sub-components for backward compatibility
+        self.cooldown_manager = self._resilience.cooldown
+        self.ip_throttle_detector = self._resilience.ip_throttle
+        self.circuit_breaker = self._resilience.circuit_breaker
         self.litellm_provider_params = litellm_provider_params or {}
         self.ignore_models = ignore_models or {}
         self.whitelist_models = whitelist_models or {}
@@ -747,17 +742,13 @@ class RotatingClient:
         The caller can use the return value for logging; rotation loops now
         rely on circuit_breaker.can_attempt() instead of short-circuiting.
         """
-        action = await handle_429_error(
+        return await self._resilience.handle_429(
             provider=provider,
             credential=credential,
             error=error,
             error_body=error_body,
-            retry_after=classified_error.retry_after,
-            ip_throttle_detector=self.ip_throttle_detector,
-            circuit_breaker=self.circuit_breaker,
-            cooldown_manager=self.cooldown_manager,
+            classified_error=classified_error,
         )
-        return action.action_type == ThrottleActionType.PROVIDER_COOLDOWN
 
     def increment_quota_failures(self, credential_id: str) -> bool:
         """
@@ -2168,8 +2159,8 @@ class RotatingClient:
 
                 # Check circuit breaker before acquiring key
                 # Back off briefly if circuit is OPEN, then retry
-                if not await self.circuit_breaker.can_attempt(provider):
-                    remaining = await self.circuit_breaker.get_cooldown_remaining(provider)
+                if not await self._resilience.can_attempt(provider):
+                    remaining = await self._resilience.get_cooldown_remaining(provider)
                     backoff = min(remaining, 5.0)
                     lib_logger.debug(
                         f"Circuit breaker OPEN for provider '{provider}', "
@@ -2262,7 +2253,7 @@ class RotatingClient:
                                 current_cred, model, response
                             )
                             # Record success for circuit breaker
-                            await self.circuit_breaker.record_success(provider)
+                            await self._resilience.record_success(provider)
 
                             await self.usage_manager.release_key(current_cred, model)
                             key_acquired = False
@@ -2537,7 +2528,7 @@ class RotatingClient:
                                 current_cred, model, response
                             )
                             # Record success for circuit breaker
-                            await self.circuit_breaker.record_success(provider)
+                            await self._resilience.record_success(provider)
 
                             await self.usage_manager.release_key(current_cred, model)
                             key_acquired = False
@@ -2853,8 +2844,8 @@ class RotatingClient:
 
                     # Check circuit breaker before acquiring key
                     # Back off briefly if circuit is OPEN, then retry
-                    if not await self.circuit_breaker.can_attempt(provider):
-                        remaining = await self.circuit_breaker.get_cooldown_remaining(provider)
+                    if not await self._resilience.can_attempt(provider):
+                        remaining = await self._resilience.get_cooldown_remaining(provider)
                         backoff = min(remaining, 5.0)
                         lib_logger.debug(
                             f"Circuit breaker OPEN for provider '{provider}', "
