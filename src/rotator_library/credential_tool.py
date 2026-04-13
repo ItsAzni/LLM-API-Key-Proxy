@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from dotenv import set_key, get_key
 
-# NOTE: Heavy imports (provider_factory, PROVIDER_PLUGINS) are deferred
+# NOTE: Heavy imports (PROVIDER_AUTH_MAP, PROVIDER_PLUGINS) are deferred
 # to avoid 6-7 second delay before showing loading screen
 from .utils.json_utils import json_loads
 from rich.console import Console
@@ -46,20 +46,29 @@ def _get_env_file() -> Path:
 console = Console()
 
 # Global variables for lazily loaded modules
-_provider_factory = None
+_provider_auth_map = None
 _provider_plugins = None
 
 
 def _ensure_providers_loaded():
     """Lazy load provider modules only when needed"""
-    global _provider_factory, _provider_plugins
-    if _provider_factory is None:
-        from . import provider_factory as pf
+    global _provider_auth_map, _provider_plugins
+    if _provider_auth_map is None:
+        from .providers import PROVIDER_AUTH_MAP as pam
         from .providers import PROVIDER_PLUGINS as pp
 
-        _provider_factory = pf
+        _provider_auth_map = pam
         _provider_plugins = pp
-    return _provider_factory, _provider_plugins
+    return _provider_auth_map, _provider_plugins
+
+
+def _get_provider_auth_class(provider_name: str):
+    """Get auth class for provider, raising ValueError if unknown."""
+    auth_map, _ = _ensure_providers_loaded()
+    provider_class = auth_map.get(provider_name.lower())
+    if not provider_class:
+        raise ValueError(f"Unknown provider: {provider_name}")
+    return provider_class
 
 
 # OAuth provider display names mapping (no "(OAuth)" suffix - context makes it clear)
@@ -289,13 +298,13 @@ def _get_oauth_credentials_summary() -> dict:
         Dict mapping provider names to lists of credential info dicts.
         Example: {"gemini_cli": [{"email": "user@example.com", "tier": "free-tier", ...}, ...]}
     """
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
     oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity"]
     oauth_summary = {}
 
     for provider_name in oauth_providers:
         try:
-            auth_class = provider_factory.get_provider_auth_class(provider_name)
+            auth_class = _get_provider_auth_class(provider_name)
             auth_instance = auth_class()
             credentials = auth_instance.list_credentials(_get_oauth_base_dir())
             oauth_summary[provider_name] = credentials
@@ -531,10 +540,10 @@ def _display_provider_credentials(provider_name: str):
     Args:
         provider_name: The provider key (e.g., "gemini_cli", "qwen_code")
     """
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
 
     try:
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())
     except Exception:
@@ -582,10 +591,10 @@ async def _edit_oauth_credential_email(provider_name: str):
     Args:
         provider_name: The provider key (e.g., "qwen_code")
     """
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
 
     try:
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())
     except Exception as e:
@@ -771,10 +780,10 @@ async def _view_oauth_credentials_detail(provider_name: str):
     display_name = OAUTH_FRIENDLY_NAMES.get(provider_name, provider_name.title())
     clear_screen(f"View {display_name} Credentials")
 
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
 
     try:
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())
     except Exception:
@@ -1013,8 +1022,8 @@ async def _delete_oauth_credential_menu():
             return
 
         # Use the auth class's delete method
-        provider_factory, _ = _ensure_providers_loaded()
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        _ensure_providers_loaded()
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
 
         if auth_instance.delete_credential(cred_path):
@@ -1709,8 +1718,8 @@ async def setup_new_credential(provider_name: str):
     Delegates all credential management logic to the auth class's setup_credential() method.
     """
     try:
-        provider_factory, _ = _ensure_providers_loaded()
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        _ensure_providers_loaded()
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
 
         # Build display name for better user experience
@@ -1780,8 +1789,8 @@ async def export_gemini_cli_to_env():
     clear_screen("Export Gemini CLI Credential")
 
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
-    auth_class = provider_factory.get_provider_auth_class("gemini_cli")
+    _ensure_providers_loaded()
+    auth_class = _get_provider_auth_class("gemini_cli")
     auth_instance = auth_class()
 
     # List available credentials using auth class
@@ -1875,8 +1884,8 @@ async def export_qwen_code_to_env():
     clear_screen("Export Qwen Code Credential")
 
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
-    auth_class = provider_factory.get_provider_auth_class("qwen_code")
+    _ensure_providers_loaded()
+    auth_class = _get_provider_auth_class("qwen_code")
     auth_instance = auth_class()
 
     # List available credentials using auth class
@@ -1969,8 +1978,8 @@ async def export_iflow_to_env():
     clear_screen("Export iFlow Credential")
 
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
-    auth_class = provider_factory.get_provider_auth_class("iflow")
+    _ensure_providers_loaded()
+    auth_class = _get_provider_auth_class("iflow")
     auth_instance = auth_class()
 
     # List available credentials using auth class
@@ -2063,8 +2072,8 @@ async def export_antigravity_to_env():
     clear_screen("Export Antigravity Credential")
 
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
-    auth_class = provider_factory.get_provider_auth_class("antigravity")
+    _ensure_providers_loaded()
+    auth_class = _get_provider_auth_class("antigravity")
     auth_instance = auth_class()
 
     # List available credentials using auth class
@@ -2158,9 +2167,9 @@ async def export_all_provider_credentials(provider_name: str):
     display_name = provider_name.replace("_", " ").title()
     clear_screen(f"Export All {display_name} Credentials")
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
     try:
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
     except Exception:
         console.print(f"[bold red]Unknown provider: {provider_name}[/bold red]")
@@ -2228,9 +2237,9 @@ async def combine_provider_credentials(provider_name: str):
     display_name = provider_name.replace("_", " ").title()
     clear_screen(f"Combine {display_name} Credentials")
     # Get auth instance for this provider
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
     try:
-        auth_class = provider_factory.get_provider_auth_class(provider_name)
+        auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
     except Exception:
         console.print(f"[bold red]Unknown provider: {provider_name}[/bold red]")
@@ -2316,7 +2325,7 @@ async def combine_all_credentials():
     # List of providers that support OAuth credentials
     oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity"]
 
-    provider_factory, _ = _ensure_providers_loaded()
+    _ensure_providers_loaded()
 
     combined_lines = [
         "# Combined All Provider Credentials",
@@ -2331,7 +2340,7 @@ async def combine_all_credentials():
 
     for provider_name in oauth_providers:
         try:
-            auth_class = provider_factory.get_provider_auth_class(provider_name)
+            auth_class = _get_provider_auth_class(provider_name)
             auth_instance = auth_class()
         except Exception:
             continue  # Skip providers that don't have auth classes
@@ -2574,8 +2583,8 @@ async def main(clear_on_start=True):
             clear_screen("Add OAuth Credential")
             _display_oauth_providers_summary()
 
-            provider_factory, _ = _ensure_providers_loaded()
-            available_providers = provider_factory.get_available_providers()
+            auth_map, _ = _ensure_providers_loaded()
+            available_providers = list(auth_map.keys())
 
             provider_text = Text()
             for i, provider in enumerate(available_providers):
@@ -2681,9 +2690,9 @@ def run_credential_tool(from_launcher=False):
         console.print("✓ Credential tool initialized")
 
         _elapsed = time.time() - _start_time
-        _, PROVIDER_PLUGINS = _ensure_providers_loaded()
+        _, _plugins = _ensure_providers_loaded()
         print(
-            f"✓ Tool ready in {_elapsed:.2f}s ({len(PROVIDER_PLUGINS)} providers available)"
+            f"✓ Tool ready in {_elapsed:.2f}s ({len(_plugins)} providers available)"
         )
 
         # Small delay to let user see the ready message

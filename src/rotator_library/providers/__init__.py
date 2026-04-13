@@ -98,12 +98,6 @@ PROVIDER_PLUGINS["colin"] = ColinProvider
 
 # --- Lazy Provider Loading ---
 
-# Cache for loaded provider modules
-_provider_registry: Dict[str, object] = {}
-
-# Track which providers have been fully registered
-_registered_providers: set = set()
-
 
 def _get_provider_module_name(provider_name: str) -> str:
     """Convert provider name to module name."""
@@ -115,8 +109,8 @@ def _load_provider(provider_name: str):
     Lazily load a single provider by name.
     Returns the provider class or None if not found.
     """
-    if provider_name in _provider_registry:
-        return _provider_registry[provider_name]
+    if provider_name in PROVIDER_PLUGINS:
+        return PROVIDER_PLUGINS[provider_name]
 
     module_name = _get_provider_module_name(provider_name)
     full_module_path = f"{__name__}.{module_name}"
@@ -126,7 +120,6 @@ def _load_provider(provider_name: str):
     except ImportError:
         return None
 
-    # Look for a class that inherits from ProviderInterface
     for attribute_name in dir(module):
         attribute = getattr(module, attribute_name)
         if (
@@ -134,9 +127,7 @@ def _load_provider(provider_name: str):
             and issubclass(attribute, ProviderInterface)
             and attribute is not ProviderInterface
         ):
-            _provider_registry[provider_name] = attribute
             PROVIDER_PLUGINS[provider_name] = attribute
-            _registered_providers.add(provider_name)
             import logging
             logging.getLogger("rotator_library").debug(
                 f"Lazy-loaded provider: {provider_name}"
