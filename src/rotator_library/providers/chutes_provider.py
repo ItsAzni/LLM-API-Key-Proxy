@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.chutes_quota_tracker import ChutesQuotaTracker
-from ..config.env_utils import env_int
+from ..config.defaults import env_int
 
 if TYPE_CHECKING:
     from ..usage_manager import UsageManager

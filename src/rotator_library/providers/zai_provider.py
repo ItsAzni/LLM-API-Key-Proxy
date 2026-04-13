@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.zai_quota_tracker import ZaiQuotaTracker
-from ..config.env_utils import env_int
+from ..config.defaults import env_int
 
 ZAI_DEFAULT_API_BASE = "https://api.z.ai/api/coding/paas/v4"
 

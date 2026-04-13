@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 from .provider_interface import ProviderInterface, strip_provider_prefix
 from .utilities.nanogpt_quota_tracker import NanoGptQuotaTracker
-from ..config.env_utils import env_int
+from ..config.defaults import env_int
 from ..model_definitions import ModelDefinitions
 
 lib_logger = logging.getLogger("rotator_library")

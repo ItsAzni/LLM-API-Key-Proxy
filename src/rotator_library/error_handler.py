@@ -31,6 +31,7 @@ from .ip_throttle_detector import (
 from .circuit_breaker import ProviderCircuitBreaker
 from .cooldown_manager import CooldownManager
 from .utils.json_utils import json_loads
+from .utils.duration import parse_duration
 
 from .config.defaults import COOLDOWN_RATE_LIMIT_DEFAULT
 from .error_types import (
@@ -178,68 +179,6 @@ def _detect_ip_throttle(
     return None
 
 
-@functools.lru_cache(maxsize=128)
-def _parse_duration_string(duration_str: str) -> Optional[int]:
-    """
-    Parse duration strings in various formats to total seconds.
-
-    Handles:
-    - Milliseconds: '290.979975ms' -> 1 second (rounds up for sub-second values)
-    - Compound durations: '156h14m36.752463453s', '2h30m', '45m30s'
-    - Simple durations: '562476.752463453s', '3600s', '60m', '2h'
-    - Plain seconds (no unit): '562476'
-
-    Args:
-        duration_str: Duration string to parse
-
-    Returns:
-        Total seconds as integer, or None if parsing fails.
-        For sub-second values, returns at least 1 to avoid retry floods.
-    """
-    if not duration_str:
-        return None
-
-    total_seconds = 0.0
-    remaining = duration_str.strip().lower()
-
-    # Try parsing as plain number first (no units)
-    try:
-        return int(float(remaining))
-    except ValueError:
-        pass
-
-    # Handle pure milliseconds format: "290.979975ms"
-    # MUST check this BEFORE checking 'm' for minutes to avoid misinterpreting 'ms'
-    ms_match = re.match(r"^([\d.]+)ms$", remaining)
-    if ms_match:
-        ms_value = float(ms_match.group(1))
-        seconds = ms_value / 1000.0
-        # Round up to at least 1 second to avoid immediate retry floods
-        return max(1, int(seconds)) if seconds > 0 else 0
-
-    # Parse hours component
-    hour_match = re.match(r"(\d+)h", remaining)
-    if hour_match:
-        total_seconds += int(hour_match.group(1)) * 3600
-        remaining = remaining[hour_match.end() :]
-
-    # Parse minutes component - use negative lookahead to avoid matching 'ms'
-    min_match = re.match(r"(\d+)m(?!s)", remaining)
-    if min_match:
-        total_seconds += int(min_match.group(1)) * 60
-        remaining = remaining[min_match.end() :]
-
-    # Parse seconds component (including decimals like 36.752463453s)
-    sec_match = re.match(r"([\d.]+)s", remaining)
-    if sec_match:
-        total_seconds += float(sec_match.group(1))
-
-    # For sub-second values, round up to at least 1
-    if total_seconds > 0:
-        return max(1, int(total_seconds))
-    return None
-
-
 def extract_retry_after_from_body(error_body: Optional[str]) -> Optional[int]:
     """
     Extract the retry-after time from an API error response body.
@@ -270,7 +209,7 @@ def extract_retry_after_from_body(error_body: Optional[str]) -> Optional[int]:
         match = re.search(pattern, error_body, re.IGNORECASE)
         if match:
             duration_str = match.group(1)
-            result = _parse_duration_string(duration_str)
+            result = parse_duration(duration_str)
             if result is not None:
                 return result
 
@@ -413,7 +352,7 @@ def _extract_retry_from_json_body(json_text: str) -> Optional[int]:
                         if seconds:
                             return int(float(seconds))
                     elif isinstance(delay_str, str):
-                        result = _parse_duration_string(delay_str)
+                        result = parse_duration(delay_str)
                         if result is not None:
                             return result
 
@@ -425,7 +364,7 @@ def _extract_retry_from_json_body(json_text: str) -> Optional[int]:
                     "quotaresetdelay"
                 )
                 if quota_reset_delay:
-                    result = _parse_duration_string(quota_reset_delay)
+                    result = parse_duration(quota_reset_delay)
                     if result is not None:
                         return result
 
@@ -537,7 +476,7 @@ def get_retry_after(error: Exception) -> Optional[int]:
         if match:
             duration_str = match.group(1)
             # Try parsing as compound duration first
-            result = _parse_duration_string(duration_str)
+            result = parse_duration(duration_str)
             if result is not None:
                 return result
             # Fallback to simple integer
@@ -552,7 +491,7 @@ def get_retry_after(error: Exception) -> Optional[int]:
         if isinstance(value, int):
             return value
         if isinstance(value, str):
-            result = _parse_duration_string(value)
+            result = parse_duration(value)
             if result is not None:
                 return result
 

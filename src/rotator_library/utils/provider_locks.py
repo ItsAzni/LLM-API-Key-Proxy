@@ -4,8 +4,10 @@
 import asyncio
 from typing import Dict
 
+from .singleton import SingletonMeta
 
-class ProviderLockManager:
+
+class ProviderLockManager(metaclass=SingletonMeta):
     """Lazily creates and returns per-provider asyncio locks."""
 
     def __init__(self):

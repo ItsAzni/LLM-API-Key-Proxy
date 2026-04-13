@@ -71,7 +71,7 @@ from .defaults import (
     # Cooldown Disable
     is_cooldown_disabled,
 )
-from .env_utils import env_bool, env_float, env_int
+from .defaults import env_bool, env_float, env_int
 
 __all__ = [
     # Rotation & Selection

@@ -15,7 +15,7 @@ import functools
 import json
 import logging
 from .utils.json_utils import json_loads
-from .config.env_utils import env_int
+from .config.defaults import env_int
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple

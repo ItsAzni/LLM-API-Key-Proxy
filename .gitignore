@@ -138,3 +138,4 @@ oauth_creds/
 .serena/
 AGENTS.md
 context_portal/
+tests/
