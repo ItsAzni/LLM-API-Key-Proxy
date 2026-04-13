@@ -365,7 +365,7 @@ class QuotaRefreshMixin:
                         )
                     elif usage_data.get("status") == "transient_error" or usage_data.get("remaining_fraction") is None:
                         lib_logger.warning(
-                            f"Transient error refreshing {self.provider_name} quota for credential "
+                            f"Transient error refreshing {self.provider_name} quota for credential ...{api_key[-4:]} "
                             f"(error: {usage_data.get('error')}), preserving previous baseline"
                         )
                     else:
@@ -377,7 +377,7 @@ class QuotaRefreshMixin:
                             reset_timestamp=usage_data.get("reset_at"),
                         )
                         lib_logger.warning(
-                            f"Failed to refresh {self.provider_name} quota for credential "
+                            f"Failed to refresh {self.provider_name} quota for credential ...{api_key[-4:]} "
                             f"(error: {usage_data.get('error')}), marking as exhausted"
                         )
 
