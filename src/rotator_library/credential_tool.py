@@ -305,7 +305,7 @@ def _get_oauth_credentials_summary() -> dict:
             auth_instance = auth_class()
             credentials = auth_instance.list_credentials(_get_oauth_base_dir())
             oauth_summary[provider_name] = credentials
-        except Exception:
+        except Exception:  # non-critical: provider auth unavailable
             oauth_summary[provider_name] = []
 
     return oauth_summary
@@ -543,7 +543,7 @@ def _display_provider_credentials(provider_name: str):
         auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())
-    except Exception:
+    except Exception:  # non-critical: credential listing failed
         credentials = []
 
     display_name = OAUTH_FRIENDLY_NAMES.get(provider_name, provider_name.title())
@@ -783,7 +783,7 @@ async def _view_oauth_credentials_detail(provider_name: str):
         auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())
-    except Exception:
+    except Exception:  # non-critical: credential listing failed
         credentials = []
 
     if not credentials:
@@ -1190,7 +1190,6 @@ async def setup_api_key():
     # -------------------------------------------------------------------------
     _, PROVIDER_PLUGINS = _ensure_providers_loaded()
     from .providers import DynamicOpenAICompatibleProvider
-    from .providers.provider_interface import ProviderInterface
 
     # Build a set of API key env vars already in SCRAPED_PROVIDERS
     litellm_api_keys = set()
@@ -2165,7 +2164,7 @@ async def export_all_provider_credentials(provider_name: str):
     try:
         auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
-    except Exception:
+    except Exception:  # non-critical: provider auth unavailable
         console.print(f"[bold red]Unknown provider: {provider_name}[/bold red]")
         return
 
@@ -2235,7 +2234,7 @@ async def combine_provider_credentials(provider_name: str):
     try:
         auth_class = _get_provider_auth_class(provider_name)
         auth_instance = auth_class()
-    except Exception:
+    except Exception:  # non-critical: provider auth unavailable
         console.print(f"[bold red]Unknown provider: {provider_name}[/bold red]")
         return
 
@@ -2336,7 +2335,7 @@ async def combine_all_credentials():
         try:
             auth_class = _get_provider_auth_class(provider_name)
             auth_instance = auth_class()
-        except Exception:
+        except Exception:  # non-critical: provider auth unavailable
             continue  # Skip providers that don't have auth classes
 
         credentials = auth_instance.list_credentials(_get_oauth_base_dir())

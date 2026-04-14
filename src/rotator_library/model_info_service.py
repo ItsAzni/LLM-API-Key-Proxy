@@ -994,7 +994,7 @@ class ModelRegistry(metaclass=SingletonMeta):
 
     async def _load_all_sources(self):
         """Fetch from all adapters concurrently."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         tasks = [
             loop.run_in_executor(None, adapter.fetch) for adapter in self._adapters

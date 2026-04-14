@@ -8,7 +8,7 @@ import time
 import logging
 import asyncio
 import random
-from datetime import date, datetime, timezone, time as dt_time
+from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from collections import OrderedDict

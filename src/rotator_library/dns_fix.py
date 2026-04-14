@@ -41,7 +41,6 @@ try:
 except ImportError:
     _HAS_HTTPX = False
     import urllib.request
-    import urllib.error
 
 # Load .env file if available (before reading environment variables)
 try:
@@ -178,7 +177,7 @@ def _doh_query(host: str, doh_url: str) -> Optional[str]:
             with urllib.request.urlopen(
                 req, timeout=_get_doh_timeout(), context=ctx
             ) as resp:
-                data = json_loads(resp.read().decode())
+                data = json_loads(resp.read().decode("utf-8"))
 
         if data.get("Status") == 0 and "Answer" in data:
             for answer in data["Answer"]:

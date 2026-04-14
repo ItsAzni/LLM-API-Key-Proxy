@@ -85,7 +85,7 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
                 content_type = request.headers.get("content-type", "")
                 if "application/json" in content_type:
                     if "content-encoding" not in {k.lower() for k in request.headers}:
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         compressed = await loop.run_in_executor(
                             None, gzip.compress, request.content
                         )

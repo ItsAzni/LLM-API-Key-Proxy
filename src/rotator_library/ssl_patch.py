@@ -23,13 +23,16 @@ def _patch_aiohttp_connector():
             # Global patch: make ssl.create_default_context() return unverified context
             _original_create_default = _ssl_module.create_default_context
 
+            _force_tls12 = os.environ.get("SSL_FORCE_TLS12", "false").lower() == "true"
+
             def _patched_create_default(*args, **kwargs):
                 ctx = _ssl_module._create_unverified_context()
-                ctx.maximum_version = _ssl_module.TLSVersion.TLSv1_2
-                try:
-                    ctx.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                except _ssl_module.SSLError:
-                    pass
+                if _force_tls12:
+                    ctx.maximum_version = _ssl_module.TLSVersion.TLSv1_2
+                    try:
+                        ctx.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
+                    except _ssl_module.SSLError:
+                        pass
                 return ctx
 
             _ssl_module.create_default_context = _patched_create_default
@@ -51,11 +54,12 @@ def _patch_aiohttp_connector():
         def _patched_init(self, *args, **kwargs):
             if not _ssl_verify:
                 ssl_context = _ssl_module._create_unverified_context()
-                ssl_context.maximum_version = _ssl_module.TLSVersion.TLSv1_2
-                try:
-                    ssl_context.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                except _ssl_module.SSLError:
-                    pass
+                if _force_tls12:
+                    ssl_context.maximum_version = _ssl_module.TLSVersion.TLSv1_2
+                    try:
+                        ssl_context.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
+                    except _ssl_module.SSLError:
+                        pass
                 kwargs["ssl"] = ssl_context
             _original_init(self, *args, **kwargs)
 

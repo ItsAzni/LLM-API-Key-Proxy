@@ -780,7 +780,7 @@ class GoogleOAuthBase(AuthQueueMixin, OAuthMixin, OAuthFlowMixin, BaseTokenManag
         # [STATE] Encode state parameter with PKCE verifier for CSRF protection
         oauth_state = self._encode_oauth_state(code_verifier)
 
-        auth_code_future = asyncio.get_event_loop().create_future()
+        auth_code_future = asyncio.get_running_loop().create_future()
         server = None
 
         async def handle_callback(reader, writer):

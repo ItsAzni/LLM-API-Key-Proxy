@@ -15,8 +15,6 @@ if sys.platform == "win32":
     os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 
 import time
-import orjson
-
 # Phase 1: Minimal imports for arg parsing and TUI
 import asyncio
 from pathlib import Path
@@ -80,7 +78,6 @@ _start_time = time.time()
 
 # Load all .env files from root folder (main .env first, then any additional *.env files)
 from dotenv import load_dotenv
-from glob import glob
 
 # Get the application root directory (EXE dir if frozen, else CWD)
 # Inlined here to avoid triggering heavy rotator_library imports before loading screen
@@ -127,17 +124,15 @@ _console = Console()
 print("  → Loading FastAPI framework...")
 with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
     from contextlib import asynccontextmanager
-    from fastapi import FastAPI, Request, HTTPException, Depends
+    from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import StreamingResponse, JSONResponse
-    from fastapi.security import APIKeyHeader
 
 print("  → Loading core dependencies...")
 with _console.status("[dim]Loading core dependencies...", spinner="dots"):
     from dotenv import load_dotenv
     import colorlog
     import json
-    from typing import AsyncGenerator, Any, List, Optional, Union
+    from typing import Any, List, Optional, Union
 
     # --- Early Log Level Configuration ---
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
@@ -175,40 +170,17 @@ print("  → Initializing proxy core...")
 with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library import RotatingClient, STREAM_DONE
     from rotator_library.credential_manager import CredentialManager
-    from rotator_library.background_refresher import BackgroundRefresher
     from rotator_library.dns_fix import close_doh_client
     from rotator_library.http_client_pool import close_http_pool
     from rotator_library.model_info_service import init_model_info_service
     from proxy_app.request_logger import log_request_to_console
     from proxy_app.batch_manager import EmbeddingBatcher
-    from proxy_app.detailed_logger import RawIOLogger
 
 # Import extracted modules
-from proxy_app.models import (
-    EmbeddingRequest,
-    ModelCard,
-    ModelCapabilities,
-    EnrichedModelCard,
-    ModelList,
-    EnrichedModelList,
-)
 from proxy_app.middleware import _NoGzipForSSE, RotatorDebugFilter, NoLiteLLMLogFilter
-from proxy_app.dependencies import (
-    api_key_header,
-    get_rotating_client,
-    get_embedding_batcher,
-    verify_api_key,
-    verify_anthropic_api_key,
-    _streams_lock,
-)
-from proxy_app.streaming import streaming_response_wrapper, handle_litellm_error
+from proxy_app.dependencies import _streams_lock
 
 # Anthropic API Models (imported from library)
-from rotator_library.anthropic_compat import (
-    AnthropicMessagesRequest,
-    AnthropicCountTokensRequest,
-)
-
 print("  → Discovering provider plugins...")
 # Provider lazy loading happens during import, so time it here
 _provider_start = time.time()
@@ -248,7 +220,6 @@ print(
 # --- Logging Configuration ---
 # Import path utilities here (after loading screen) to avoid triggering heavy imports early
 from rotator_library.utils.paths import get_logs_dir, get_data_file
-from rotator_library.utils.json_utils import sse_data_event
 from rotator_library.utils.terminal_utils import clear_screen
 
 LOG_DIR = get_logs_dir(_root_dir)
@@ -694,8 +665,8 @@ async def lifespan(app: FastAPI):
             remaining = getattr(app.state, "active_streams", 0)
         if remaining:
             logging.warning("Forcing shutdown with %d active streams", remaining)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Error waiting for active streams during shutdown: %s", e)
 
     await client.background_refresher.stop()  # Stop the background task on shutdown
     close_doh_client()  # Close persistent DoH httpx.Client
@@ -708,18 +679,18 @@ async def lifespan(app: FastAPI):
     # "Unclosed client session" warnings on shutdown
     try:
         await litellm.close_litellm_async_clients()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Error closing litellm async clients: %s", e)
     if hasattr(litellm, "aclient_session") and litellm.aclient_session is not None:
         try:
             await litellm.aclient_session.aclose()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("Error closing litellm aclient_session: %s", e)
     if hasattr(litellm, "client_session") and litellm.client_session is not None:
         try:
             litellm.client_session.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("Error closing litellm client_session: %s", e)
 
     # Stop model info service
     if hasattr(app.state, "model_info_service") and app.state.model_info_service:

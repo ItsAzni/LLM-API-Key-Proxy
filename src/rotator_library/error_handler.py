@@ -16,7 +16,6 @@ from litellm.exceptions import (
     AuthenticationError,
     InvalidRequestError,
     BadRequestError,
-    OpenAIError,
     InternalServerError,
     Timeout,
     ContextWindowExceededError,

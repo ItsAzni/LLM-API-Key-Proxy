@@ -271,8 +271,8 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
                 }
                 result["source"] = "litellm_fallback"
                 return result
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("Pricing lookup failed for model %s: %s", result.get("model", "?"), e)
 
         result["source"] = "unknown"
         result["error"] = "Pricing data not available for this model"

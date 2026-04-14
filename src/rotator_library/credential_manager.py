@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026 ShmidtS
 
-import os
 import re
 import shutil
 import logging

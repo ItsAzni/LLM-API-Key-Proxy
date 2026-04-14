@@ -206,7 +206,7 @@ class BaseQuotaTracker:
             costs_file = self._get_learned_costs_file()
             if costs_file.exists():
                 try:
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     data = await loop.run_in_executor(None, self._read_costs_file, costs_file)
                     if data:
                         self._learned_costs = data.get("costs", {})

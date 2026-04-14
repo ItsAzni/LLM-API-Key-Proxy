@@ -23,7 +23,6 @@ import fnmatch
 import platform
 import threading
 import os
-import re
 import traceback
 from pathlib import Path
 from dataclasses import dataclass, field
