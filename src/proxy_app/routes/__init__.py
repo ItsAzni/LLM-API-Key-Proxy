@@ -13,6 +13,8 @@ from proxy_app.routes.tools import router as tools_router
 from proxy_app.routes.moderation import router as moderation_router
 from proxy_app.routes.batches import router as batches_router
 from proxy_app.routes.files import router as files_router
+from proxy_app.routes.video import router as video_router
+from proxy_app.routes.agents import router as agents_router
 
 all_routers = [
     chat_router,
@@ -27,4 +29,6 @@ all_routers = [
     moderation_router,
     batches_router,
     files_router,
+    video_router,
+    agents_router,
 ]

@@ -106,3 +106,81 @@ async def web_search(
             raise handle_litellm_error(e, error_format="openai")
         logging.error(f"Web search request failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/tools/tokenizer")
+async def tool_tokenizer(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """ZAI tokenizer tool endpoint."""
+    try:
+        request_data = orjson.loads(await request.body())
+
+        log_request_to_console(
+            url=str(request.url),
+            headers=request.headers,
+            client_info=(request.client.host, request.client.port),
+            request_data=request_data,
+        )
+
+        return await client.call_provider_method(
+            "zai", "tool_tokenizer", **request_data
+        )
+
+    except Exception as e:
+        logging.error(f"Tokenizer tool request failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/tools/layout-parsing")
+async def tool_layout_parsing(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """ZAI layout parsing tool endpoint."""
+    try:
+        request_data = orjson.loads(await request.body())
+
+        log_request_to_console(
+            url=str(request.url),
+            headers=request.headers,
+            client_info=(request.client.host, request.client.port),
+            request_data=request_data,
+        )
+
+        return await client.call_provider_method(
+            "zai", "tool_layout_parsing", **request_data
+        )
+
+    except Exception as e:
+        logging.error(f"Layout parsing tool request failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/tools/web-reader")
+async def tool_web_reader(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """ZAI web reader tool endpoint."""
+    try:
+        request_data = orjson.loads(await request.body())
+
+        log_request_to_console(
+            url=str(request.url),
+            headers=request.headers,
+            client_info=(request.client.host, request.client.port),
+            request_data=request_data,
+        )
+
+        return await client.call_provider_method(
+            "zai", "tool_web_reader", **request_data
+        )
+
+    except Exception as e:
+        logging.error(f"Web reader tool request failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

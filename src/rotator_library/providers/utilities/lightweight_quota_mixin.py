@@ -2,36 +2,112 @@
 # Copyright (c) 2026 ShmidtS
 
 """
-QuotaRefreshMixin - shared background job boilerplate for quota refresh.
+LightweightQuotaMixin - unified mixin for lightweight API-based quota trackers.
 
-Moved from base_streaming_provider.py (which should only contain streaming logic).
+Merges the former SimpleQuotaTrackerBase (cache/pool/bearer/error helpers)
+with QuotaRefreshMixin (background job boilerplate) into a single mixin.
+
+Subclasses must implement:
+    fetch_quota_usage(api_key, client) -> Dict[str, Any]
+
+Subclasses must define:
+    _virtual_model_name  (str): e.g. "chutes/_quota"
+    provider_name        (str): for logging
+
+Optional:
+    _include_max_requests: whether to pass max_requests (default True)
 """
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+import httpx
+
+from ...http_client_pool import get_http_pool
 
 lib_logger = logging.getLogger("rotator_library")
 
 
-class QuotaRefreshMixin:
+class LightweightQuotaMixin:
     """
-    Mixin providing shared background job boilerplate for quota refresh.
+    Unified mixin for lightweight quota trackers that fetch from an HTTP API.
 
-    Subclasses must define:
-      - _virtual_model_name  (str): e.g. "chutes/_quota"
-      - _quota_cache         (dict): credential -> usage_data cache
-      - fetch_quota_usage(api_key, client) -> dict: provider-specific API call
-      - provider_name         (str): for logging
-
-    Optional:
-      - _include_max_requests: whether to pass max_requests (default True)
+    Provides cache dict, refresh interval, HTTP client pool fallback,
+    bearer header builder, error result builder, and background job runner.
     """
 
     _virtual_model_name: str = ""
     _quota_cache: Dict[str, Dict[str, Any]] = {}
+    _quota_refresh_interval: int = 300
     provider_name: str = ""
     _include_max_requests: bool = True
+
+    # =====================================================================
+    # HTTP HELPERS (from SimpleQuotaTrackerBase)
+    # =====================================================================
+
+    async def _fetch_via_pool(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        client: Optional[httpx.AsyncClient] = None,
+        timeout: int = 30,
+    ) -> httpx.Response:
+        """
+        Fetch a URL, reusing the provided client or falling back to the shared pool.
+
+        Args:
+            url: Request URL
+            headers: Request headers
+            client: Optional existing httpx client for connection reuse
+            timeout: Request timeout in seconds
+
+        Returns:
+            httpx.Response
+        """
+        if client is not None:
+            return await client.get(url, headers=headers, timeout=timeout)
+
+        pool = await get_http_pool()
+        new_client = await pool.get_client_async()
+        return await new_client.get(url, headers=headers, timeout=timeout)
+
+    @staticmethod
+    def _make_bearer_header(api_key: str) -> Dict[str, str]:
+        """Build a standard Bearer auth header."""
+        return {
+            "accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+    def _error_result(self, **overrides) -> Dict[str, Any]:
+        """Build a standardized error result dict. Subclasses can override defaults."""
+        base = {
+            "status": "error",
+            "error": None,
+            "fetched_at": time.time(),
+        }
+        base.update(overrides)
+        return base
+
+    # =====================================================================
+    # BACKGROUND JOB (from QuotaRefreshMixin)
+    # =====================================================================
+
+    def get_background_job_config(self) -> Optional[Dict[str, Any]]:
+        """Return background job config for quota refresh.
+
+        Subclasses can override to customise interval, name, or run_on_start.
+        """
+        if not self.provider_name:
+            return None
+        return {
+            "interval": self._quota_refresh_interval,
+            "name": f"{self.provider_name}_quota_refresh",
+            "run_on_start": True,
+        }
 
     async def run_background_job(
         self,
@@ -106,8 +182,8 @@ class QuotaRefreshMixin:
                     )
 
         if get_http_pool_fn is None:
-            from ...http_client_pool import get_http_pool
-            get_http_pool_fn = get_http_pool
+            from ...http_client_pool import get_http_pool as _get_pool
+            get_http_pool_fn = _get_pool
 
         semaphore = asyncio.Semaphore(quota_fetch_concurrency)
         pool = await get_http_pool_fn()

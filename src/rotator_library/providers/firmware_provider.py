@@ -14,7 +14,6 @@ import httpx
 import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface
 from .utilities.firmware_quota_tracker import FirmwareQuotaTracker
 from ..config.defaults import env_int
@@ -27,7 +26,7 @@ import logging
 lib_logger = logging.getLogger("rotator_library")
 
 
-class FirmwareProvider(QuotaRefreshMixin, FirmwareQuotaTracker, ProviderInterface):
+class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
     """
     Provider implementation for the Firmware.ai API with quota tracking.
     """

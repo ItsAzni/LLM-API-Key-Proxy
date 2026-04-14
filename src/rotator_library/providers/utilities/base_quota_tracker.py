@@ -936,13 +936,8 @@ class BaseQuotaTracker:
         return None
 
     def _get_quota_group_for_model(self, model: str) -> Optional[str]:
-        """
-        Get the quota group name for a model.
-
-        Uses the inherited _find_model_quota_group from ProviderInterface.
-        """
-        clean_model = model.split("/")[-1] if "/" in model else model
-        return self._find_model_quota_group(clean_model)
+        """Get the quota group name for a model."""
+        return self.get_model_quota_group(model)
 
     async def _make_test_request(
         self,

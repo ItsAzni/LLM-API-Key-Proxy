@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from .simple_quota_tracker import SimpleQuotaTrackerBase
+from .lightweight_quota_mixin import LightweightQuotaMixin
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -44,11 +44,11 @@ ZAI_UNIT_HOURLY_TIME = 5   # Hourly time-based request count
 ZAI_UNIT_DAILY_TOKENS = 6  # Daily token usage percentage
 
 
-class ZaiQuotaTracker(SimpleQuotaTrackerBase):
+class ZaiQuotaTracker(LightweightQuotaMixin):
     """
     Mixin class providing quota tracking functionality for ZAI provider.
 
-    Inherits shared cache/pool boilerplate from SimpleQuotaTrackerBase.
+    Inherits shared cache/pool boilerplate from LightweightQuotaMixin.
     """
 
     _quota_cache: Dict[str, Dict[str, Any]]
@@ -74,7 +74,7 @@ class ZaiQuotaTracker(SimpleQuotaTrackerBase):
                 "remaining_fraction": float,  # 0.0 to 1.0 (hourly)
                 "pct_5min": float,  # 5-min usage percentage
                 "pct_daily": float,  # daily usage percentage
-                "quota": int,  # alias for hourly_limit (QuotaRefreshMixin compat)
+                "quota": int,  # alias for hourly_limit (LightweightQuotaMixin compat)
                 "used": float,  # alias for hourly_used
                 "remaining": float,  # alias for hourly_remaining
                 "reset_at": float,  # Unix timestamp (next hour boundary)

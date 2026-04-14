@@ -24,16 +24,16 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from .simple_quota_tracker import SimpleQuotaTrackerBase
+from .lightweight_quota_mixin import LightweightQuotaMixin
 
 lib_logger = logging.getLogger("rotator_library")
 
 
-class FirmwareQuotaTracker(SimpleQuotaTrackerBase):
+class FirmwareQuotaTracker(LightweightQuotaMixin):
     """
     Mixin class providing quota tracking functionality for Firmware.ai provider.
 
-    Inherits shared cache/pool boilerplate from SimpleQuotaTrackerBase.
+    Inherits shared cache/pool boilerplate from LightweightQuotaMixin.
     """
 
     api_base: str

@@ -3,8 +3,8 @@
 
 # Utilities for provider implementations
 from .base_quota_tracker import BaseQuotaTracker
-from .simple_quota_tracker import SimpleQuotaTrackerBase
-from .quota_refresh_mixin import QuotaRefreshMixin
+from .lightweight_quota_mixin import LightweightQuotaMixin
+from .quota_cache_serializer import serialize_quota_cache, format_quota_log_entry
 from .antigravity_quota_tracker import AntigravityQuotaTracker
 from .gemini_cli_quota_tracker import GeminiCliQuotaTracker
 
@@ -42,8 +42,9 @@ from ...transaction_logger import (
 __all__ = [
     # Quota trackers
     "BaseQuotaTracker",
-    "SimpleQuotaTrackerBase",
-    "QuotaRefreshMixin",
+    "LightweightQuotaMixin",
+    "serialize_quota_cache",
+    "format_quota_log_entry",
     "AntigravityQuotaTracker",
     "GeminiCliQuotaTracker",
     # Shared utilities

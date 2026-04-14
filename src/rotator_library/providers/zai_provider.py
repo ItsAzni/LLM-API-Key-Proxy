@@ -7,7 +7,6 @@ from ..utils.json_utils import json_loads
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.zai_quota_tracker import ZaiQuotaTracker
 from ..config.defaults import env_int
@@ -22,7 +21,7 @@ import logging
 lib_logger = logging.getLogger("rotator_library")
 
 
-class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
+class ZaiProvider(ZaiQuotaTracker, ProviderInterface):
     """
     Provider implementation for the ZAI (z.ai) API with quota tracking.
 
@@ -46,6 +45,16 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
         "pro": 2,
         "lite": 3,
     }
+
+    # Body keyword patterns for quota detection (base class fallback).
+    # The full override handles ZAI-specific code matching + dynamic cooldown.
+    _quota_error_patterns = [
+        ("body", "insufficient balance", 86400, "INSUFFICIENT_BALANCE"),
+        ("body", "recharge", 86400, "INSUFFICIENT_BALANCE"),
+        ("body", "rate", 3600, "QUOTA_EXHAUSTED"),
+        ("body", "limit", 3600, "QUOTA_EXHAUSTED"),
+        ("body", "quota", 3600, "QUOTA_EXHAUSTED"),
+    ]
 
     model_quota_groups = {
         "zai_global": ["_quota"],
@@ -98,11 +107,11 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
     def parse_quota_error(
         cls, error: Exception, error_body: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """
-        Parse ZAI 429 error to extract quota reset information.
+        """Parse ZAI 429 error to extract quota reset information.
 
-        ZAI returns rate limit errors when hourly quota is exhausted.
-        Error format: {'error': {'code': '1113', 'message': 'Insufficient balance...'}}
+        ZAI-specific: code 1113 = insufficient balance (24h cooldown),
+        standard 429 = hourly quota (resets at next hour boundary).
+        Falls back to base class _quota_error_patterns for body keyword match.
         """
         body = cls._extract_error_body(error, error_body) or ""
         try:
@@ -110,37 +119,30 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
         except (ValueError, TypeError):
             data = {}
 
-        # ZAI nests error info under 'error' key
         error_obj = data.get("error", {})
         code = data.get("code") or error_obj.get("code")
-        msg = str(data.get("msg", "") or data.get("message", "") or error_obj.get("message", "")).lower()
+        msg = str(
+            data.get("msg", "") or data.get("message", "") or error_obj.get("message", "")
+        ).lower()
 
-        # Normalize code to int for comparison (API returns string codes like "1113")
         try:
             code_int = int(code) if code is not None else None
         except (ValueError, TypeError):
             code_int = None
 
-        # ZAI-specific: code 1113 = insufficient balance, plus standard rate/limit/quota keywords
+        # ZAI-specific: code 1113 / balance keywords = insufficient balance
+        # Standard: code 429 or rate/limit/quota keywords = hourly quota
+        is_insufficient = code_int == 1113 or "balance" in msg or "recharge" in msg
         is_quota = (
-            code_int == 429
-            or code_int == 1113
-            or "rate" in msg
-            or "limit" in msg
-            or "quota" in msg
-            or "balance" in msg
-            or "recharge" in msg
-            or "insufficient" in msg
+            code_int == 429 or code_int == 1113
+            or any(kw in msg for kw in ("rate", "limit", "quota", "balance", "recharge", "insufficient"))
         )
         if not is_quota:
             return None
 
         now = datetime.now(timezone.utc)
 
-        # Code 1113 / "insufficient balance" = account has no funds,
-        # won't recover at hour boundary — use 24h cooldown.
-        # Standard 429 = hourly quota, resets at next hour boundary.
-        if code_int == 1113 or "balance" in msg or "recharge" in msg:
+        if is_insufficient:
             cooldown = timedelta(hours=24)
             reset_time = now + cooldown
             retry_after = int(cooldown.total_seconds())
@@ -153,13 +155,11 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
             retry_after = max(60, int(next_hour.timestamp() - now.timestamp()))
             reason = "QUOTA_EXHAUSTED"
 
-        reset_ts = reset_time.timestamp()
-
         return {
             "retry_after": retry_after,
             "reason": reason,
             "reset_timestamp": reset_time.isoformat(),
-            "quota_reset_timestamp": reset_ts,
+            "quota_reset_timestamp": reset_time.timestamp(),
         }
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
@@ -190,9 +190,145 @@ class ZaiProvider(QuotaRefreshMixin, ZaiQuotaTracker, ProviderInterface):
     async def get_auth_header(self, credential_identifier: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {credential_identifier}"}
 
-    def get_background_job_config(self) -> Optional[Dict[str, Any]]:
-        return {
-            "interval": self._quota_refresh_interval,
-            "name": "zai_quota_refresh",
-            "run_on_start": True,
-        }
+    # --- ZAI-specific API methods (non-litellm) ---
+
+    async def video_generate(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Submit an async video generation request to ZAI."""
+        response = await client.post(
+            f"{self.api_base}/video/generate",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def video_status(
+        self, credential: str, client: httpx.AsyncClient, video_id: str
+    ) -> Dict[str, Any]:
+        """Check the status of an async video generation task."""
+        response = await client.get(
+            f"{self.api_base}/video/{video_id}/status",
+            headers={"Authorization": f"Bearer {credential}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def async_image_generate(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Submit an async image generation request to ZAI."""
+        response = await client.post(
+            f"{self.api_base}/images/generations",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def async_image_status(
+        self, credential: str, client: httpx.AsyncClient, image_id: str
+    ) -> Dict[str, Any]:
+        """Retrieve status/result of an async image generation task."""
+        response = await client.get(
+            f"{self.api_base}/images/{image_id}",
+            headers={"Authorization": f"Bearer {credential}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def tool_tokenizer(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Call the ZAI tokenizer tool."""
+        response = await client.post(
+            f"{self.api_base}/tools/tokenizer",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def tool_layout_parsing(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Call the ZAI layout parsing tool."""
+        response = await client.post(
+            f"{self.api_base}/tools/layout-parsing",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def tool_web_reader(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Call the ZAI web reader tool."""
+        response = await client.post(
+            f"{self.api_base}/tools/web-reader",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_chat(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Synchronous agent chat endpoint."""
+        response = await client.post(
+            f"{self.api_base}/agents/chat",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_file_upload(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Upload a file for agent processing."""
+        response = await client.post(
+            f"{self.api_base}/agents/file-upload",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_async_result(
+        self, credential: str, client: httpx.AsyncClient, task_id: str
+    ) -> Dict[str, Any]:
+        """Retrieve async agent task result."""
+        response = await client.get(
+            f"{self.api_base}/agents/async-result",
+            headers={"Authorization": f"Bearer {credential}"},
+            params={"task_id": task_id},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_conversation(
+        self, credential: str, client: httpx.AsyncClient, **kwargs
+    ) -> Dict[str, Any]:
+        """Continue an agent conversation."""
+        response = await client.post(
+            f"{self.api_base}/agents/conversation",
+            headers={"Authorization": f"Bearer {credential}"},
+            json=kwargs,
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json()

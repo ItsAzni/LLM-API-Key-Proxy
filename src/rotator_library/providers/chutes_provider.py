@@ -3,7 +3,6 @@
 
 import httpx
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
-from .base_streaming_provider import QuotaRefreshMixin
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.chutes_quota_tracker import ChutesQuotaTracker
 from ..config.defaults import env_int
@@ -17,7 +16,7 @@ import logging
 lib_logger = logging.getLogger("rotator_library")
 
 
-class ChutesProvider(QuotaRefreshMixin, ChutesQuotaTracker, ProviderInterface):
+class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
     """
     Provider implementation for the chutes.ai API with quota tracking.
     """
@@ -93,21 +92,4 @@ class ChutesProvider(QuotaRefreshMixin, ChutesQuotaTracker, ProviderInterface):
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             lib_logger.error(f"Failed to fetch chutes.ai models: {e}")
             return []
-
-    # =========================================================================
-    # BACKGROUND JOB CONFIGURATION
-    # =========================================================================
-
-    def get_background_job_config(self) -> Optional[Dict[str, Any]]:
-        """
-        Configure periodic quota usage refresh.
-
-        Returns:
-            Background job configuration for quota refresh
-        """
-        return {
-            "interval": self._quota_refresh_interval,
-            "name": "chutes_quota_refresh",
-            "run_on_start": True,
-        }
 

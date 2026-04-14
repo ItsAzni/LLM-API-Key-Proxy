@@ -451,19 +451,6 @@ class AntigravityProvider(
         """Return the Antigravity API headers. Used by quota tracker mixin."""
         return ANTIGRAVITY_HEADERS
 
-    def get_model_tier_requirement(self, model: str) -> Optional[int]:
-        """
-        Returns the minimum priority tier required for a model.
-        Antigravity has no model-tier restrictions - all models work on all tiers.
-
-        Args:
-            model: The model name (with or without provider prefix)
-
-        Returns:
-            None - no restrictions for any model
-        """
-        return None
-
     # =========================================================================
     # MODEL UTILITIES
     # =========================================================================

@@ -88,7 +88,7 @@ from ..error_handler import (
     should_retry_same_key,
     get_retry_backoff,
 )
-from ..provider_config import ProviderConfig
+from ..provider_routing_config import ProviderConfig
 from ..http_client_pool import HttpClientPool, get_http_pool, close_http_pool
 from ..providers import PROVIDER_PLUGINS
 from ..providers.openai_compatible_provider import OpenAICompatibleProvider
@@ -816,6 +816,71 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
             **kwargs,
         )
 
+    def aimage_generation(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        return self._execute_with_retry(
+            litellm.aimage_generation,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
+    def aimage_edit(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        return self._execute_with_retry(
+            litellm.aimage_edit,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
+    def aimage_variation(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        return self._execute_with_retry(
+            litellm.aimage_variation,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
+    def aspeech(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        return self._execute_with_retry(
+            litellm.aspeech,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
+    def atranscription(
+        self,
+        request: Optional[Any] = None,
+        pre_request_callback: Optional[callable] = None,
+        **kwargs,
+    ) -> Any:
+        return self._execute_with_retry(
+            litellm.atranscription,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **kwargs,
+        )
+
     def token_count(self, **kwargs) -> int:
         """Calculates the number of tokens for a given text or list of messages.
 
@@ -989,6 +1054,58 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         credential: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await self.quota_reporter.force_refresh_quota(provider, credential)
+
+    # --- Provider-specific API Methods (non-litellm) ---
+
+    async def call_provider_method(
+        self,
+        provider_name: str,
+        method_name: str,
+        **kwargs,
+    ) -> Any:
+        """Call a provider-specific method with credential rotation.
+
+        Picks an available credential for the provider, gets the provider
+        instance, and delegates the call. Raises AttributeError if the
+        provider or method doesn't exist.
+        """
+        provider_instance = self._get_provider_instance(provider_name)
+        if provider_instance is None:
+            raise ValueError(f"No provider instance for '{provider_name}'")
+
+        method = getattr(provider_instance, method_name, None)
+        if method is None:
+            raise AttributeError(
+                f"Provider '{provider_name}' has no method '{method_name}'"
+            )
+
+        credentials = self.all_credentials.get(provider_name)
+        if not credentials:
+            raise ValueError(f"No credentials for provider '{provider_name}'")
+
+        http_client = await self._get_http_client_async(streaming=False)
+
+        for credential in credentials:
+            try:
+                return await method(credential, http_client, **kwargs)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    lib_logger.warning(
+                        f"Rate limited on credential {mask_credential(credential)} "
+                        f"for {provider_name}.{method_name}, trying next"
+                    )
+                    continue
+                raise
+            except Exception as e:
+                lib_logger.debug(
+                    f"Failed on credential for {provider_name}.{method_name}: {e}, "
+                    f"trying next"
+                )
+                continue
+
+        raise RuntimeError(
+            f"All credentials exhausted for {provider_name}.{method_name}"
+        )
 
     # --- Anthropic API Compatibility Methods ---
 

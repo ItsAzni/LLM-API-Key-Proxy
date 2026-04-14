@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from .simple_quota_tracker import SimpleQuotaTrackerBase
+from .lightweight_quota_mixin import LightweightQuotaMixin
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -33,11 +33,11 @@ lib_logger = logging.getLogger("rotator_library")
 CHUTES_QUOTA_API_URL = "https://api.chutes.ai/users/me/quota_usage/me"
 
 
-class ChutesQuotaTracker(SimpleQuotaTrackerBase):
+class ChutesQuotaTracker(LightweightQuotaMixin):
     """
     Mixin class providing quota tracking functionality for Chutes provider.
 
-    Inherits shared cache/pool boilerplate from SimpleQuotaTrackerBase.
+    Inherits shared cache/pool boilerplate from LightweightQuotaMixin.
     """
 
     _quota_cache: Dict[str, Dict[str, Any]]

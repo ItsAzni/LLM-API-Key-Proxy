@@ -306,20 +306,6 @@ class GeminiCliProvider(
         self._learned_costs_loaded: bool = False
 
 
-    def get_model_tier_requirement(self, model: str) -> Optional[int]:
-        """
-        Returns the minimum priority tier required for a model.
-
-        Args:
-            model: The model name (with or without provider prefix)
-
-        Returns:
-            Minimum required priority level or None if no restrictions
-        """
-        # No model-specific priority restrictions
-        # (Gemini 3 is now public and available to all tiers)
-        return None
-
     # =========================================================================
     # MODEL UTILITIES
     # =========================================================================

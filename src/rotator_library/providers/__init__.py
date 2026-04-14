@@ -124,7 +124,7 @@ def list_providers():
             providers.add(module_name)
 
     # Add dynamic providers from environment variables
-    from ..provider_config import KNOWN_PROVIDERS
+    from ..provider_routing_config import KNOWN_PROVIDERS
 
     for env_var in os.environ:
         if env_var.endswith("_API_BASE"):
@@ -140,7 +140,7 @@ def _ensure_dynamic_providers():
     Register dynamic OpenAI-compatible providers from environment variables.
     Called lazily when first provider access happens.
     """
-    from ..provider_config import KNOWN_PROVIDERS
+    from ..provider_routing_config import KNOWN_PROVIDERS
 
     for env_var in os.environ:
         if env_var.endswith("_API_BASE"):

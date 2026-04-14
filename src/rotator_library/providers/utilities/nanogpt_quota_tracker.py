@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from .simple_quota_tracker import SimpleQuotaTrackerBase
+from .lightweight_quota_mixin import LightweightQuotaMixin
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -31,7 +31,7 @@ lib_logger = logging.getLogger("rotator_library")
 NANOGPT_API_BASE = "https://nano-gpt.com"
 
 
-class NanoGptQuotaTracker(SimpleQuotaTrackerBase):
+class NanoGptQuotaTracker(LightweightQuotaMixin):
     """
     Mixin class providing quota tracking functionality for NanoGPT provider.
 

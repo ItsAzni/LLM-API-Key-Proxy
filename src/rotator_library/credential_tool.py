@@ -23,7 +23,8 @@ from rich.text import Text
 
 from .utils.paths import get_oauth_dir, get_data_file
 from .utils.terminal_utils import clear_screen
-from .provider_config import LITELLM_PROVIDERS, PROVIDER_CATEGORIES, PROVIDER_BLACKLIST
+from .provider_ui_config import LITELLM_PROVIDERS, PROVIDER_CATEGORIES
+from .provider_routing_config import PROVIDER_BLACKLIST
 from .litellm_providers import SCRAPED_PROVIDERS
 
 
@@ -334,7 +335,7 @@ def _get_existing_custom_providers() -> list:
         List of dicts with provider info:
         [{"name": "myserver", "api_base": "http://...", "has_key": True}, ...]
     """
-    from .provider_config import KNOWN_PROVIDERS
+    from .provider_routing_config import KNOWN_PROVIDERS
 
     custom_providers = []
     env_file = _get_env_file()

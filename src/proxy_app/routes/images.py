@@ -118,3 +118,52 @@ async def image_variations(
             raise handle_litellm_error(e, error_format="openai")
         logging.error(f"Image variation request failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/images/generations/async")
+async def async_image_generations(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """Async image generation endpoint (ZAI-specific). Returns a task ID for polling."""
+    try:
+        request_data = orjson.loads(await request.body())
+
+        log_request_to_console(
+            url=str(request.url),
+            headers=request.headers,
+            client_info=(request.client.host, request.client.port),
+            request_data=request_data,
+        )
+
+        return await client.call_provider_method(
+            "zai", "async_image_generate", **request_data
+        )
+
+    except Exception as e:
+        if isinstance(e, (litellm.InvalidRequestError, ValueError,
+                          litellm.AuthenticationError, litellm.RateLimitError,
+                          litellm.ServiceUnavailableError, litellm.APIConnectionError,
+                          litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
+            raise handle_litellm_error(e, error_format="openai")
+        logging.error(f"Async image generation request failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/v1/images/{image_id}")
+async def get_image_status(
+    image_id: str,
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """Retrieve status/result of an async image generation task (ZAI-specific)."""
+    try:
+        return await client.call_provider_method(
+            "zai", "async_image_status", image_id=image_id
+        )
+
+    except Exception as e:
+        logging.error(f"Image status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
