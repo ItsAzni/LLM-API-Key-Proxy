@@ -146,7 +146,7 @@ async def streaming_response_wrapper(
             if "usage" in chunk and chunk["usage"]:
                 usage_data = chunk["usage"]
     except Exception as e:
-        logging.error(f"An error occurred during the response stream: {e}")
+        logging.exception("Error during response stream")
         # Yield a final error message to the client to ensure they are not left hanging.
         error_payload = {
             "error": {
@@ -169,68 +169,71 @@ async def streaming_response_wrapper(
         except AttributeError:
             pass
         if logger:
-            if first_chunk_meta is not None:
-                # --- Join accumulated string parts ---
-                if _content_parts:
-                    final_message["content"] = "".join(_content_parts)
+            try:
+                if first_chunk_meta is not None:
+                    # --- Join accumulated string parts ---
+                    if _content_parts:
+                        final_message["content"] = "".join(_content_parts)
 
-                for key, parts in _generic_str_parts.items():
-                    final_message[key] = "".join(parts)
+                    for key, parts in _generic_str_parts.items():
+                        final_message[key] = "".join(parts)
 
-                # Flatten tool_calls: convert name_parts/args_parts to strings
-                if aggregated_tool_calls:
-                    tool_calls_list = []
-                    for tc in aggregated_tool_calls.values():
-                        fn = tc["function"]
-                        tool_calls_list.append(
-                            {
-                                "id": tc.get("id"),
-                                "type": tc["type"],
-                                "function": {
-                                    "name": "".join(fn["name_parts"]),
-                                    "arguments": "".join(fn["args_parts"]),
-                                },
-                            }
-                        )
-                    final_message["tool_calls"] = tool_calls_list
-                    # CRITICAL FIX: Override finish_reason when tool_calls exist
-                    # This ensures OpenCode and other agentic systems continue the conversation loop
-                    finish_reason = "tool_calls"
+                    # Flatten tool_calls: convert name_parts/args_parts to strings
+                    if aggregated_tool_calls:
+                        tool_calls_list = []
+                        for tc in aggregated_tool_calls.values():
+                            fn = tc["function"]
+                            tool_calls_list.append(
+                                {
+                                    "id": tc.get("id"),
+                                    "type": tc["type"],
+                                    "function": {
+                                        "name": "".join(fn["name_parts"]),
+                                        "arguments": "".join(fn["args_parts"]),
+                                    },
+                                }
+                            )
+                        final_message["tool_calls"] = tool_calls_list
+                        # CRITICAL FIX: Override finish_reason when tool_calls exist
+                        # This ensures OpenCode and other agentic systems continue the conversation loop
+                        finish_reason = "tool_calls"
 
-                if "function_call" in final_message:
-                    fc = final_message["function_call"]
-                    final_message["function_call"] = {
-                        "name": "".join(fc["_name_parts"]),
-                        "arguments": "".join(fc["_args_parts"]),
+                    if "function_call" in final_message:
+                        fc = final_message["function_call"]
+                        final_message["function_call"] = {
+                            "name": "".join(fc["_name_parts"]),
+                            "arguments": "".join(fc["_args_parts"]),
+                        }
+
+                    # Ensure standard fields are present for consistent logging
+                    for field in ["content", "tool_calls", "function_call"]:
+                        if field not in final_message:
+                            final_message[field] = None
+
+                    final_choice = {
+                        "index": 0,
+                        "message": final_message,
+                        "finish_reason": finish_reason,
                     }
 
-                # Ensure standard fields are present for consistent logging
-                for field in ["content", "tool_calls", "function_call"]:
-                    if field not in final_message:
-                        final_message[field] = None
+                    full_response = {
+                        "id": first_chunk_meta.get("id"),
+                        "object": "chat.completion",
+                        "created": first_chunk_meta.get("created"),
+                        "model": first_chunk_meta.get("model"),
+                        "choices": [final_choice],
+                        "usage": usage_data,
+                    }
+                else:
+                    full_response = {}
 
-                final_choice = {
-                    "index": 0,
-                    "message": final_message,
-                    "finish_reason": finish_reason,
-                }
-
-                full_response = {
-                    "id": first_chunk_meta.get("id"),
-                    "object": "chat.completion",
-                    "created": first_chunk_meta.get("created"),
-                    "model": first_chunk_meta.get("model"),
-                    "choices": [final_choice],
-                    "usage": usage_data,
-                }
-            else:
-                full_response = {}
-
-            logger.log_final_response(
-                status_code=200,
-                headers=None,  # Headers are not available at this stage
-                body=full_response,
-            )
+                logger.log_final_response(
+                    status_code=200,
+                    headers=None,  # Headers are not available at this stage
+                    body=full_response,
+                )
+            except Exception:
+                logging.exception("Error during stream finalization logging")
 
 
 def handle_litellm_error(e: Exception, error_format: str = "openai") -> HTTPException:

@@ -131,7 +131,7 @@ async def chat_completions(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Request failed after all retries: {e}")
+        logging.error(f"Request failed after all retries: {e}", exc_info=True)
         # Optionally log the failed request (request_data already parsed above)
         if ENABLE_REQUEST_LOGGING:
             if raw_logger:

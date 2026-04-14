@@ -106,5 +106,5 @@ async def embeddings(
     except (litellm.InternalServerError, litellm.OpenAIError) as e:
         raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(e)}")
     except Exception as e:
-        logging.error(f"Embedding request failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Embedding request failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

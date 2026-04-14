@@ -19,7 +19,6 @@ import litellm
 import orjson
 from ..utils.json_utils import json_deep_copy
 
-from ..config import CIRCUIT_BREAKER_PROVIDER_OVERRIDES
 from ..env_cache import _provider_env_cache
 from ..error_types import mask_credential, ClassifiedError
 from ..http_client_pool import HttpClientPool, get_http_pool

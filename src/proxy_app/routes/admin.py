@@ -54,8 +54,8 @@ async def get_quota_stats(
         stats = await client.get_quota_stats(provider_filter=provider)
         return stats
     except Exception as e:
-        logging.error(f"Failed to get quota stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Failed to get quota stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/v1/quota-stats")
@@ -148,9 +148,11 @@ async def refresh_quota_stats(
 
     except HTTPException:
         raise
+    except orjson.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
     except Exception as e:
-        logging.error(f"Failed to refresh quota stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Failed to refresh quota stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/v1/token-count")
@@ -175,9 +177,13 @@ async def token_count(
         count = await asyncio.to_thread(client.token_count, **data)
         return {"token_count": count}
 
+    except orjson.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Token count failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Token count failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/v1/cost-estimate")
@@ -278,8 +284,10 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
         result["error"] = "Pricing data not available for this model"
         return result
 
+    except orjson.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Cost estimate failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Cost estimate failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

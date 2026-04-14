@@ -132,8 +132,6 @@ with _console.status("[dim]Loading core dependencies...", spinner="dots"):
     from dotenv import load_dotenv
     import colorlog
     import json
-    from typing import Any, List, Optional, Union
-
     # --- Early Log Level Configuration ---
     logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 

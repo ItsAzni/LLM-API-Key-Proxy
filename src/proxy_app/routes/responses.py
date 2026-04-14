@@ -62,14 +62,16 @@ async def create_response(
             response = await client.acompletion(request=request, **request_data)
             return response
 
+    except orjson.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
     except Exception as e:
         if isinstance(e, (litellm.InvalidRequestError, ValueError, litellm.ContextWindowExceededError,
                           litellm.AuthenticationError, litellm.RateLimitError,
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Responses API request failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Responses API request failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def _input_to_messages(input_data) -> list:

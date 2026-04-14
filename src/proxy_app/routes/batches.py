@@ -36,14 +36,16 @@ async def create_batch(
         response = await litellm.acreate_batch(**request_data)
         return response
 
+    except orjson.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
     except Exception as e:
         if isinstance(e, (litellm.InvalidRequestError, ValueError, litellm.ContextWindowExceededError,
                           litellm.AuthenticationError, litellm.RateLimitError,
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Create batch failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Create batch failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/v1/batches/{batch_id}")
@@ -64,8 +66,8 @@ async def retrieve_batch(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Retrieve batch failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Retrieve batch failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/v1/batches/{batch_id}/cancel")
@@ -86,8 +88,8 @@ async def cancel_batch(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Cancel batch failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Cancel batch failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/v1/batches")
@@ -107,5 +109,5 @@ async def list_batches(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"List batches failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"List batches failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

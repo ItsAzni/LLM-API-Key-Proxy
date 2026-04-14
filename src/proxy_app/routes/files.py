@@ -36,8 +36,8 @@ async def upload_file(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"File upload failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"File upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/v1/files")
@@ -56,8 +56,8 @@ async def list_files(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"List files failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"List files failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/v1/files/{file_id}")
@@ -78,8 +78,8 @@ async def retrieve_file(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Retrieve file failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Retrieve file failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/v1/files/{file_id}")
@@ -100,8 +100,8 @@ async def delete_file(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Delete file failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Delete file failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/v1/files/{file_id}/content")
@@ -122,5 +122,5 @@ async def retrieve_file_content(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Retrieve file content failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Retrieve file content failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")

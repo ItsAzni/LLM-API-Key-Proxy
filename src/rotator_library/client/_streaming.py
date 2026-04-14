@@ -197,12 +197,15 @@ class StreamingMixin:
             yield error_data
 
         finally:
-            # Always emit STREAM_DONE if stream completed and client is still connected
-            # This prevents sending [DONE] to a disconnected client or after an error.
-            if stream_completed and (
-                not request or not await request.is_disconnected()
-            ):
-                yield STREAM_DONE
+            try:
+                # Always emit STREAM_DONE if stream completed and client is still connected
+                # This prevents sending [DONE] to a disconnected client or after an error.
+                if stream_completed and (
+                    not request or not await request.is_disconnected()
+                ):
+                    yield STREAM_DONE
+            except Exception:
+                lib_logger.exception("Error during stream cleanup")
 
     async def _transaction_logging_stream_wrapper(
         self,

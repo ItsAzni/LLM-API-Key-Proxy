@@ -42,7 +42,7 @@ async def agent_chat(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="openai")
-        logging.error(f"Agent chat request failed: {e}")
+        logging.error(f"Agent chat request failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

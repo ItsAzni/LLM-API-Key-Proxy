@@ -96,16 +96,16 @@ async def anthropic_messages(
                           litellm.ServiceUnavailableError, litellm.APIConnectionError,
                           litellm.Timeout, litellm.InternalServerError, litellm.OpenAIError)):
             raise handle_litellm_error(e, error_format="anthropic")
-        logging.error(f"Anthropic messages endpoint error: {e}")
+        logging.error("Anthropic messages endpoint error", exc_info=True)
         if logger:
             logger.log_final_response(
                 status_code=500,
                 headers=None,
-                body={"error": str(e)},
+                body={"error": "Internal server error"},
             )
         error_response = {
             "type": "error",
-            "error": make_error_response(str(e), "api_error"),
+            "error": make_error_response("Internal server error", "api_error"),
         }
         raise HTTPException(status_code=500, detail=error_response)
 
@@ -147,9 +147,9 @@ async def anthropic_count_tokens(
         }
         raise HTTPException(status_code=401, detail=error_response)
     except Exception as e:
-        logging.error(f"Anthropic count_tokens endpoint error: {e}")
+        logging.error("Anthropic count_tokens endpoint error", exc_info=True)
         error_response = {
             "type": "error",
-            "error": make_error_response(str(e), "api_error"),
+            "error": make_error_response("Internal server error", "api_error"),
         }
         raise HTTPException(status_code=500, detail=error_response)
