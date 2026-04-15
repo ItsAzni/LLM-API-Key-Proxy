@@ -17,6 +17,7 @@ import gzip
 import logging
 import os
 import ssl
+import sys
 import time
 from typing import Any, Dict, List, Optional, Union
 import httpx
@@ -32,7 +33,8 @@ _http_dns_resolver = os.getenv("HTTP_DNS_RESOLVER", "").strip().lower()
 if _http_dns_resolver in ("true", "1", "yes", "on") or (
     _http_dns_resolver and _http_dns_resolver not in ("false", "0", "no", "off")
 ):
-    os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
+    if sys.platform == "win32":
+        os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 
 from .timeout_config import TimeoutConfig
 from .config import env_bool as _env_bool, env_float as _env_float, env_int as _env_int
@@ -490,7 +492,8 @@ class HttpClientPool(metaclass=SingletonMeta):
         """
         Ensure a valid client exists for the given mode, recreating if necessary.
 
-        This is an async method that can safely recreate closed clients.
+        Creates clients outside the lock to avoid blocking concurrent access
+        during expensive _create_client() (SSL/DNS setup).
 
         Args:
         streaming: Whether to get streaming client
@@ -498,22 +501,34 @@ class HttpClientPool(metaclass=SingletonMeta):
         Returns:
         Valid httpx.AsyncClient instance
         """
+        # Fast path: check under lock if client is already valid
+        async with self._client_lock:
+            client = self._streaming_client if streaming else self._non_streaming_client
+            if not self._is_client_closed(client):
+                return client
+
+        # Slow path: recreate outside lock so other requests aren't blocked
+        lib_logger.warning(
+            f"{'Streaming' if streaming else 'Non-streaming'} HTTP client was closed, recreating..."
+        )
+        new_client = await self._create_client(streaming=streaming)
+
+        # Assign under lock — cheap pointer swap
         async with self._client_lock:
             if streaming:
-                client = self._streaming_client
-                if self._is_client_closed(client):
-                    lib_logger.warning("Streaming HTTP client was closed, recreating...")
-                    self._streaming_client = await self._create_client(streaming=True)
+                # Another coroutine may have already recreated it
+                if self._is_client_closed(self._streaming_client):
+                    self._streaming_client = new_client
                     self._stats["reconnects"] += 1
+                else:
+                    self._schedule_orphan_close(new_client)
                 return self._streaming_client
             else:
-                client = self._non_streaming_client
-                if self._is_client_closed(client):
-                    lib_logger.warning(
-                        "Non-streaming HTTP client was closed, recreating..."
-                    )
-                    self._non_streaming_client = await self._create_client(streaming=False)
+                if self._is_client_closed(self._non_streaming_client):
+                    self._non_streaming_client = new_client
                     self._stats["reconnects"] += 1
+                else:
+                    self._schedule_orphan_close(new_client)
                 return self._non_streaming_client
 
     def get_client(self, streaming: bool = False) -> httpx.AsyncClient:
@@ -723,35 +738,48 @@ class HttpClientPool(metaclass=SingletonMeta):
         """
         Attempt to recover closed or unhealthy clients.
 
+        Creates clients outside the lock to avoid blocking concurrent
+        get_client_async() calls during expensive _create_client().
+
         Returns:
         True if recovery was successful, False otherwise
         """
         recovered = []
+        new_streaming = None
+        new_non_streaming = None
 
+        # Create clients outside lock — SSL/DNS setup can take seconds
         if self._is_client_closed(self._streaming_client):
             try:
-                self._streaming_client = await self._create_client(streaming=True)
+                new_streaming = await self._create_client(streaming=True)
                 recovered.append("streaming")
-                self._stats["reconnects"] += 1
             except Exception as e:
                 lib_logger.error(f"Failed to recover streaming client: {e}")
 
         if self._is_client_closed(self._non_streaming_client):
             try:
-                self._non_streaming_client = await self._create_client(streaming=False)
+                new_non_streaming = await self._create_client(streaming=False)
                 recovered.append("non-streaming")
-                self._stats["reconnects"] += 1
             except Exception as e:
                 lib_logger.error(f"Failed to recover non-streaming client: {e}")
 
-        if recovered:
-            lib_logger.info(f"HTTP client pool recovered: {', '.join(recovered)}")
-            self._healthy = True
+        # Assign under lock — cheap pointer swaps, no I/O
+        async with self._client_lock:
+            if new_streaming is not None:
+                self._streaming_client = new_streaming
+                self._stats["reconnects"] += 1
+            if new_non_streaming is not None:
+                self._non_streaming_client = new_non_streaming
+                self._stats["reconnects"] += 1
 
-        return len(recovered) > 0 or (
-            self._streaming_client is not None
-            and self._non_streaming_client is not None
-        )
+            if recovered:
+                lib_logger.info(f"HTTP client pool recovered: {', '.join(recovered)}")
+                self._healthy = True
+
+            return len(recovered) > 0 or (
+                self._streaming_client is not None
+                and self._non_streaming_client is not None
+            )
 
     @property
     def is_healthy(self) -> bool:

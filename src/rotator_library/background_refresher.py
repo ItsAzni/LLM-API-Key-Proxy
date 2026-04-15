@@ -69,7 +69,6 @@ class BackgroundRefresher:
 
     async def stop(self):
         """Stops all background tasks (main loop + provider jobs)."""
-        cancelled = False
         # Cancel provider job tasks first
         for provider, task in self._provider_job_tasks.items():
             if task and not task.done():
@@ -77,7 +76,7 @@ class BackgroundRefresher:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    cancelled = True
+                    pass
                 lib_logger.debug(f"Stopped background job for '{provider}'")
 
         self._provider_job_tasks.clear()
@@ -339,6 +338,6 @@ class BackgroundRefresher:
 
                 await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 lib_logger.error(f"Unexpected error in background refresher loop: {e}")

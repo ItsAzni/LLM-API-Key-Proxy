@@ -21,7 +21,7 @@ Key differences from chat/completions:
 import os
 import json
 import logging
-from typing import List, Dict, Any, Optional, AsyncGenerator, Union
+from typing import List, Dict, Any, AsyncGenerator, Union
 import httpx
 import litellm
 from litellm.types.utils import Delta as DeltaType, ChatCompletionMessageToolCall

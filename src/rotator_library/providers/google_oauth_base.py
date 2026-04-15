@@ -466,7 +466,7 @@ class GoogleOAuthBase(AuthQueueMixin, OAuthMixin, OAuthFlowMixin, BaseTokenManag
                         if "invalid_grant" in error_body.lower():
                             lib_logger.info(
                                 f"Credential '{Path(path).name}' needs re-auth (HTTP 400: invalid_grant). "
-                                f"Queued for re-authentication, rotating to next credential."
+                                "Queued for re-authentication, rotating to next credential."
                             )
                             asyncio.create_task(
                                 self._queue_refresh(
@@ -702,13 +702,13 @@ class GoogleOAuthBase(AuthQueueMixin, OAuthMixin, OAuthFlowMixin, BaseTokenManag
                                 needs_reauth = True
                                 lib_logger.info(
                                     f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
-                                    f"Routing to re-auth queue."
+                                    "Routing to re-auth queue."
                                 )
                         elif status_code in (401, 403):
                             needs_reauth = True
                             lib_logger.info(
                                 f"Credential '{Path(path).name}' needs re-auth (HTTP {status_code}). "
-                                f"Routing to re-auth queue."
+                                "Routing to re-auth queue."
                             )
 
                         if needs_reauth:

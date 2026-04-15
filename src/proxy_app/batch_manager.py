@@ -59,6 +59,12 @@ class EmbeddingBatcher:
                 for future in futures:
                     future.set_exception(e)
 
+            except asyncio.CancelledError:
+                for future in futures:
+                    if not future.done():
+                        future.cancel()
+                raise
+
     async def _gather_batch(self) -> Tuple[List[Dict[str, Any]], List[asyncio.Future]]:
         batch = []
         futures = []

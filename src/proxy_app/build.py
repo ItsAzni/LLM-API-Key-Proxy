@@ -59,8 +59,8 @@ def main():
         "--exclude-module=PIL.ImageTk",
         # Optimization: Enable UPX compression (if available)
         "--upx-dir=upx"
-        if platform.system() != "Darwin"
-        else "--noupx",  # macOS has issues with UPX
+        if platform.system() not in ("Darwin", "Windows")
+        else "--noupx",  # macOS has issues with UPX; Windows causes antivirus false positives
         # Optimization: Strip debug symbols (smaller binary)
         "--strip"
         if platform.system() != "Windows"

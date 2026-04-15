@@ -33,7 +33,6 @@ import logging
 import orjson
 import os
 import time
-from abc import abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -742,7 +741,7 @@ class BaseQuotaTracker:
                         cred_data = json_loads(f.read())
                         tier = cred_data.get("_proxy_metadata", {}).get("tier")
                 except Exception:
-                    pass
+                    lib_logger.debug("Failed to load tier from credential file: %s", credential_path, exc_info=True)
 
         if not tier or tier == "unknown":
             # Try to discover tier by making a fetch first

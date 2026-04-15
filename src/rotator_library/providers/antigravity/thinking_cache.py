@@ -13,8 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import orjson
 from ...utils.json_utils import json_deep_copy
 from .constants import (
-    ENABLE_INTERLEAVED_THINKING,
-    CLAUDE_INTERLEAVED_THINKING_HINT,
     CLAUDE_USER_INTERLEAVED_THINKING_REMINDER,
     lib_logger,
 )
@@ -744,9 +742,9 @@ class ThinkingCacheMixin:
         messages.append(synthetic_user)
 
         lib_logger.info(
-            f"[Thinking Sanitization] Closed tool loop with synthetic messages. "
+            "[Thinking Sanitization] Closed tool loop with synthetic messages. "
             f"Model: '{synthetic_model_content}', User: '[Continue]'. "
-            f"Claude will now start a fresh turn with thinking enabled."
+            "Claude will now start a fresh turn with thinking enabled."
         )
 
         return messages

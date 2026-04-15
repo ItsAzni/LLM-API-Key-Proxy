@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import httpx
 import litellm
@@ -53,17 +53,14 @@ from .constants import (
 from .thinking_cache import ThinkingCacheMixin
 from .message_transform import MessageTransformMixin
 from .tool_recovery import ToolRecoveryMixin
-from .streaming import StreamingMixin
-
-if TYPE_CHECKING:
-    from ...usage_manager import UsageManager
+from .streaming import AntigravityStreamingMixin
 
 
 class AntigravityProvider(
     ThinkingCacheMixin,
     MessageTransformMixin,
     ToolRecoveryMixin,
-    StreamingMixin,
+    AntigravityStreamingMixin,
     AntigravityAuthBase,
     AntigravityQuotaTracker,
     GeminiToolHandler,

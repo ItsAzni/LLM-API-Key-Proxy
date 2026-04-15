@@ -24,7 +24,7 @@ class ModelCard(BaseModel):
     owned_by: str = "Mirro-Proxy"
 
 
-class ModelCapabilities(BaseModel):
+class ProxyModelCapabilities(BaseModel):
     """Model capability flags."""
 
     tool_choice: bool = False
@@ -56,7 +56,7 @@ class EnrichedModelCard(BaseModel):
     mode: str = "chat"
     supported_modalities: List[str] = Field(default_factory=lambda: ["text"])
     supported_output_modalities: List[str] = Field(default_factory=lambda: ["text"])
-    capabilities: Optional[ModelCapabilities] = None
+    capabilities: Optional[ProxyModelCapabilities] = None
     # Debug info (optional)
     _sources: Optional[List[str]] = None
     _match_type: Optional[str] = None

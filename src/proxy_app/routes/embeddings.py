@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request, Depends, HTTPException
 
 from rotator_library import RotatingClient
 from proxy_app.models import EmbeddingRequest
-from proxy_app.dependencies import get_rotating_client, get_embedding_batcher, verify_api_key
+from proxy_app.dependencies import get_rotating_client, get_embedding_batcher, verify_api_key, make_error_response
 from proxy_app.batch_manager import EmbeddingBatcher
 from proxy_app.request_logger import log_request_to_console
 
@@ -94,17 +94,17 @@ async def embeddings(
         ValueError,
         litellm.ContextWindowExceededError,
     ) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid Request: {str(e)}")
+        raise HTTPException(status_code=400, detail=make_error_response("Invalid Request", "invalid_request_error"))
     except litellm.AuthenticationError as e:
-        raise HTTPException(status_code=401, detail=f"Authentication Error: {str(e)}")
+        raise HTTPException(status_code=401, detail=make_error_response("Authentication Error", "authentication_error"))
     except litellm.RateLimitError as e:
-        raise HTTPException(status_code=429, detail=f"Rate Limit Exceeded: {str(e)}")
+        raise HTTPException(status_code=429, detail=make_error_response("Rate Limit Exceeded", "rate_limit_error"))
     except (litellm.ServiceUnavailableError, litellm.APIConnectionError) as e:
-        raise HTTPException(status_code=503, detail=f"Service Unavailable: {str(e)}")
+        raise HTTPException(status_code=503, detail=make_error_response("Service Unavailable", "server_error"))
     except litellm.Timeout as e:
-        raise HTTPException(status_code=504, detail=f"Gateway Timeout: {str(e)}")
+        raise HTTPException(status_code=504, detail=make_error_response("Gateway Timeout", "timeout_error"))
     except (litellm.InternalServerError, litellm.OpenAIError) as e:
-        raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(e)}")
+        raise HTTPException(status_code=502, detail=make_error_response("Bad Gateway", "server_error"))
     except Exception as e:
         logging.error(f"Embedding request failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=make_error_response("Internal server error", "api_error"))

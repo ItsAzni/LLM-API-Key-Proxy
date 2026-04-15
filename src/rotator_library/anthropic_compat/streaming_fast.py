@@ -16,7 +16,6 @@ Performance optimizations:
 
 import asyncio
 import logging
-import time
 from time import monotonic
 import uuid
 from typing import AsyncGenerator, Callable, Optional, Awaitable, Any, TYPE_CHECKING
@@ -351,6 +350,7 @@ async def anthropic_streaming_wrapper_fast(
                 try:
                     chunk = json_loads(data_content)
                 except Exception:
+                    logger.debug("Failed to parse SSE data chunk: %s", data_content, exc_info=True)
                     continue
             else:
                 continue

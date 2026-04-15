@@ -26,8 +26,10 @@ import re
 if sys.platform == "win32":
     import io
 
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, 'buffer') and sys.stderr.buffer is not None:
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # --- Argument Parsing (BEFORE heavy imports) ---
 parser = argparse.ArgumentParser(description="API Key Proxy Server")
@@ -683,7 +685,17 @@ async def lifespan(app: FastAPI):
         with _streams_lock:
             remaining = getattr(app.state, "active_streams", 0)
         if remaining:
-            logging.warning("Forcing shutdown with %d active streams", remaining)
+            logging.warning("Cancelling %d remaining active streams", remaining)
+            # Cancel remaining in-flight stream generators
+            active_stream_gens = getattr(app.state, "active_stream_gens", None)
+            if active_stream_gens:
+                for stream_gen in list(active_stream_gens):
+                    try:
+                        if hasattr(stream_gen, "aclose"):
+                            await stream_gen.aclose()
+                    except Exception:
+                        pass
+                active_stream_gens.clear()
     except Exception as e:
         logging.debug("Error waiting for active streams during shutdown: %s", e)
 
@@ -691,8 +703,7 @@ async def lifespan(app: FastAPI):
     close_doh_client()  # Close persistent DoH httpx.Client
     if app.state.embedding_batcher:
         await app.state.embedding_batcher.stop()
-    await client.close()
-    await close_http_pool()
+    await client.close()  # Also calls close_http_pool()
 
     # Close litellm's internal aiohttp/httpx sessions to prevent
     # "Unclosed client session" warnings on shutdown

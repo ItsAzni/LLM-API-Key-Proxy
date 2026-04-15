@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import httpx
 import litellm
@@ -30,7 +29,7 @@ from .constants import (
 from ..provider_interface import build_bearer_headers
 
 
-class StreamingMixin:
+class AntigravityStreamingMixin:
     """Mixin providing streaming response handling methods."""
 
     async def _collect_streaming_chunks(

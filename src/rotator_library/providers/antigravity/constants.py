@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import functools
-import hashlib
 import logging
-import os
 import random
 import uuid
 from typing import (
@@ -23,8 +21,6 @@ import orjson
 
 from ...config import env_bool, env_int
 from ...utils.paths import get_cache_dir
-from ...utils.json_utils import json_deep_copy
-from ...utils.duration import parse_duration as _parse_duration_shared
 
 class _MalformedFunctionCallDetected(Exception):
     """

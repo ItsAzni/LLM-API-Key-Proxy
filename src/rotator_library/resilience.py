@@ -66,3 +66,12 @@ class ResilienceOrchestrator:
     async def record_success(self, provider: str) -> None:
         """Record success in circuit breaker."""
         await self.circuit_breaker.record_success(provider)
+
+    async def release_half_open_slot(self, provider: str) -> None:
+        """Release a half-open slot acquired via can_attempt().
+
+        Must be called in error paths that skip record_success() and
+        record_ip_throttle(), otherwise the slot leaks and the provider
+        becomes stuck in HALF_OPEN once half_open_active reaches half_open_max.
+        """
+        await self.circuit_breaker.release_half_open_slot(provider)

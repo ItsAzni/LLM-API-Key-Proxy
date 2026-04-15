@@ -419,9 +419,9 @@ class GeminiCliProvider(
 
         if has_free and has_paid:
             lib_logger.warning(
-                f"Mixed Gemini tier credentials detected! You have both free-tier and paid-tier "
+                "Mixed Gemini tier credentials detected! You have both free-tier and paid-tier "
                 f"(e.g., gemini-advanced) credentials loaded. Tiers found: {', '.join(sorted(tiers))}. "
-                f"This may cause unexpected behavior with model availability and rate limits."
+                "This may cause unexpected behavior with model availability and rate limits."
             )
 
     def has_custom_logic(self) -> bool:
@@ -1008,7 +1008,7 @@ class GeminiCliProvider(
                                         f"API error {response.status_code}: {error_body.decode()}"
                                     )
                                 except Exception:
-                                    pass
+                                    lib_logger.debug("Failed to read error body for status %s", response.status_code, exc_info=True)
 
                             # This will raise an HTTPStatusError for 4xx/5xx responses
                             response.raise_for_status()
@@ -1053,7 +1053,7 @@ class GeminiCliProvider(
                             try:
                                 error_body = e.response.text
                             except Exception:
-                                pass
+                                lib_logger.debug("Failed to extract error body from HTTPStatusError response", exc_info=True)
 
                         # Only log to file logger (for detailed logging)
                         if error_body:

@@ -10,7 +10,7 @@ sliding window counters to estimate rate limit usage.
 
 import time
 import asyncio
-from typing import Dict, Optional, List
+from typing import Dict, List
 from dataclasses import dataclass, field
 from collections import deque
 import logging

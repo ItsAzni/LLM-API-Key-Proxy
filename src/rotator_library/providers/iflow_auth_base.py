@@ -496,7 +496,7 @@ class IFlowAuthBase(GoogleOAuthBase):
                         ):
                             lib_logger.info(
                                 f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
-                                f"Queued for re-authentication, rotating to next credential."
+                                "Queued for re-authentication, rotating to next credential."
                             )
                             asyncio.create_task(
                                 self._queue_refresh(
@@ -642,7 +642,7 @@ class IFlowAuthBase(GoogleOAuthBase):
             if not await self._save_credentials(path, creds_from_file):
                 raise IOError(
                     f"Failed to persist refreshed credentials for '{Path(path).name}'. "
-                    f"Disk write failed - refresh will be retried."
+                    "Disk write failed - refresh will be retried."
                 )
 
             lib_logger.debug(
@@ -804,7 +804,7 @@ class IFlowAuthBase(GoogleOAuthBase):
                 if not await self._save_credentials(path, creds):
                     raise IOError(
                         f"Failed to save OAuth credentials to disk for '{display_name}'. "
-                        f"Please retry authentication."
+                        "Please retry authentication."
                     )
 
             lib_logger.info(

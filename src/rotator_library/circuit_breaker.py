@@ -335,6 +335,28 @@ class ProviderCircuitBreaker:
                         provider, circuit.failure_count, threshold
                     )
 
+    async def release_half_open_slot(self, provider: str) -> None:
+        """
+        Release a half-open slot that was acquired via can_attempt().
+
+        Must be called in every error path that does NOT go through
+        record_success() or record_ip_throttle(), otherwise the slot
+        leaks and the provider becomes permanently stuck in HALF_OPEN
+        once half_open_active reaches half_open_max.
+
+        Args:
+        provider: Provider name whose slot to release
+        """
+        lock = await self._provider_lock_manager.get_lock(provider)
+        async with lock:
+            circuit = self._get_or_create_circuit(provider)
+            if circuit.state == CircuitState.HALF_OPEN and circuit.half_open_active > 0:
+                circuit.half_open_active = max(0, circuit.half_open_active - 1)
+                lib_logger.debug(
+                    "Circuit for '%s' half_open slot released, active %d",
+                    provider, circuit.half_open_active
+                )
+
     async def open_immediately(
         self,
         provider: str,

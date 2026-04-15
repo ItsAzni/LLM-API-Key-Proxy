@@ -280,6 +280,16 @@ class QuotaViewer:
 
         return f"{base_url}/{endpoint}"
 
+    def _handle_httpx_error(self, exc: Exception) -> None:
+        """Handle httpx exceptions by setting self.last_error and returning None."""
+        if isinstance(exc, httpx.ConnectError):
+            self.last_error = "Connection failed. Is the proxy running?"
+        elif isinstance(exc, httpx.TimeoutException):
+            self.last_error = "Request timed out."
+        else:
+            self.last_error = str(exc)
+        return None
+
     def check_connection(
         self, remote: Dict[str, Any], timeout: float = 3.0
     ) -> Tuple[bool, str]:
@@ -359,15 +369,8 @@ class QuotaViewer:
                 self.last_error = None
                 return self.cached_stats
 
-        except httpx.ConnectError:
-            self.last_error = "Connection failed. Is the proxy running?"
-            return None
-        except httpx.TimeoutException:
-            self.last_error = "Request timed out."
-            return None
-        except Exception as e:
-            self.last_error = str(e)
-            return None
+        except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
+            return self._handle_httpx_error(e)
 
     def _merge_provider_stats(self, provider: str, result: Dict[str, Any]) -> None:
         """
@@ -548,15 +551,8 @@ class QuotaViewer:
                 self.last_error = None
                 return result
 
-        except httpx.ConnectError:
-            self.last_error = "Connection failed. Is the proxy running?"
-            return None
-        except httpx.TimeoutException:
-            self.last_error = "Request timed out."
-            return None
-        except Exception as e:
-            self.last_error = str(e)
-            return None
+        except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
+            return self._handle_httpx_error(e)
 
     # =========================================================================
     # DISPLAY SCREENS

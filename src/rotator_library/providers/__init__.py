@@ -13,9 +13,6 @@ from .antigravity_auth_base import AntigravityAuthBase
 from .colin_provider import ColinProvider
 from .dynamic_provider import DynamicOpenAICompatibleProvider
 
-# Shared base class for streaming response deduplication
-from .base_streaming_provider import StreamingResponseMixin
-
 # --- Provider Plugin System ---
 
 # Dictionary to hold discovered provider classes, mapping provider name to class

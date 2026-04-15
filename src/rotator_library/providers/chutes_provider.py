@@ -2,13 +2,10 @@
 # Copyright (c) 2026 ShmidtS
 
 import httpx
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.chutes_quota_tracker import ChutesQuotaTracker
 from ..config.defaults import env_int
-
-if TYPE_CHECKING:
-    from ..usage_manager import UsageManager
 
 # Create a local logger for this module
 import logging

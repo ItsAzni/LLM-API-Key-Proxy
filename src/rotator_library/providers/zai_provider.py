@@ -5,16 +5,13 @@ import httpx
 import os
 from ..utils.json_utils import json_loads
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.zai_quota_tracker import ZaiQuotaTracker
 from ..config.defaults import env_int
 
 ZAI_DEFAULT_API_BASE = "https://api.z.ai/api/coding/paas/v4"
-
-if TYPE_CHECKING:
-    from ..usage_manager import UsageManager
 
 import logging
 

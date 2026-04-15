@@ -25,12 +25,11 @@ Required from provider:
     - self.list_credentials(base_dir) -> List[Dict[str, Any]]
 """
 
-import asyncio
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -380,7 +379,7 @@ class GeminiCliQuotaTracker(BaseQuotaTracker):
                     error_msg = f"{error_msg}: {error_body[:200]}"
             except Exception:
                 # Best-effort extraction of HTTP error body; fall back to status-only message
-                pass
+                lib_logger.debug("Failed to extract Gemini CLI HTTP error body", exc_info=True)
             lib_logger.warning(f"Failed to fetch quota for {identifier}: {error_msg}")
             return {
                 "status": "error",

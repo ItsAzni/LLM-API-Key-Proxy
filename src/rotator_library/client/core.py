@@ -666,6 +666,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         RotatingClient instances.  Pool lifecycle is managed via
         close_http_pool() during application shutdown.
         """
+        await close_http_pool()
         self._http_pool = None
         self._pool_initialized = False
 

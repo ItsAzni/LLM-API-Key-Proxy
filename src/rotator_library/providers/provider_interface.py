@@ -12,10 +12,10 @@ from typing import (
     Union,
     FrozenSet,
     Tuple,
-    TYPE_CHECKING,
 )
 import re
 import json
+import logging
 import os
 import httpx
 import litellm
@@ -220,7 +220,7 @@ class ProviderInterface(ABC):
             try:
                 return error.response.text
             except Exception:
-                pass
+                logging.debug("Failed to extract error response text", exc_info=True)
         if hasattr(error, "body") and error.body:
             return str(error.body)
         if hasattr(error, "message"):

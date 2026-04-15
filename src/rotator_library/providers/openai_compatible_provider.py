@@ -83,10 +83,10 @@ class OpenAICompatibleProvider(ProviderInterface):
 
         except httpx.RequestError:
             # Silently ignore dynamic discovery errors
-            pass
+            lib_logger.debug("Dynamic model discovery request failed for %s", self.provider_name, exc_info=True)
         except Exception:
             # Silently ignore dynamic discovery errors
-            pass
+            lib_logger.debug("Dynamic model discovery failed for %s", self.provider_name, exc_info=True)
 
         return models
 

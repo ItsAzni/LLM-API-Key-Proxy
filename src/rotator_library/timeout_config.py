@@ -8,8 +8,8 @@ Centralized timeout configuration for HTTP requests.
 All values can be overridden via environment variables:
     TIMEOUT_CONNECT - Connection establishment timeout (default: 30s)
     TIMEOUT_WRITE - Request body send timeout (default: 30s)
-    TIMEOUT_POOL - Connection pool acquisition timeout (default: 60s)
-    TIMEOUT_READ_STREAMING - Read timeout between chunks for streaming (default: 180s / 3 min)
+    TIMEOUT_POOL - Connection pool acquisition timeout (default: 15s)
+    TIMEOUT_READ_STREAMING - Read timeout between chunks for streaming (default: 300s / 5 min)
     TIMEOUT_READ_NON_STREAMING - Read timeout for non-streaming responses (default: 600s / 10 min)
 """
 

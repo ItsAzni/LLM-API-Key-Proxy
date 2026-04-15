@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -14,12 +13,7 @@ import orjson
 from ...config import env_bool
 from ...utils.json_utils import json_deep_copy
 from .constants import (
-    BASE_URLS,
-    ANTIGRAVITY_HEADERS,
     DEFAULT_MAX_OUTPUT_TOKENS,
-    DEFAULT_GEMINI3_SYSTEM_INSTRUCTION,
-    DEFAULT_CLAUDE_SYSTEM_INSTRUCTION,
-    DEFAULT_PARALLEL_TOOL_INSTRUCTION,
     PREPEND_INSTRUCTION,
     INJECT_IDENTITY_OVERRIDE,
     USE_SHORT_ANTIGRAVITY_PROMPTS,
@@ -27,19 +21,8 @@ from .constants import (
     ANTIGRAVITY_AGENT_SYSTEM_INSTRUCTION_SHORT,
     ANTIGRAVITY_IDENTITY_OVERRIDE_INSTRUCTION,
     ANTIGRAVITY_IDENTITY_OVERRIDE_INSTRUCTION_SHORT,
-    AVAILABLE_MODELS,
-    MODEL_ALIAS_MAP,
-    MODEL_ALIAS_REVERSE,
-    EXCLUDED_MODELS,
-    STRIPPED_CLIENT_HEADERS,
-    EMPTY_RESPONSE_MAX_ATTEMPTS,
-    EMPTY_RESPONSE_RETRY_DELAY,
-    _MalformedFunctionCallDetected,
-    _sanitize_headers,
     _generate_request_id,
     _generate_stable_session_id,
-    _generate_project_id,
-    _generate_session_id,
     _clean_claude_schema,
     lib_logger,
 )
@@ -705,7 +688,7 @@ class MessageTransformMixin:
                 lib_logger.warning(
                     f"[Antigravity] thinkingBudget ({thinking_budget}) >= maxOutputTokens ({effective_max}). "
                     f"Clamping thinkingBudget to {clamped_budget}. "
-                    f"Set ANTIGRAVITY_CLAMP_THINKING_TO_OUTPUT=false to expand output instead."
+                    "Set ANTIGRAVITY_CLAMP_THINKING_TO_OUTPUT=false to expand output instead."
                 )
                 thinking_config["thinkingBudget"] = clamped_budget
                 gen_config["thinkingConfig"] = thinking_config
@@ -716,7 +699,7 @@ class MessageTransformMixin:
                 lib_logger.warning(
                     f"[Antigravity] thinkingBudget ({thinking_budget}) >= maxOutputTokens ({effective_max}). "
                     f"Expanding maxOutputTokens to {expanded_max}. "
-                    f"Set ANTIGRAVITY_CLAMP_THINKING_TO_OUTPUT=true to clamp thinking instead."
+                    "Set ANTIGRAVITY_CLAMP_THINKING_TO_OUTPUT=true to clamp thinking instead."
                 )
                 effective_max = expanded_max
 

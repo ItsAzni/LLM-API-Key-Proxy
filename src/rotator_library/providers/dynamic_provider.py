@@ -4,8 +4,6 @@
 import os
 from typing import Dict
 
-from .provider_interface import ProviderInterface
-
 
 class DynamicOpenAICompatibleProvider:
     """

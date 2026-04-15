@@ -4,6 +4,7 @@
 """Streaming mixin for RotatingClient — safe streaming wrapper and
 transaction logging stream wrapper."""
 
+import asyncio
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -41,7 +42,6 @@ class StreamingMixin:
         2. Track accumulated_finish_reason with priority: tool_calls > length/content_filter > stop
         3. Only emit finish_reason on final chunk (detected by usage.completion_tokens > 0)
         """
-        last_usage = None
         stream_completed = False
         stream_iterator = stream.__aiter__()
         json_buffer_parts: list[str] = []  # O(n) accumulation via list
@@ -179,6 +179,10 @@ class StreamingMixin:
                     stream_completed = False
                     raise
 
+                except (asyncio.CancelledError, MemoryError, SystemExit):
+                    stream_completed = False
+                    raise
+
                 except Exception as e:
                     # Check if this is a JSON decode error from fragmented chunks
                     error_str = str(e)
@@ -192,6 +196,7 @@ class StreamingMixin:
                         f"Error during streaming for model {model}, "
                         f"credential {mask_credential(key)}, chunk {chunk_index}: {e}"
                     )
+                    stream_completed = False
                     break
 
         except _StreamedException:

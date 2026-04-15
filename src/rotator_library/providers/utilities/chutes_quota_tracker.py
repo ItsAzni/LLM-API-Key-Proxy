@@ -128,7 +128,7 @@ class ChutesQuotaTracker(LightweightQuotaMixin):
                 if error_body:
                     error_msg = f"{error_msg}: {error_body[:200]}"
             except Exception:
-                pass
+                lib_logger.debug("Failed to extract Chutes HTTP error body", exc_info=True)
             lib_logger.warning(f"Failed to fetch Chutes quota: {error_msg}")
             return {
                 "status": "error",

@@ -29,6 +29,31 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 from .singleton import SingletonMeta
 
 # =============================================================================
+# WINDOWS RESILIENT os.replace()
+# =============================================================================
+
+
+def _resilient_os_replace(src: str, dst: str) -> None:
+    """Atomic file replace with retry on Windows for antivirus lock contention.
+
+    On Windows NTFS, os.replace() is not truly atomic and antivirus real-time
+    scanners can lock the target file, causing PermissionError. Retry up to
+    3 times with 0.1s backoff.
+    """
+    if os.name != "nt":
+        os.replace(src, dst)
+        return
+
+    for attempt in range(4):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 3:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+# =============================================================================
 # CONFIGURATION DEFAULTS
 # =============================================================================
 
@@ -206,7 +231,7 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
                     except (OSError, AttributeError):
                         pass
 
-                os.replace(tmp_path, path)
+                _resilient_os_replace(tmp_path, path)
                 tmp_path = None
 
             finally:
@@ -435,7 +460,7 @@ class ResilientStateWriter:
                     f.write(content)
                     tmp_fd = None  # fdopen closes the fd
 
-                os.replace(tmp_path, self.path)
+                _resilient_os_replace(tmp_path, self.path)
                 tmp_path = None
 
             finally:
@@ -565,7 +590,7 @@ def safe_write_json(
                     except (OSError, AttributeError):
                         pass
 
-                os.replace(tmp_path, path)
+                _resilient_os_replace(tmp_path, path)
                 tmp_path = None
             finally:
                 if tmp_fd is not None:

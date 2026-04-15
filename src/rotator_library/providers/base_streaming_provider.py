@@ -6,7 +6,6 @@ Base mixin classes for shared streaming logic across multiple API providers.
 LightweightQuotaMixin (formerly QuotaRefreshMixin) is in utilities/lightweight_quota_mixin.py.
 """
 
-import asyncio
 import json
 import logging
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional

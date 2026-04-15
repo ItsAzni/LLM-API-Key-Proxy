@@ -548,7 +548,7 @@ class GoogleProjectDiscoveryMixin:
                 try:
                     error_body = e.response.text
                 except Exception:
-                    pass
+                    lib_logger.debug("Failed to extract Google project HTTP error body", exc_info=True)
                 if e.response.status_code == 403:
                     lib_logger.error(
                         f"{provider} Code Assist API access denied (403). Response: {error_body}"

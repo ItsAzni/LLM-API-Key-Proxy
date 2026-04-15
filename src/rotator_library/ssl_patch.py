@@ -21,8 +21,6 @@ def _patch_aiohttp_connector():
 
         if not _ssl_verify:
             # Global patch: make ssl.create_default_context() return unverified context
-            _original_create_default = _ssl_module.create_default_context
-
             _force_tls12 = os.environ.get("SSL_FORCE_TLS12", "false").lower() == "true"
 
             def _patched_create_default(*args, **kwargs):
@@ -31,8 +29,6 @@ def _patch_aiohttp_connector():
                     ctx.maximum_version = _ssl_module.TLSVersion.TLSv1_2
                     try:
                         ctx.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                    except _ssl_module.SSLError:
-                        pass
                     except Exception as exc:
                         if os.name == "nt" and isinstance(exc, _ssl_module.SSLError):
                             print("[SSL-FIX] Schannel does not support set_ciphers, skipping on Windows")
@@ -63,8 +59,6 @@ def _patch_aiohttp_connector():
                     ssl_context.maximum_version = _ssl_module.TLSVersion.TLSv1_2
                     try:
                         ssl_context.set_ciphers(_AZURE_COMPATIBLE_CIPHERS)
-                    except _ssl_module.SSLError:
-                        pass
                     except Exception as exc:
                         if os.name == "nt" and isinstance(exc, _ssl_module.SSLError):
                             print("[SSL-FIX] Schannel does not support set_ciphers, skipping on Windows")
