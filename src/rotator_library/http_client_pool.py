@@ -33,7 +33,16 @@ _http_dns_resolver = os.getenv("HTTP_DNS_RESOLVER", "").strip().lower()
 if _http_dns_resolver in ("true", "1", "yes", "on") or (
     _http_dns_resolver and _http_dns_resolver not in ("false", "0", "no", "off")
 ):
-    if sys.platform == "win32":
+    # Check if aiodns is available — if missing, aiohttp DNS resolution
+    # fails on any platform, not just Windows.
+    try:
+        import aiodns  # type: ignore[import-untyped] # noqa: F401
+    except ImportError:
+        _aiodns_available = False
+    else:
+        _aiodns_available = True
+
+    if sys.platform == "win32" or not _aiodns_available:
         os.environ["AIOHTTP_NO_EXTENSIONS"] = "1"
 
 from .timeout_config import TimeoutConfig

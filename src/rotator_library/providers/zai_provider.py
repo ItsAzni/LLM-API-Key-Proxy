@@ -46,8 +46,8 @@ class ZaiProvider(ZaiQuotaTracker, ProviderInterface):
     # Body keyword patterns for quota detection (base class fallback).
     # The full override handles ZAI-specific code matching + dynamic cooldown.
     _quota_error_patterns = [
-        ("body", "insufficient balance", 86400, "INSUFFICIENT_BALANCE"),
-        ("body", "recharge", 86400, "INSUFFICIENT_BALANCE"),
+        ("body", "insufficient balance", 0, "INSUFFICIENT_BALANCE"),
+        ("body", "recharge", 0, "INSUFFICIENT_BALANCE"),
         ("body", "rate", 3600, "QUOTA_EXHAUSTED"),
         ("body", "limit", 3600, "QUOTA_EXHAUSTED"),
         ("body", "quota", 3600, "QUOTA_EXHAUSTED"),
@@ -106,7 +106,7 @@ class ZaiProvider(ZaiQuotaTracker, ProviderInterface):
     ) -> Optional[Dict[str, Any]]:
         """Parse ZAI 429 error to extract quota reset information.
 
-        ZAI-specific: code 1113 = insufficient balance (24h cooldown),
+        ZAI-specific: code 1113 = insufficient balance (cooldown until next midnight UTC),
         standard 429 = hourly quota (resets at next hour boundary).
         Falls back to base class _quota_error_patterns for body keyword match.
         """
@@ -140,9 +140,11 @@ class ZaiProvider(ZaiQuotaTracker, ProviderInterface):
         now = datetime.now(timezone.utc)
 
         if is_insufficient:
-            cooldown = timedelta(hours=24)
-            reset_time = now + cooldown
-            retry_after = int(cooldown.total_seconds())
+            next_day = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            reset_time = next_day
+            retry_after = max(60, int(next_day.timestamp() - now.timestamp()))
             reason = "INSUFFICIENT_BALANCE"
         else:
             next_hour = (now + timedelta(hours=1)).replace(
