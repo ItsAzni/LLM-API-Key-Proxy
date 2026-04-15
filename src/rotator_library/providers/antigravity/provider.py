@@ -27,6 +27,8 @@ from ..utilities.gemini_shared_utils import (
     GEMINI_DEFAULT_TIER_PRIORITY,
     GEMINI_DEFAULT_PRIORITY_MULTIPLIERS,
     GEMINI_DEFAULT_SEQUENTIAL_FALLBACK_MULTIPLIER,
+    alias_to_internal_model,
+    internal_to_alias_model,
 )
 from ..utilities.gemini_tool_handler import GeminiToolHandler
 from ..utilities.gemini_credential_manager import GeminiCredentialManager

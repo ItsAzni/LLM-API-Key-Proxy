@@ -26,11 +26,9 @@ Required from provider:
 """
 
 import asyncio
-import json
 import logging
-from ...utils.json_utils import json_loads
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -41,8 +39,6 @@ from ...http_client_pool import get_http_pool
 from .base_quota_tracker import BaseQuotaTracker
 from .gemini_shared_utils import CODE_ASSIST_ENDPOINT
 
-if TYPE_CHECKING:
-    from ...usage_manager import UsageManager
 
 # Use the shared rotator_library logger
 lib_logger = logging.getLogger("rotator_library")

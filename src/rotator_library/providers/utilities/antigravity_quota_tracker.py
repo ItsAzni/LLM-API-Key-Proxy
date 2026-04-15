@@ -22,19 +22,18 @@ Required from provider:
 """
 
 import asyncio
-import json
 import logging
-from ...utils.json_utils import json_loads
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ...http_client_pool import get_http_pool
-from .base_quota_tracker import BaseQuotaTracker, QUOTA_DISCOVERY_DELAY_SECONDS
-
 if TYPE_CHECKING:
     from ...usage_manager import UsageManager
+
+from ...http_client_pool import get_http_pool
+from .base_quota_tracker import BaseQuotaTracker
+
 
 # Use the shared rotator_library logger
 lib_logger = logging.getLogger("rotator_library")

@@ -27,7 +27,7 @@ Directory structure:
 import orjson
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 import logging
@@ -93,7 +93,7 @@ class RawIOLogger:
         self.streaming = body.get("stream", False)
         request_data = {
             "request_id": self.request_id,
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "headers": dict(headers),
             "body": body,
         }
@@ -104,7 +104,7 @@ class RawIOLogger:
         if not self._dir_available:
             return
 
-        log_entry = {"timestamp_utc": datetime.utcnow().isoformat(), "chunk": chunk}
+        log_entry = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), "chunk": chunk}
         content = orjson.dumps(log_entry).decode() + "\n"
         safe_log_write(self.log_dir / "streaming_chunks.jsonl", content, logging)
 
@@ -117,7 +117,7 @@ class RawIOLogger:
 
         response_data = {
             "request_id": self.request_id,
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "status_code": status_code,
             "duration_ms": round(duration_ms),
             "headers": dict(headers) if headers else None,

@@ -2,11 +2,13 @@
 # Copyright (c) 2026 ShmidtS
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 import orjson
 
-from .anthropic_compat import AnthropicMessagesRequest, AnthropicCountTokensRequest
+if TYPE_CHECKING:
+    from .anthropic_compat import AnthropicMessagesRequest, AnthropicCountTokensRequest
+
 
 lib_logger = logging.getLogger("rotator_library")
 

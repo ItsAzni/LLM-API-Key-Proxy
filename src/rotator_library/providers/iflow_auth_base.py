@@ -11,7 +11,7 @@ import logging
 import webbrowser
 import socket
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar, Dict, Any, Tuple, Union, Optional, List
 from urllib.parse import urlencode
@@ -379,8 +379,8 @@ class IFlowAuthBase(GoogleOAuthBase):
 
         # Calculate expiry date
         expiry_date = (
-            datetime.utcnow() + timedelta(seconds=expires_in)
-        ).isoformat() + "Z"
+            datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         return {
             "access_token": access_token,
@@ -591,8 +591,8 @@ class IFlowAuthBase(GoogleOAuthBase):
             expires_in = new_token_data.get("expires_in", 3600)
 
             creds_from_file["expiry_date"] = (
-                datetime.utcnow() + timedelta(seconds=expires_in)
-            ).isoformat() + "Z"
+                datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
             creds_from_file["token_type"] = new_token_data.get(
                 "token_type", creds_from_file.get("token_type", "Bearer")

@@ -29,7 +29,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -200,7 +200,7 @@ class TransactionLogger:
 
         data = {
             "request_id": self.request_id,
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "data": request_data,
         }
         self._write_json(filename, data)
@@ -216,7 +216,7 @@ class TransactionLogger:
             return
 
         log_entry = {
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "chunk": chunk,
         }
         content = orjson.dumps(log_entry).decode() + "\n"
@@ -246,7 +246,7 @@ class TransactionLogger:
 
         data = {
             "request_id": self.request_id,
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "status_code": status_code,
             "duration_ms": round(duration_ms),
             "headers": dict(headers) if headers else None,
@@ -281,7 +281,7 @@ class TransactionLogger:
 
         metadata = {
             "request_id": self.request_id,
-            "timestamp_utc": datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "duration_ms": round(duration_ms),
             "status_code": status_code,
             "provider": self.provider,
@@ -543,7 +543,7 @@ class ProviderLogger:
         Args:
             error_message: The error message to log
         """
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         self._append_text("error.log", f"[{timestamp}] {error_message}\n")
 
     def log_extra(self, filename: str, data: Union[Dict[str, Any], str]) -> None:
@@ -629,6 +629,6 @@ class AntigravityProviderLogger(ProviderLogger):
                 "tool_name": tool_name,
                 "raw_args": raw_args,
                 "fixed_json": fixed_json,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )

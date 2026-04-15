@@ -272,6 +272,7 @@ class HttpClientPool(metaclass=SingletonMeta):
         # Warmup state
         self._warmed_up = False
         self._warmup_hosts: list = [] # Hosts to pre-warm
+        self._warmup_task: Optional[asyncio.Task] = None
 
         # Statistics
         # No lock needed: asyncio is single-threaded, so integer counter
@@ -392,7 +393,7 @@ class HttpClientPool(metaclass=SingletonMeta):
 
             # Pre-warm connections if hosts provided (background task)
             if self._warmup_hosts:
-                asyncio.create_task(self._warmup_connections())
+                self._warmup_task = asyncio.create_task(self._warmup_connections())
 
             lib_logger.info(
                 f"HTTP client pool initialized "
@@ -564,6 +565,14 @@ class HttpClientPool(metaclass=SingletonMeta):
 
         return await self._ensure_client(streaming)
 
+    def _schedule_orphan_close(self, client: httpx.AsyncClient) -> None:
+        """Schedule closure of an orphaned client created by a concurrent lazy-init race."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(client.aclose())
+        except RuntimeError:
+            pass
+
     def _get_lazy_client(self, streaming: bool) -> httpx.AsyncClient:
         """
         Get or create a client lazily (fallback when not initialized).
@@ -589,15 +598,31 @@ class HttpClientPool(metaclass=SingletonMeta):
         )
 
         # Store in pool so close() can clean it up
+        # Guard: close() may have set the attr to None concurrently
         if streaming:
-            self._streaming_client = client
+            if self._streaming_client is None:
+                self._streaming_client = client
+            else:
+                self._schedule_orphan_close(client)
+            return self._streaming_client
         else:
-            self._non_streaming_client = client
-
-        return client
+            if self._non_streaming_client is None:
+                self._non_streaming_client = client
+            else:
+                self._schedule_orphan_close(client)
+            return self._non_streaming_client
 
     async def close(self) -> None:
         """Close all HTTP clients gracefully."""
+        # Cancel warmup task before acquiring lock (it holds no lock itself)
+        if self._warmup_task is not None and not self._warmup_task.done():
+            self._warmup_task.cancel()
+            try:
+                await self._warmup_task
+            except asyncio.CancelledError:
+                pass
+            self._warmup_task = None
+
         async with self._client_lock:
             errors = []
 

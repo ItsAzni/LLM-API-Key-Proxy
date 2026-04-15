@@ -60,7 +60,7 @@ async def streaming_response_wrapper(
             # STREAM_DONE sentinel: emit SSE [DONE] and stop
             if chunk is STREAM_DONE:
                 yield b"data: [DONE]\n\n"
-                continue
+                return
 
             # chunk is a dict — serialize to SSE only here (single serialize point)
             chunk_str = sse_data_event(chunk)

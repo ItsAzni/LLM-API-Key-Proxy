@@ -153,8 +153,10 @@ with _console.status("[dim]Loading LiteLLM library...", spinner="dots"):
 
         # 2. Create pre-configured httpx clients with SSL verification disabled
         # This is the MOST RELIABLE way to disable SSL in litellm
-        litellm.client_session = httpx.Client(verify=False)
-        litellm.aclient_session = httpx.AsyncClient(verify=False)
+        from rotator_library.timeout_config import TimeoutConfig
+        _litellm_timeout = TimeoutConfig.non_streaming()
+        litellm.client_session = httpx.Client(verify=False, timeout=_litellm_timeout)
+        litellm.aclient_session = httpx.AsyncClient(verify=False, timeout=_litellm_timeout)
         print(
             "[SSL-FIX-MAIN] Created litellm.client_session and aclient_session with verify=False"
         )

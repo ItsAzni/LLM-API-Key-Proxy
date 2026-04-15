@@ -7,6 +7,8 @@ transaction logging stream wrapper."""
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
+import httpx
+
 from ..error_types import mask_credential, NoAvailableKeysError
 from ..utils.json_utils import STREAM_DONE
 
@@ -156,6 +158,24 @@ class StreamingMixin:
 
                 except _StreamedException:
                     # Provider aborted - re-raise to retry handler
+                    stream_completed = False
+                    raise
+
+                except (httpx.ReadTimeout, httpx.PoolTimeout) as e:
+                    # Timeout errors are retriable — re-raise so upstream retry logic can act
+                    lib_logger.warning(
+                        f"Timeout during streaming for model {model}, "
+                        f"credential {mask_credential(key)}, chunk {chunk_index}: {e}"
+                    )
+                    stream_completed = False
+                    raise
+
+                except (httpx.RemoteProtocolError, httpx.ConnectError) as e:
+                    # Protocol/connection errors are retriable — re-raise
+                    lib_logger.warning(
+                        f"Protocol/connection error during streaming for model {model}, "
+                        f"credential {mask_credential(key)}, chunk {chunk_index}: {e}"
+                    )
                     stream_completed = False
                     raise
 

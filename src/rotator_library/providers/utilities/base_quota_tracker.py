@@ -220,7 +220,7 @@ class BaseQuotaTracker:
 
     def _read_costs_file(self, costs_file: Path) -> Optional[Dict]:
         """Sync helper to read costs file (called via run_in_executor)."""
-        with open(costs_file, "r") as f:
+        with open(costs_file, "r", encoding="utf-8") as f:
             return json_loads(f.read())
 
     def _load_learned_costs(self) -> None:
@@ -246,7 +246,7 @@ class BaseQuotaTracker:
             return
 
         try:
-            with open(costs_file, "r") as f:
+            with open(costs_file, "r", encoding="utf-8") as f:
                 data = json_loads(f.read())
 
             if self._use_integer_max_requests:
@@ -279,7 +279,7 @@ class BaseQuotaTracker:
 
     def _write_costs_file(self, costs_file: Path, payload: Dict) -> None:
         """Sync helper to write costs file (called via run_in_executor)."""
-        with open(costs_file, "w") as f:
+        with open(costs_file, "w", encoding="utf-8") as f:
             f.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8"))
 
     async def _save_learned_costs_async(self) -> None:
@@ -322,7 +322,7 @@ class BaseQuotaTracker:
             }
 
         try:
-            with open(costs_file, "w") as f:
+            with open(costs_file, "w", encoding="utf-8") as f:
                 f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode("utf-8"))
             lib_logger.debug(f"Saved learned quota costs to {costs_file}")
         except IOError as e:
@@ -738,7 +738,7 @@ class BaseQuotaTracker:
             # Try to load from file metadata (only for file-based credentials)
             if not credential_path.startswith("env://"):
                 try:
-                    with open(credential_path, "r") as f:
+                    with open(credential_path, "r", encoding="utf-8") as f:
                         cred_data = json_loads(f.read())
                         tier = cred_data.get("_proxy_metadata", {}).get("tier")
                 except Exception:
