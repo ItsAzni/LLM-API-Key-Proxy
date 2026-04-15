@@ -20,7 +20,7 @@ Usage examples:
 from __future__ import annotations
 
 import asyncio
-from json import JSONDecodeError
+from orjson import JSONDecodeError
 import logging
 import threading
 import time

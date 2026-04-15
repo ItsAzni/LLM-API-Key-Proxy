@@ -2046,6 +2046,26 @@ class RetryMixin:
             yield error_data
             yield STREAM_DONE
 
+    async def _rate_limited_execute(self, api_call, request, pre_request_callback=None, **kwargs):
+        """Backpressure-gated entry point for non-streaming API calls."""
+        async with self._global_semaphore:
+            return await self._execute_with_retry(
+                api_call, request, pre_request_callback=pre_request_callback, **kwargs
+            )
+
+    async def _rate_limited_streaming(self, request, pre_request_callback=None, **kwargs):
+        """Backpressure-gated entry point for streaming API calls.
+
+        The async with semaphore is safe with async generators: CPython's
+        async generator finalizer runs __aexit__ even on GeneratorExit or
+        CancelledError, so the semaphore is always released.
+        """
+        async with self._global_semaphore:
+            async for chunk in self._streaming_acompletion_with_retry(
+                request, pre_request_callback=pre_request_callback, **kwargs
+            ):
+                yield chunk
+
     async def _forced_streaming_acompletion(
         self,
         request: Optional[Any] = None,

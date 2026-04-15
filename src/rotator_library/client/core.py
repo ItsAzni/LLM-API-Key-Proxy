@@ -309,6 +309,12 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         # Track consecutive quota failures per credential for intelligent rotation
         self._consecutive_quota_failures: Dict[str, int] = {}
 
+        # Global backpressure semaphore — limits total concurrent outbound
+        # API requests across all providers/keys. Prevents resource exhaustion.
+        self._global_semaphore = asyncio.Semaphore(
+            int(os.getenv("MAX_CONCURRENT_REQUESTS", "200"))
+        )
+
     # --- Core methods that remain in this module ---
 
     async def _prepare_request_kwargs(
@@ -605,11 +611,11 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
                     **kwargs,
                 )
 
-            return self._streaming_acompletion_with_retry(
+            return self._rate_limited_streaming(
                 request=request, pre_request_callback=pre_request_callback, **kwargs
             )
         else:
-            return self._execute_with_retry(
+            return self._rate_limited_execute(
                 litellm.acompletion,
                 request=request,
                 pre_request_callback=pre_request_callback,
@@ -635,7 +641,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         Returns:
             The embedding response object, or None if all retries fail.
         """
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.aembedding,
             request=request,
             pre_request_callback=pre_request_callback,
@@ -648,7 +654,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Any:
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.aimage_generation,
             request=request,
             pre_request_callback=pre_request_callback,
@@ -661,7 +667,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Any:
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.aimage_edit,
             request=request,
             pre_request_callback=pre_request_callback,
@@ -674,7 +680,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Any:
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.aimage_variation,
             request=request,
             pre_request_callback=pre_request_callback,
@@ -687,7 +693,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Any:
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.aspeech,
             request=request,
             pre_request_callback=pre_request_callback,
@@ -700,7 +706,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Any:
-        return self._execute_with_retry(
+        return self._rate_limited_execute(
             litellm.atranscription,
             request=request,
             pre_request_callback=pre_request_callback,

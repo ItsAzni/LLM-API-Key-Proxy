@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ShmidtS
 
-import time
 import asyncio
 import logging
 from typing import AsyncGenerator, Any, Optional
@@ -39,23 +38,20 @@ async def streaming_response_wrapper(
     finish_reason = None
     first_chunk_meta = None  # {id, created, model} from first chunk
     _chunk_count = 0
-    _last_disconnect_check = time.monotonic()
 
     # Track active streaming connections for graceful shutdown
     try:
         _inc_streams(request)
     except AttributeError:
-        logger.debug("stream_response: request lacks stream counter attribute")
+        pass
 
     try:
         async for chunk in response_stream:
             _chunk_count += 1
-            now = time.monotonic()
-            if now - _last_disconnect_check > 1.0:
+            if _chunk_count % 20 == 0:
                 if await request.is_disconnected():
                     logging.warning("Client disconnected, stopping stream.")
                     break
-                _last_disconnect_check = now
 
             # STREAM_DONE sentinel: emit SSE [DONE] and stop
             if chunk is STREAM_DONE:

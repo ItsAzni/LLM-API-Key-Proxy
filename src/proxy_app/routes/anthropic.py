@@ -14,7 +14,6 @@ from rotator_library.anthropic_compat import (
     AnthropicCountTokensRequest,
 )
 from proxy_app.dependencies import get_rotating_client, verify_anthropic_api_key, make_error_response, track_stream
-from proxy_app.streaming import handle_litellm_error
 from proxy_app.detailed_logger import RawIOLogger
 from proxy_app.request_logger import log_request_to_console
 from proxy_app.routes.error_handler import handle_route_errors
@@ -56,50 +55,38 @@ async def anthropic_messages(
             body=body_data,
         )
 
-    try:
-        # Log the request to console
-        log_request_to_console(
-            url=str(request.url),
-            headers=request.headers,
-            client_info=(
-                request.client.host if request.client else "unknown",
-                request.client.port if request.client else 0,
-            ),
-            request_data=body_data,
+    log_request_to_console(
+        url=str(request.url),
+        headers=request.headers,
+        client_info=(
+            request.client.host if request.client else "unknown",
+            request.client.port if request.client else 0,
+        ),
+        request_data=body_data,
+    )
+
+    result = await client.anthropic_messages(body, raw_request=request, raw_body_data=body_data)
+
+    if body.stream:
+        # Streaming response
+        return StreamingResponse(
+            track_stream(request, result),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
-
-        # Use the library method to handle the request
-        result = await client.anthropic_messages(body, raw_request=request, raw_body_data=body_data)
-
-        if body.stream:
-            # Streaming response
-            return StreamingResponse(
-                track_stream(request, result),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-        else:
-            # Non-streaming response
-            if logger:
-                logger.log_final_response(
-                    status_code=200,
-                    headers=None,
-                    body=result,
-                )
-            return JSONResponse(content=result)
-    except Exception as e:
-        # Raw I/O logger: log the failed response if enabled
+    else:
+        # Non-streaming response
         if logger:
             logger.log_final_response(
-                status_code=500,
+                status_code=200,
                 headers=None,
-                body={"error": "Internal server error"},
+                body=result,
             )
-        raise
+        return JSONResponse(content=result)
 
 
 @router.post("/v1/messages/count_tokens")

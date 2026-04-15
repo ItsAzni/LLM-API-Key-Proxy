@@ -69,7 +69,7 @@ _dns_cache_lock = threading.RLock()
 
 # Module-level singleton executor for async-context DNS resolution.
 # Avoids creating/destroying a ThreadPoolExecutor on every call.
-_dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="dns-resolver")
+_dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
 
 
 def get_dns_cache_ttl() -> int:
@@ -378,7 +378,7 @@ def _custom_getaddrinfo(
     # fine because the event loop continues running on other threads.
     global _dns_executor
     if _dns_executor is None or _dns_executor._shutdown:
-        _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="dns-resolver")
+        _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
     future = _dns_executor.submit(
         _custom_getaddrinfo_sync, host, port, family, type, proto, flags
     )
