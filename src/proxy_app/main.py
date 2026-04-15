@@ -179,7 +179,6 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library import RotatingClient
     from rotator_library.credential_manager import CredentialManager
     from rotator_library.dns_fix import close_doh_client
-    from rotator_library.http_client_pool import close_http_pool
     from rotator_library.model_info_service import init_model_info_service
     from proxy_app.batch_manager import EmbeddingBatcher
 

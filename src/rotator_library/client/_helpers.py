@@ -143,6 +143,42 @@ class HelpersMixin:
                 f"Quota failure counter reset for {mask_credential(credential_id)}"
             )
 
+    async def _apply_quota_cooldown(
+        self,
+        provider: str,
+        credential: str,
+        classified_error: "ClassifiedError",
+    ) -> None:
+        """
+        Apply cooldown for quota_exceeded errors using retry_after from
+        the provider-specific parse_quota_error result.
+
+        For ZAI INSUFFICIENT_BALANCE (reason='INSUFFICIENT_BALANCE'), this is
+        an account-level error — all credentials of the provider share the same
+        balance, so cooldown is propagated to every credential.
+        """
+        retry_after = classified_error.retry_after
+        if not retry_after:
+            return
+
+        is_account_level = getattr(classified_error, "reason", None) == "INSUFFICIENT_BALANCE"
+
+        if is_account_level:
+            provider_creds = self.all_credentials.get(provider, [])
+            for cred in provider_creds:
+                await self._resilience.cooldown.start_cooldown(cred, retry_after)
+            lib_logger.warning(
+                f"Account-level quota (INSUFFICIENT_BALANCE) for '{provider}': "
+                f"all {len(provider_creds)} credentials cooled down for {retry_after}s "
+                f"(until next day)."
+            )
+        else:
+            await self._resilience.cooldown.start_cooldown(credential, retry_after)
+            lib_logger.info(
+                f"Per-credential quota cooldown for {mask_credential(credential)}: "
+                f"{retry_after}s."
+            )
+
     def _is_client_usable(self, client: Optional[httpx.AsyncClient]) -> bool:
         """
         Check if an HTTP client is usable for requests.

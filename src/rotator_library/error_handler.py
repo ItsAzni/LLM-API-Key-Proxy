@@ -912,6 +912,7 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                         status_code=429,
                         retry_after=retry_after,
                         quota_reset_timestamp=quota_reset_timestamp,
+                        reason=reason,
                     )
         except Exception as parse_error:
             lib_logger.debug(
@@ -1186,6 +1187,7 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                             status_code=status_code or 400,
                             retry_after=retry_after,
                             quota_reset_timestamp=quota_reset_timestamp,
+                            reason=quota_info.get("reason"),
                         )
             except (KeyError, TypeError, ValueError):
                 lib_logger.debug(f"Provider-specific quota parse failed for '{provider}'", exc_info=True)

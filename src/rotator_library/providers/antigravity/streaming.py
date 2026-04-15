@@ -23,7 +23,6 @@ from .constants import (
     MALFORMED_CALL_RETRY_DELAY,
     _MalformedFunctionCallDetected,
     _generate_request_id,
-    get_antigravity_preprompt_text,
     lib_logger,
 )
 from ..provider_interface import build_bearer_headers

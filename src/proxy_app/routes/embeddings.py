@@ -86,24 +86,24 @@ async def embeddings(
 
         return response
 
-    except HTTPException as e:
+    except HTTPException:
         # Re-raise HTTPException to ensure it's not caught by the generic Exception handler
-        raise e
+        raise
     except (
         litellm.InvalidRequestError,
         ValueError,
         litellm.ContextWindowExceededError,
-    ) as e:
+    ):
         raise HTTPException(status_code=400, detail=make_error_response("Invalid Request", "invalid_request_error"))
-    except litellm.AuthenticationError as e:
+    except litellm.AuthenticationError:
         raise HTTPException(status_code=401, detail=make_error_response("Authentication Error", "authentication_error"))
-    except litellm.RateLimitError as e:
+    except litellm.RateLimitError:
         raise HTTPException(status_code=429, detail=make_error_response("Rate Limit Exceeded", "rate_limit_error"))
-    except (litellm.ServiceUnavailableError, litellm.APIConnectionError) as e:
+    except (litellm.ServiceUnavailableError, litellm.APIConnectionError):
         raise HTTPException(status_code=503, detail=make_error_response("Service Unavailable", "server_error"))
-    except litellm.Timeout as e:
+    except litellm.Timeout:
         raise HTTPException(status_code=504, detail=make_error_response("Gateway Timeout", "timeout_error"))
-    except (litellm.InternalServerError, litellm.OpenAIError) as e:
+    except (litellm.InternalServerError, litellm.OpenAIError):
         raise HTTPException(status_code=502, detail=make_error_response("Bad Gateway", "server_error"))
     except Exception as e:
         logging.error(f"Embedding request failed: {e}", exc_info=True)

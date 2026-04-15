@@ -107,7 +107,7 @@ def get_failure_logger() -> logging.Logger:
     Returns:
         The configured failure logger.
     """
-    global _failure_logger, _configured_logs_dir
+    global _failure_logger
 
     if _failure_logger is None:
         logs_dir = _configured_logs_dir if _configured_logs_dir else get_logs_dir()

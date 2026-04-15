@@ -428,6 +428,9 @@ class RetryMixin:
 
                             # Track consecutive quota failures and force rotation if needed
                             if classified_error.error_type == "quota_exceeded":
+                                await self._apply_quota_cooldown(
+                                    provider, current_cred, classified_error
+                                )
                                 if self.increment_quota_failures(current_cred):
                                     lib_logger.error(
                                         f"Cred {mask_credential(current_cred)} quota failure limit reached (3/3), forcing rotation."
@@ -681,6 +684,9 @@ class RetryMixin:
 
                             # Track consecutive quota failures and force rotation if needed
                             if classified_error.error_type == "quota_exceeded":
+                                await self._apply_quota_cooldown(
+                                    provider, current_cred, classified_error
+                                )
                                 if self.increment_quota_failures(current_cred):
                                     lib_logger.error(
                                         f"Cred {mask_credential(current_cred)} quota failure limit reached (3/3), forcing rotation."
@@ -812,6 +818,10 @@ class RetryMixin:
                                 await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
                                 )
+                            if classified_error.error_type == "quota_exceeded":
+                                await self._apply_quota_cooldown(
+                                    provider, current_cred, classified_error
+                                )
 
                             # Check if we should retry same key (server errors with retries left)
                             if (
@@ -873,6 +883,10 @@ class RetryMixin:
                             if classified_error.error_type == "rate_limit":
                                 await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
+                                )
+                            if classified_error.error_type == "quota_exceeded":
+                                await self._apply_quota_cooldown(
+                                    provider, current_cred, classified_error
                                 )
 
                             # Check if this error should trigger rotation
@@ -1161,6 +1175,10 @@ class RetryMixin:
                                     await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
                                     )
+                                if classified_error.error_type == "quota_exceeded":
+                                    await self._apply_quota_cooldown(
+                                        provider, current_cred, classified_error
+                                    )
 
                                 await self.usage_manager.record_failure(
                                     current_cred, model, classified_error
@@ -1312,6 +1330,10 @@ class RetryMixin:
                                 if classified_error.error_type == "rate_limit":
                                     await self._process_rate_limit(
                                         provider, current_cred, e, str(e) if e else None, classified_error
+                                    )
+                                if classified_error.error_type == "quota_exceeded":
+                                    await self._apply_quota_cooldown(
+                                        provider, current_cred, classified_error
                                     )
 
                                 await self.usage_manager.record_failure(
@@ -1624,6 +1646,10 @@ class RetryMixin:
                                         provider, current_cred, original_exc,
                                         str(original_exc) if original_exc else None, classified_error
                                     )
+                                if classified_error.error_type == "quota_exceeded":
+                                    await self._apply_quota_cooldown(
+                                        provider, current_cred, classified_error
+                                    )
 
                                 await self.usage_manager.record_failure(
                                     current_cred, model, classified_error
@@ -1758,6 +1784,10 @@ class RetryMixin:
                             if classified_error.error_type == "rate_limit":
                                 await self._process_rate_limit(
                                     provider, current_cred, e, str(e) if e else None, classified_error
+                                )
+                            if classified_error.error_type == "quota_exceeded":
+                                await self._apply_quota_cooldown(
+                                    provider, current_cred, classified_error
                                 )
 
                             # Check if this error should trigger rotation

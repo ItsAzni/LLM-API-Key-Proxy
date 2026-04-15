@@ -21,6 +21,7 @@ class ClassifiedError:
         throttle_assessment: Optional[ThrottleAssessment] = None,
         quota_value: Optional[str] = None,
         quota_id: Optional[str] = None,
+        reason: Optional[str] = None,
     ):
         self.error_type = error_type
         self.original_exception = original_exception
@@ -34,6 +35,8 @@ class ClassifiedError:
         # Quota details from Google/Gemini API errors (quotaValue and quotaId)
         self.quota_value = quota_value
         self.quota_id = quota_id
+        # Provider-specific reason (e.g., INSUFFICIENT_BALANCE, QUOTA_EXHAUSTED)
+        self.reason = reason
 
     def __str__(self):
         parts = [
@@ -49,6 +52,8 @@ class ClassifiedError:
             parts.append(f"quota_value={self.quota_value}")
         if self.quota_id:
             parts.append(f"quota_id={self.quota_id}")
+        if self.reason:
+            parts.append(f"reason={self.reason}")
         parts.append(f"original_exc={self.original_exception}")
         return f"ClassifiedError({', '.join(parts)})"
 
