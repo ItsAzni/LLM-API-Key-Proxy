@@ -74,7 +74,7 @@ def is_headless_environment() -> bool:
     # Detect Docker/container environment
     if os.name == "nt":
         # Windows Docker detection
-        if os.environ.get("CONTAINER") == "docker" or os.path.exists("C:\\.dockerenv"):
+        if os.environ.get("CONTAINER") == "docker" or os.path.exists(os.path.join(os.environ.get("SystemDrive", "C:"), ".dockerenv")):
             headless_indicators.append("Container environment detected")
         elif os.getenv("DOCKER_HOST") or os.getenv("WSL_DISTRO_NAME"):
             headless_indicators.append("Container environment detected (env var)")

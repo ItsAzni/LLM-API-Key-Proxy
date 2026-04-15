@@ -73,7 +73,7 @@ class GeminiCredentialManager:
             return None
 
         try:
-            with open(credential_path, "r") as f:
+            with open(credential_path, "r", encoding="utf-8") as f:
                 creds = json_loads(f.read())
 
             metadata = creds.get("_proxy_metadata", {})
@@ -197,7 +197,7 @@ class GeminiCredentialManager:
         def _read_credential_file(path: str):
             """Synchronous file read for use with asyncio.to_thread."""
             try:
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     return path, json_loads(f.read())
             except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
                 return path, e

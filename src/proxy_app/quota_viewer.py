@@ -369,7 +369,11 @@ class QuotaViewer:
                 self.last_error = None
                 return self.cached_stats
 
-        except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
+        except httpx.ConnectError as e:
+            return self._handle_httpx_error(e)
+        except httpx.TimeoutException as e:
+            return self._handle_httpx_error(e)
+        except Exception as e:
             return self._handle_httpx_error(e)
 
     def _merge_provider_stats(self, provider: str, result: Dict[str, Any]) -> None:
@@ -551,7 +555,11 @@ class QuotaViewer:
                 self.last_error = None
                 return result
 
-        except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
+        except httpx.ConnectError as e:
+            return self._handle_httpx_error(e)
+        except httpx.TimeoutException as e:
+            return self._handle_httpx_error(e)
+        except Exception as e:
             return self._handle_httpx_error(e)
 
     # =========================================================================

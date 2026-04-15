@@ -532,6 +532,8 @@ class RetryMixin:
                             self._apply_default_safety_settings(
                                 litellm_kwargs, provider
                             )
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
                             # If anything goes wrong here, avoid breaking the request flow.
                             lib_logger.warning(
@@ -840,6 +842,8 @@ class RetryMixin:
                             await self._resilience.release_half_open_slot(provider)
                             break
 
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
                             last_exception = e
                             log_failure(
@@ -1080,7 +1084,6 @@ class RetryMixin:
                                     f"Stream connection established for credential {mask_credential(current_cred)}. Processing response."
                                 )
 
-                                key_acquired = False
                                 stream_generator = self._safe_streaming_wrapper(
                                     response,
                                     current_cred,
@@ -1089,15 +1092,23 @@ class RetryMixin:
                                     provider_plugin,
                                 )
 
-                                # Skip transaction logging wrapper when disabled (avoids extra async gen layer)
-                                if transaction_logger:
-                                    async for chunk in self._transaction_logging_stream_wrapper(
-                                        stream_generator, transaction_logger, kwargs
-                                    ):
-                                        yield chunk
-                                else:
-                                    async for chunk in stream_generator:
-                                        yield chunk
+                                # Release the key when the stream consumer finishes iterating.
+                                # The outer finally only fires on generator finalization;
+                                # this try/finally ensures the credential is released
+                                # promptly whether the stream completes normally, errors
+                                # out, or the consumer stops early.
+                                try:
+                                    if transaction_logger:
+                                        async for chunk in self._transaction_logging_stream_wrapper(
+                                            stream_generator, transaction_logger, kwargs
+                                        ):
+                                            yield chunk
+                                    else:
+                                        async for chunk in stream_generator:
+                                            yield chunk
+                                finally:
+                                    await self.usage_manager.release_key(current_cred, model)
+                                    key_acquired = False  # prevent outer finally from double-releasing
                                 return
 
                             except (
@@ -1260,6 +1271,8 @@ class RetryMixin:
                                 await self._resilience.release_half_open_slot(provider)
                                 break
 
+                            except asyncio.CancelledError:
+                                raise
                             except Exception as e:
                                 last_exception = e
                                 log_failure(
@@ -1330,6 +1343,8 @@ class RetryMixin:
                             self._apply_default_safety_settings(
                                 litellm_kwargs, provider
                             )
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
                             lib_logger.warning(
                                 "Could not apply default safety settings for streaming path %s: %s; continuing.",
@@ -1423,7 +1438,6 @@ class RetryMixin:
                                 f"Stream connection established for credential {mask_credential(current_cred)}. Processing response."
                             )
 
-                            key_acquired = False
                             stream_generator = self._safe_streaming_wrapper(
                                 response,
                                 current_cred,
@@ -1432,15 +1446,19 @@ class RetryMixin:
                                 provider_plugin,
                             )
 
-                            # Skip transaction logging wrapper when disabled (avoids extra async gen layer)
-                            if transaction_logger:
-                                async for chunk in self._transaction_logging_stream_wrapper(
-                                    stream_generator, transaction_logger, kwargs
-                                ):
-                                    yield chunk
-                            else:
-                                async for chunk in stream_generator:
-                                    yield chunk
+                            # Release the key when the stream consumer finishes iterating.
+                            try:
+                                if transaction_logger:
+                                    async for chunk in self._transaction_logging_stream_wrapper(
+                                        stream_generator, transaction_logger, kwargs
+                                    ):
+                                        yield chunk
+                                else:
+                                    async for chunk in stream_generator:
+                                        yield chunk
+                            finally:
+                                await self.usage_manager.release_key(current_cred, model)
+                                key_acquired = False  # prevent outer finally from double-releasing
                             return
 
                         except (
@@ -1711,6 +1729,8 @@ class RetryMixin:
                             await self._resilience.release_half_open_slot(provider)
                             break
 
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
                             consecutive_quota_failures = 0
                             last_exception = e

@@ -1606,7 +1606,7 @@ class UsageManager:
                 return
 
             try:
-                async with aiofiles.open(self.file_path, "r") as f:
+                async with aiofiles.open(self.file_path, "r", encoding="utf-8") as f:
                     content = await f.read()
                     self._usage_data = json_loads(content) if content.strip() else {}
             except FileNotFoundError:
@@ -2551,34 +2551,31 @@ class UsageManager:
                             tier2_keys = self._sort_sequential(
                                 tier2_keys, credential_priorities
                             )
+                        # Combine idle keys first, then active, for better distribution.
+                        all_available_keys = tier2_keys + tier1_keys
                     elif self.rotation_tolerance > 0:
-                        # Balanced mode with weighted randomness
+                        # Balanced mode with weighted randomness across ALL candidates
                         selection_method = "weighted-random"
-                        if tier1_keys:
+                        all_candidates = tier2_keys + tier1_keys  # idle first for better distribution
+                        if all_candidates:
                             selected_key = self._select_weighted_random(
-                                tier1_keys, self.rotation_tolerance
+                                all_candidates, self.rotation_tolerance
                             )
-                            tier1_keys = [
-                                (k, u) for k, u in tier1_keys if k == selected_key
+                            all_available_keys = [
+                                (k, u) for k, u in all_candidates if k == selected_key
                             ]
-                        if tier2_keys:
-                            selected_key = self._select_weighted_random(
-                                tier2_keys, self.rotation_tolerance
-                            )
-                            tier2_keys = [
-                                (k, u) for k, u in tier2_keys if k == selected_key
-                            ]
+                        else:
+                            all_available_keys = []
                     else:
                         # Deterministic: sort by usage within each tier
                         selection_method = "least-used"
                         tier1_keys.sort(key=lambda x: x[1])
                         tier2_keys.sort(key=lambda x: x[1])
 
-                    # Combine Tier 1 (active) and Tier 2 (idle) keys, sort by usage.
-                    # This ensures proper load balancing by selecting the least-used key
-                    # regardless of whether it's currently active or idle.
-                    all_available_keys = tier1_keys + tier2_keys
-                    all_available_keys.sort(key=lambda x: x[1])
+                        # Combine idle keys first, then active, sorted by usage.
+                        # Preferring idle keys spreads load across more credentials.
+                        all_available_keys = tier2_keys + tier1_keys
+                        all_available_keys.sort(key=lambda x: x[1])
 
                     for key, usage in all_available_keys:
                         state = self.key_states[key]
@@ -2782,70 +2779,58 @@ class UsageManager:
                         tier2_keys = self._sort_sequential(
                             tier2_keys, credential_priorities
                         )
+                    # Combine idle keys first, then active, for better distribution.
+                    all_available_keys = tier2_keys + tier1_keys
                 elif self.rotation_tolerance > 0:
-                    # Balanced mode with weighted randomness
+                    # Balanced mode with weighted randomness across ALL candidates
                     selection_method = "weighted-random"
-                    if tier1_keys:
+                    all_candidates = tier2_keys + tier1_keys  # idle first for better distribution
+                    if all_candidates:
                         selected_key = self._select_weighted_random(
-                            tier1_keys, self.rotation_tolerance
+                            all_candidates, self.rotation_tolerance
                         )
-                        tier1_keys = [
-                            (k, u) for k, u in tier1_keys if k == selected_key
+                        all_available_keys = [
+                            (k, u) for k, u in all_candidates if k == selected_key
                         ]
-                    if tier2_keys:
-                        selected_key = self._select_weighted_random(
-                            tier2_keys, self.rotation_tolerance
-                        )
-                        tier2_keys = [
-                            (k, u) for k, u in tier2_keys if k == selected_key
-                        ]
+                    else:
+                        all_available_keys = []
                 else:
                     # Deterministic: sort by usage within each tier
                     selection_method = "least-used"
                     tier1_keys.sort(key=lambda x: x[1])
                     tier2_keys.sort(key=lambda x: x[1])
 
-                # Attempt to acquire a key from Tier 1 first.
-                for key, usage in tier1_keys:
+                    # Combine idle keys first, then active, sorted by usage.
+                    # Preferring idle keys spreads load across more credentials.
+                    all_available_keys = tier2_keys + tier1_keys
+                    all_available_keys.sort(key=lambda x: x[1])
+
+                # Attempt to acquire a key, preferring idle keys for better distribution.
+                for key, usage in all_available_keys:
                     state = self.key_states[key]
                     async with state["lock"]:
                         current_count = state["models_in_use"].get(model, 0)
-                        if (
-                            state["models_in_use"]
-                            and current_count < effective_max_concurrent
-                        ):
-                            state["models_in_use"][model] = current_count + 1
-                            tier_name = (
-                                credential_tier_names.get(key)
-                                if credential_tier_names
-                                else None
-                            )
-                            tier_info = f"tier: {tier_name}, " if tier_name else ""
-                            quota_display = self._get_quota_display(key, model)
-                            lib_logger.info(
-                                f"Acquired key {mask_credential(key)} for model {model} "
-                                f"({tier_info}selection: {selection_method}, selection_source: reused-active, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
-                            )
-                            return key
-
-                # If no Tier 1 keys are available, try Tier 2.
-                for key, usage in tier2_keys:
-                    state = self.key_states[key]
-                    async with state["lock"]:
-                        if not state["models_in_use"]:
+                        is_currently_active = bool(state["models_in_use"])
+                        if is_currently_active:
+                            if current_count < effective_max_concurrent:
+                                state["models_in_use"][model] = current_count + 1
+                            else:
+                                continue
+                        else:
                             state["models_in_use"][model] = 1
-                            tier_name = (
-                                credential_tier_names.get(key)
-                                if credential_tier_names
-                                else None
-                            )
-                            tier_info = f"tier: {tier_name}, " if tier_name else ""
-                            quota_display = self._get_quota_display(key, model)
-                            lib_logger.info(
-                                f"Acquired key {mask_credential(key)} for model {model} "
-                                f"({tier_info}selection: {selection_method}, selection_source: idle, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
-                            )
-                            return key
+                        tier_name = (
+                            credential_tier_names.get(key)
+                            if credential_tier_names
+                            else None
+                        )
+                        tier_info = f"tier: {tier_name}, " if tier_name else ""
+                        quota_display = self._get_quota_display(key, model)
+                        selection_source = "reused-active" if is_currently_active else "idle"
+                        lib_logger.info(
+                            f"Acquired key {mask_credential(key)} for model {model} "
+                            f"({tier_info}selection: {selection_method}, selection_source: {selection_source}, concurrent: {state['models_in_use'][model]}/{effective_max_concurrent}, {quota_display})"
+                        )
+                        return key
 
                 # If all eligible keys are locked, wait for a key to be released.
                 lib_logger.info(

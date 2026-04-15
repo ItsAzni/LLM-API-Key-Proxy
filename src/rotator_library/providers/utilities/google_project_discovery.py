@@ -234,7 +234,7 @@ class GoogleProjectDiscoveryMixin:
             metadata = self._credentials_cache.get(credential_path, {}).get("_proxy_metadata")
             if metadata is None:
                 try:
-                    with open(credential_path, "r") as f:
+                    with open(credential_path, "r", encoding="utf-8") as f:
                         creds = json_loads(f.read())
                     metadata = creds.get("_proxy_metadata", {})
                 except (FileNotFoundError, ValueError, KeyError) as e:

@@ -31,6 +31,12 @@ if sys.platform == "win32":
     if hasattr(sys.stderr, 'buffer') and sys.stderr.buffer is not None:
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, io.UnsupportedOperation):
+        pass
+
 # --- Argument Parsing (BEFORE heavy imports) ---
 parser = argparse.ArgumentParser(description="API Key Proxy Server")
 parser.add_argument(
@@ -743,6 +749,7 @@ app.add_middleware(
     allow_credentials=False,  # Must be False when allow_origins=["*"] per CORS spec
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
+    expose_headers=["X-Accel-Buffering"],  # Custom headers visible to JS clients
 )
 
 # SSE-aware gzip: compresses non-streaming responses >= minimum_size, passes SSE through raw

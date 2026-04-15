@@ -741,6 +741,10 @@ class HttpClientPool(metaclass=SingletonMeta):
         Creates clients outside the lock to avoid blocking concurrent
         get_client_async() calls during expensive _create_client().
 
+        Reads client state under the lock to avoid TOCTOU race with
+        concurrent _ensure_client() which may recreate clients between
+        the unlocked read and the locked assignment.
+
         Returns:
         True if recovery was successful, False otherwise
         """
@@ -748,15 +752,20 @@ class HttpClientPool(metaclass=SingletonMeta):
         new_streaming = None
         new_non_streaming = None
 
+        # Snapshot client state under lock to avoid TOCTOU race
+        async with self._client_lock:
+            need_streaming = self._is_client_closed(self._streaming_client)
+            need_non_streaming = self._is_client_closed(self._non_streaming_client)
+
         # Create clients outside lock — SSL/DNS setup can take seconds
-        if self._is_client_closed(self._streaming_client):
+        if need_streaming:
             try:
                 new_streaming = await self._create_client(streaming=True)
                 recovered.append("streaming")
             except Exception as e:
                 lib_logger.error(f"Failed to recover streaming client: {e}")
 
-        if self._is_client_closed(self._non_streaming_client):
+        if need_non_streaming:
             try:
                 new_non_streaming = await self._create_client(streaming=False)
                 recovered.append("non-streaming")
@@ -764,13 +773,20 @@ class HttpClientPool(metaclass=SingletonMeta):
                 lib_logger.error(f"Failed to recover non-streaming client: {e}")
 
         # Assign under lock — cheap pointer swaps, no I/O
+        # Use same guard as _ensure_client: only assign if still closed
         async with self._client_lock:
             if new_streaming is not None:
-                self._streaming_client = new_streaming
-                self._stats["reconnects"] += 1
+                if self._is_client_closed(self._streaming_client):
+                    self._streaming_client = new_streaming
+                    self._stats["reconnects"] += 1
+                else:
+                    self._schedule_orphan_close(new_streaming)
             if new_non_streaming is not None:
-                self._non_streaming_client = new_non_streaming
-                self._stats["reconnects"] += 1
+                if self._is_client_closed(self._non_streaming_client):
+                    self._non_streaming_client = new_non_streaming
+                    self._stats["reconnects"] += 1
+                else:
+                    self._schedule_orphan_close(new_non_streaming)
 
             if recovered:
                 lib_logger.info(f"HTTP client pool recovered: {', '.join(recovered)}")

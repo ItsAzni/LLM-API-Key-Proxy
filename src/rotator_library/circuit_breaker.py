@@ -309,13 +309,12 @@ class ProviderCircuitBreaker:
             circuit.last_failure_time = current_time
 
             if circuit.state == CircuitState.HALF_OPEN:
-                # FIX: Decrement active counter
+                # FIX: Decrement active counter (only for this request, not others still in-flight)
                 circuit.half_open_active = max(0, circuit.half_open_active - 1)
 
                 # Failed during recovery, reopen circuit
                 circuit.state = CircuitState.OPEN
                 circuit.half_open_attempts = 0
-                circuit.half_open_active = 0
                 lib_logger.warning(
                     "Circuit for '%s' reopened: HALF_OPEN -> OPEN (failure during recovery)",
                     provider
@@ -344,17 +343,21 @@ class ProviderCircuitBreaker:
         leaks and the provider becomes permanently stuck in HALF_OPEN
         once half_open_active reaches half_open_max.
 
+        Also handles the case where another request caused the circuit to
+        transition HALF_OPEN -> OPEN while this request was still in-flight:
+        the counter must still be decremented to avoid slot leaks.
+
         Args:
         provider: Provider name whose slot to release
         """
         lock = await self._provider_lock_manager.get_lock(provider)
         async with lock:
             circuit = self._get_or_create_circuit(provider)
-            if circuit.state == CircuitState.HALF_OPEN and circuit.half_open_active > 0:
+            if circuit.half_open_active > 0:
                 circuit.half_open_active = max(0, circuit.half_open_active - 1)
                 lib_logger.debug(
-                    "Circuit for '%s' half_open slot released, active %d",
-                    provider, circuit.half_open_active
+                    "Circuit for '%s' half_open slot released (state=%s), active %d",
+                    provider, circuit.state.value, circuit.half_open_active
                 )
 
     async def open_immediately(

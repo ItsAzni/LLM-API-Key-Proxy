@@ -193,7 +193,8 @@ class IPThrottleDetector:
             retry_after=retry_after,
             error_body=error_body[:500] if error_body else None,  # Truncate for storage
         )
-        self._records[provider].append(record)
+        with self._records_lock:
+            self._records[provider].append(record)
 
         # Cleanup old records
         self._cleanup_old_records(provider)
@@ -232,7 +233,8 @@ class IPThrottleDetector:
         Returns:
             ThrottleAssessment with detected scope and recommendations
         """
-        records = self._records[provider]
+        with self._records_lock:
+            records = list(self._records[provider])
 
         if not records:
             return ThrottleAssessment(
@@ -309,9 +311,13 @@ class IPThrottleDetector:
             Dict mapping provider names to their ThrottleAssessment
         """
         result = {}
-        for provider in list(self._records.keys()):
+        with self._records_lock:
+            providers = list(self._records.keys())
+        for provider in providers:
             self._cleanup_old_records(provider)
-            if self._records[provider]:
+            with self._records_lock:
+                has_records = bool(self._records[provider])
+            if has_records:
                 assessment = self._assess_throttle_scope(provider)
                 if assessment.scope == ThrottleScope.IP:
                     result[provider] = assessment
@@ -319,32 +325,35 @@ class IPThrottleDetector:
 
     def clear_provider(self, provider: str) -> None:
         """Clear all records for a provider (e.g., after cooldown expires)."""
-        if provider in self._records:
-            del self._records[provider]
+        with self._records_lock:
+            if provider in self._records:
+                del self._records[provider]
         lib_logger.debug(f"IPThrottleDetector: cleared records for {provider}")
 
     def clear_all(self) -> None:
         """Clear all records."""
-        self._records.clear()
-        self._assessment_cache.clear()
+        with self._records_lock:
+            self._records.clear()
+            self._assessment_cache.clear()
         lib_logger.debug("IPThrottleDetector: cleared all records")
 
     def get_stats(self) -> Dict[str, Any]:
         """Get diagnostic statistics about the detector state."""
-        stats = {
-            "providers_tracked": len(self._records),
-            "total_records": sum(len(r) for r in self._records.values()),
-            "window_seconds": self.window_seconds,
-            "min_credentials": self.min_credentials,
-            "per_provider": {},
-        }
-
-        for provider, records in self._records.items():
-            unique_creds = len(set(r.credential for r in records))
-            stats["per_provider"][provider] = {
-                "records": len(records),
-                "unique_credentials": unique_creds,
+        with self._records_lock:
+            stats = {
+                "providers_tracked": len(self._records),
+                "total_records": sum(len(r) for r in self._records.values()),
+                "window_seconds": self.window_seconds,
+                "min_credentials": self.min_credentials,
+                "per_provider": {},
             }
+
+            for provider, records in self._records.items():
+                unique_creds = len(set(r.credential for r in records))
+                stats["per_provider"][provider] = {
+                    "records": len(records),
+                    "unique_credentials": unique_creds,
+                }
 
         return stats
 
