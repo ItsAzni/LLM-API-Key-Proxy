@@ -157,17 +157,19 @@ def _get_doh_client():
 def close_doh_client() -> None:
     """Close the persistent DoH httpx.Client (call during shutdown)."""
     global _doh_client
-    if _doh_client is not None:
-        _doh_client.close()
-        _doh_client = None
+    with _doh_client_lock:
+        if _doh_client is not None:
+            _doh_client.close()
+            _doh_client = None
 
 
 def close_dns_executor() -> None:
     """Shut down the module-level DNS ThreadPoolExecutor (call during shutdown)."""
     global _dns_executor
-    if _dns_executor is not None:
-        _dns_executor.shutdown(wait=False)
-        _dns_executor = None
+    with _dns_executor_lock:
+        if _dns_executor is not None:
+            _dns_executor.shutdown(wait=False)
+            _dns_executor = None
 
 
 def _doh_query(host: str, doh_url: str) -> Optional[str]:
@@ -388,7 +390,8 @@ def _custom_getaddrinfo(
         return future.result(timeout=10)
     except RuntimeError:
         with _dns_executor_lock:
-            _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
+            if _dns_executor is None:
+                _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
         future = _dns_executor.submit(
             _custom_getaddrinfo_sync, host, port, family, type, proto, flags
         )

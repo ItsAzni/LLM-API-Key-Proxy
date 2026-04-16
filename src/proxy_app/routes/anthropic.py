@@ -50,7 +50,7 @@ async def anthropic_messages(
 
     # Log raw Anthropic request if raw logging is enabled
     if logger:
-        logger.log_request(
+        await logger.log_request(
             headers=dict(request.headers),
             body=body_data,
         )

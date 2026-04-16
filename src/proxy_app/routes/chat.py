@@ -66,7 +66,7 @@ async def chat_completions(
 
         # If raw logging is enabled, capture the unmodified request data.
         if raw_logger:
-            raw_logger.log_request(headers=request.headers, body=request_data)
+            await raw_logger.log_request(headers=request.headers, body=request_data)
 
         # Extract and log specific reasoning parameters for monitoring.
         model = request_data.get("model")

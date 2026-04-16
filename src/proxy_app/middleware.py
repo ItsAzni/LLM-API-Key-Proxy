@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ShmidtS
 
-from .logging_config import RotatorDebugFilter, NoLiteLLMLogFilter
-
-
 class _NoGzipForSSE:
     """GZip middleware that skips compression for streaming responses.
 

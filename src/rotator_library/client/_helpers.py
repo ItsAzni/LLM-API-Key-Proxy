@@ -266,6 +266,11 @@ class HelpersMixin:
         self._credential_priority_cache.pop(provider, None)
         self._credential_priority_cache.pop(provider + ":result", None)
 
+        # Also invalidate model ID cache entries for this provider
+        keys_to_remove = [k for k in self._resolve_model_id_cache if k[1] == provider]
+        for k in keys_to_remove:
+            del self._resolve_model_id_cache[k]
+
     def _reset_litellm_client_cache(self) -> None:
         """
         Reset LiteLLM's internal HTTP client cache.
@@ -802,6 +807,9 @@ class HelpersMixin:
         For custom models with name/ID mappings, returns the ID.
         Otherwise, returns the model name unchanged.
 
+        Results are cached with TTL to avoid repeated provider lookups.
+        Cache is invalidated when providers are refreshed.
+
         Args:
             model: Full model string with provider (e.g., "iflow/DS-v3.2")
             provider: Provider name (e.g., "iflow")
@@ -809,6 +817,11 @@ class HelpersMixin:
         Returns:
             Full model string with ID (e.g., "iflow/deepseek-v3.2")
         """
+        cache_key = (model, provider)
+        cached = self._resolve_model_id_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # Extract model name from "provider/model_name" format
         model_name = model.split("/")[-1] if "/" in model else model
 
@@ -821,8 +834,10 @@ class HelpersMixin:
                 provider, model_name
             )
             if model_id and model_id != model_name:
-                # Return with provider prefix
-                return f"{provider}/{model_id}"
+                result = f"{provider}/{model_id}"
+                self._resolve_model_id_cache[cache_key] = result
+                return result
 
         # No conversion needed, return original
+        self._resolve_model_id_cache[cache_key] = model
         return model

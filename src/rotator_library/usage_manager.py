@@ -173,8 +173,6 @@ class UsageManager:
         self._initialized = asyncio.Event()
         self._init_lock = asyncio.Lock()
 
-        self._timeout_lock = asyncio.Lock()
-        self._claimed_on_timeout: Set[str] = set()
 
         # Lazy caches for stable quota group config (OrderedDict for LRU eviction)
         # (key, model) -> group_name or None
@@ -632,17 +630,15 @@ class UsageManager:
     ) -> Dict[str, Any]:
         """
         Ensure the nested cycle structure exists and return the cycle data dict.
+        Uses setdefault for atomic check-and-create (avoids check-then-act race).
         """
-        if provider not in self._cycle_exhausted:
-            self._cycle_exhausted[provider] = {}
-        if tier_key not in self._cycle_exhausted[provider]:
-            self._cycle_exhausted[provider][tier_key] = {}
-        if tracking_key not in self._cycle_exhausted[provider][tier_key]:
-            self._cycle_exhausted[provider][tier_key][tracking_key] = {
-                "cycle_started_at": None,
-                "exhausted": set(),
-            }
-        return self._cycle_exhausted[provider][tier_key][tracking_key]
+        provider_dict = self._cycle_exhausted.setdefault(provider, {})
+        tier_dict = provider_dict.setdefault(tier_key, {})
+        cycle = tier_dict.setdefault(tracking_key, {
+            "cycle_started_at": None,
+            "exhausted": set(),
+        })
+        return cycle
 
     def _mark_credential_exhausted(
         self,
@@ -1865,27 +1861,28 @@ class UsageManager:
         today_str = now_utc.date().isoformat()
         needs_saving = False
 
-        for key, data in self._usage_data.items():
-            reset_config = self._get_usage_reset_config(key)
+        async with self._data_lock.write():
+            for key, data in list(self._usage_data.items()):
+                reset_config = self._get_usage_reset_config(key)
 
-            if reset_config:
-                reset_mode = reset_config.get("mode", "credential")
+                if reset_config:
+                    reset_mode = reset_config.get("mode", "credential")
 
-                if reset_mode == "per_model":
-                    # Per-model window reset
-                    needs_saving |= await self._check_per_model_resets(
-                        key, data, reset_config, now_ts
+                    if reset_mode == "per_model":
+                        # Per-model window reset
+                        needs_saving |= await self._check_per_model_resets(
+                            key, data, reset_config, now_ts
+                        )
+                    else:
+                        # Credential-level window reset (legacy)
+                        needs_saving |= await self._check_window_reset(
+                            key, data, reset_config, now_ts
+                        )
+                elif self.daily_reset_time_utc:
+                    # Legacy daily reset
+                    needs_saving |= await self._check_daily_reset(
+                        key, data, now_utc, today_str, now_ts
                     )
-                else:
-                    # Credential-level window reset (legacy)
-                    needs_saving |= await self._check_window_reset(
-                        key, data, reset_config, now_ts
-                    )
-            elif self.daily_reset_time_utc:
-                # Legacy daily reset
-                needs_saving |= await self._check_daily_reset(
-                    key, data, now_utc, today_str, now_ts
-                )
 
         if needs_saving:
             await self._save_usage()
@@ -2282,12 +2279,11 @@ class UsageManager:
     def _initialize_key_states(self, keys: List[str]):
         """Initializes state tracking for all provided keys if not already present."""
         for key in keys:
-            if key not in self.key_states:
-                self.key_states[key] = {
-                    "lock": asyncio.Lock(),
-                    "condition": asyncio.Condition(),
-                    "models_in_use": {},  # Dict[model_name, concurrent_count]
-                }
+            self.key_states.setdefault(key, {
+                "lock": asyncio.Lock(),
+                "condition": asyncio.Condition(),
+                "models_in_use": {},  # Dict[model_name, concurrent_count]
+            })
 
     def _select_weighted_random(self, candidates: List[tuple], tolerance: float) -> str:
         """

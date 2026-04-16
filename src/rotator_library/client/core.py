@@ -270,6 +270,9 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
 
         self._credential_priority_cache: TTLCache = TTLCache(maxsize=64, ttl=300)
 
+        # Model ID resolution cache — avoids repeated provider lookups per request
+        self._resolve_model_id_cache: TTLCache = TTLCache(maxsize=256, ttl=300)
+
         self.provider_config = ProviderConfig()
         self._resilience = ResilienceOrchestrator(
             provider_overrides=CIRCUIT_BREAKER_PROVIDER_OVERRIDES,
@@ -495,6 +498,9 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         For custom models with name/ID mappings, returns the ID.
         Otherwise, returns the model name unchanged.
 
+        Results are cached with TTL to avoid repeated provider lookups.
+        Cache is invalidated when providers are refreshed.
+
         Args:
             model: Full model string with provider (e.g., "iflow/DS-v3.2")
             provider: Provider name (e.g., "iflow")
@@ -502,6 +508,11 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         Returns:
             Full model string with ID (e.g., "iflow/deepseek-v3.2")
         """
+        cache_key = (model, provider)
+        cached = self._resolve_model_id_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # Extract model name from "provider/model_name" format
         model_name = model.split("/")[-1] if "/" in model else model
 
@@ -514,15 +525,20 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
                 provider, model_name
             )
             if model_id and model_id != model_name:
-                # Return with provider prefix
-                return f"{provider}/{model_id}"
+                result = f"{provider}/{model_id}"
+                self._resolve_model_id_cache[cache_key] = result
+                return result
 
         # Fallback: use client's own model definitions
         model_id = self.model_definitions.get_model_id(provider, model_name)
         if model_id and model_id != model_name:
-            return f"{provider}/{model_id}"
+            result = f"{provider}/{model_id}"
+            self._resolve_model_id_cache[cache_key] = result
+            return result
 
         # No conversion needed, return original
+        self._resolve_model_id_cache[cache_key] = model
+        return model
         return model
 
     async def __aenter__(self):
@@ -751,7 +767,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
                     base_count += preprompt_tokens
             except ImportError:
                 # Provider not available, skip preprompt token counting
-                pass
+                lib_logger.debug("Provider not available, skip preprompt token counting")
 
         return base_count
 

@@ -4,7 +4,6 @@
 # src/rotator_library/providers/gemini_cli_provider.py
 
 import orjson
-from ..utils.json_utils import json_deep_copy
 from ..utils.duration import parse_duration as _parse_duration_shared
 import httpx
 import logging
@@ -756,7 +755,7 @@ class GeminiCliProvider(
 
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
-                new_function = json_deep_copy(tool["function"])
+                new_function = dict(tool["function"])
 
                 # The Gemini CLI API does not support the 'strict' property.
                 new_function.pop("strict", None)
@@ -959,7 +958,7 @@ class GeminiCliProvider(
 
             # Log the final payload for debugging and to the dedicated file
             # lib_logger.debug(f"Gemini CLI Request Payload: {json.dumps(request_payload, indent=2)}")
-            file_logger.log_request(request_payload)
+            await file_logger.log_request(request_payload)
 
             async def stream_handler():
                 # Track state across chunks for tool indexing
@@ -1003,7 +1002,7 @@ class GeminiCliProvider(
                                     lib_logger.error(
                                         f"Gemini CLI API error {response.status_code}: {error_body.decode()}"
                                     )
-                                    file_logger.log_error(
+                                    await file_logger.log_error(
                                         f"API error {response.status_code}: {error_body.decode()}"
                                     )
                                 except Exception:
@@ -1056,11 +1055,11 @@ class GeminiCliProvider(
 
                         # Only log to file logger (for detailed logging)
                         if error_body:
-                            file_logger.log_error(
+                            await file_logger.log_error(
                                 f"HTTPStatusError {e.response.status_code}: {error_body}"
                             )
                         else:
-                            file_logger.log_error(
+                            await file_logger.log_error(
                                 f"HTTPStatusError {e.response.status_code}: {str(e)}"
                             )
 
@@ -1102,7 +1101,7 @@ class GeminiCliProvider(
                     except (httpx.ConnectError, httpx.TimeoutException) as e:
                         # Connection/timeout errors - try next endpoint if available
                         last_endpoint_error = e
-                        file_logger.log_error(
+                        await file_logger.log_error(
                             f"Connection error to {base_endpoint}: {str(e)}"
                         )
                         if endpoint_idx < len(GEMINI_CLI_ENDPOINT_FALLBACKS) - 1:
@@ -1114,7 +1113,7 @@ class GeminiCliProvider(
                         raise e
 
                     except Exception as e:
-                        file_logger.log_error(f"Stream handler exception: {str(e)}")
+                        await file_logger.log_error(f"Stream handler exception: {str(e)}")
                         raise
 
                 # If we get here, all endpoints failed (shouldn't happen due to raise in loop)
@@ -1133,7 +1132,7 @@ class GeminiCliProvider(
                         final_response = self._stream_to_completion_response(
                             openai_chunks
                         )
-                        file_logger.log_final_response(final_response.dict())
+                        await file_logger.log_final_response(final_response.dict())
 
             return logging_stream_wrapper()
 

@@ -134,7 +134,7 @@ class AntigravityStreamingMixin:
 
         # Log the final accumulated response
         if file_logger:
-            file_logger.log_final_response(response_dict)
+            await file_logger.log_final_response(response_dict)
 
         return litellm.ModelResponse(**response_dict)
 
@@ -272,11 +272,11 @@ class AntigravityStreamingMixin:
             async for line in response.aiter_lines():
                 if file_logger:
                     if malformed_retry_num is not None:
-                        file_logger.log_malformed_retry_response(
+                        await file_logger.log_malformed_retry_response(
                             malformed_retry_num, line
                         )
                     else:
-                        file_logger.log_response_chunk(line)
+                        await file_logger.log_response_chunk(line)
 
                 if line.startswith("data: "):
                     data_str = line[6:]
@@ -306,7 +306,7 @@ class AntigravityStreamingMixin:
                         accumulator["yielded_any"] = True
                     except orjson.JSONDecodeError:
                         if file_logger:
-                            file_logger.log_error(f"Parse error: {data_str[:100]}")
+                            await file_logger.log_error(f"Parse error: {data_str[:100]}")
                         continue
 
         # Check if we detected a malformed call - raise exception for retry handler
@@ -363,7 +363,7 @@ class AntigravityStreamingMixin:
                     ],
                     "usage": accumulator.get("last_usage"),
                 }
-                file_logger.log_final_response(final_response)
+                await file_logger.log_final_response(final_response)
 
             # Cache Claude thinking after stream completes
             if (

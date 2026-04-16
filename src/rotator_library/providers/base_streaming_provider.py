@@ -6,8 +6,9 @@ Base mixin classes for shared streaming logic across multiple API providers.
 LightweightQuotaMixin (formerly QuotaRefreshMixin) is in utilities/lightweight_quota_mixin.py.
 """
 
+import asyncio
 import logging
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 import orjson
 from ..utils.json_utils import json_deep_copy
@@ -19,7 +20,7 @@ lib_logger = logging.getLogger("rotator_library")
 async def parse_sse_stream(
     response: Any,
     provider_name: str = "",
-    on_line: Optional[Callable[[str], None]] = None,
+    on_line: Optional[Union[Callable[[str], None], Callable[[str], Any]]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Async generator that parses SSE (Server-Sent Events) lines from an
@@ -32,14 +33,16 @@ async def parse_sse_stream(
         response: An httpx streaming response (already inside ``async with``).
         provider_name: Name of the calling provider for log messages.
         on_line: Optional callback invoked for every raw line (useful for
-                 transaction logging, e.g. ``file_logger.log_response_chunk``).
+                 transaction logging). Supports both sync and async callables.
 
     Yields:
         Parsed JSON dicts from each SSE ``data`` line.
     """
     async for line in response.aiter_lines():
         if on_line is not None:
-            on_line(line)
+            result = on_line(line)
+            if asyncio.iscoroutine(result):
+                await result
 
         # Skip non-data lines (event:, comments, empty lines)
         if not line.startswith("data:"):

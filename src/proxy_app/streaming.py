@@ -29,15 +29,18 @@ async def streaming_response_wrapper(
     Receives dicts + STREAM_DONE sentinel from the client pipeline,
     serializes to SSE only at the HTTP yield boundary (single serialize).
     """
-    # --- Inline aggregation state (eliminates second pass over response_chunks) ---
-    final_message = {"role": "assistant"}
+    # --- Aggregation state: only needed when logger is active ---
+    final_message = None
     _content_parts: list = []
     _generic_str_parts: dict = {}
-    aggregated_tool_calls = {}  # index -> {type, id, function: {name_parts, args_parts}}
+    aggregated_tool_calls = {}
     usage_data = None
     finish_reason = None
-    first_chunk_meta = None  # {id, created, model} from first chunk
+    first_chunk_meta = None
     _chunk_count = 0
+
+    if logger is not None:
+        final_message = {"role": "assistant"}
 
     # Track active streaming connections for graceful shutdown
     try:
@@ -65,85 +68,85 @@ async def streaming_response_wrapper(
             if not isinstance(chunk, dict):
                 continue
 
-            if logger:
-                logger.log_stream_chunk(chunk)
-            else:
-                continue
+            if logger is not None:
+                result = logger.log_stream_chunk(chunk)
+                if asyncio.iscoroutine(result):
+                    await result
 
-            # --- Inline aggregation (single pass, no second iteration) ---
-            # Capture metadata from first chunk
-            if first_chunk_meta is None:
-                first_chunk_meta = {
-                    "id": chunk.get("id"),
-                    "created": chunk.get("created"),
-                    "model": chunk.get("model"),
-                }
+                # --- Inline aggregation (single pass, no second iteration) ---
+                # Capture metadata from first chunk
+                if first_chunk_meta is None:
+                    first_chunk_meta = {
+                        "id": chunk.get("id"),
+                        "created": chunk.get("created"),
+                        "model": chunk.get("model"),
+                    }
 
-            if "choices" in chunk and chunk["choices"]:
-                choice = chunk["choices"][0]
-                delta = choice.get("delta", {})
+                if "choices" in chunk and chunk["choices"]:
+                    choice = chunk["choices"][0]
+                    delta = choice.get("delta", {})
 
-                for key, value in delta.items():
-                    if value is None:
-                        continue
+                    for key, value in delta.items():
+                        if value is None:
+                            continue
 
-                    if key == "content":
-                        if value:
-                            _content_parts.append(value)
+                        if key == "content":
+                            if value:
+                                _content_parts.append(value)
 
-                    elif key == "tool_calls":
-                        for tc_chunk in value:
-                            index = tc_chunk["index"]
-                            if index not in aggregated_tool_calls:
-                                aggregated_tool_calls[index] = {
-                                    "type": "function",
-                                    "function": {
-                                        "name_parts": [],
-                                        "args_parts": [],
-                                    },
+                        elif key == "tool_calls":
+                            for tc_chunk in value:
+                                index = tc_chunk["index"]
+                                if index not in aggregated_tool_calls:
+                                    aggregated_tool_calls[index] = {
+                                        "type": "function",
+                                        "function": {
+                                            "name_parts": [],
+                                            "args_parts": [],
+                                        },
+                                    }
+                                tc = aggregated_tool_calls[index]
+                                if tc_chunk.get("id"):
+                                    tc["id"] = tc_chunk["id"]
+                                if "function" in tc_chunk:
+                                    fn = tc_chunk["function"]
+                                    if fn.get("name") is not None:
+                                        tc["function"]["name_parts"].append(fn["name"])
+                                    if fn.get("arguments") is not None:
+                                        tc["function"]["args_parts"].append(
+                                            fn["arguments"]
+                                        )
+
+                        elif key == "function_call":
+                            if "function_call" not in final_message:
+                                final_message["function_call"] = {
+                                    "_name_parts": [],
+                                    "_args_parts": [],
                                 }
-                            tc = aggregated_tool_calls[index]
-                            if tc_chunk.get("id"):
-                                tc["id"] = tc_chunk["id"]
-                            if "function" in tc_chunk:
-                                fn = tc_chunk["function"]
-                                if fn.get("name") is not None:
-                                    tc["function"]["name_parts"].append(fn["name"])
-                                if fn.get("arguments") is not None:
-                                    tc["function"]["args_parts"].append(
-                                        fn["arguments"]
-                                    )
+                            if value.get("name") is not None:
+                                final_message["function_call"]["_name_parts"].append(
+                                    value["name"]
+                                )
+                            if value.get("arguments") is not None:
+                                final_message["function_call"]["_args_parts"].append(
+                                    value["arguments"]
+                                )
 
-                    elif key == "function_call":
-                        if "function_call" not in final_message:
-                            final_message["function_call"] = {
-                                "_name_parts": [],
-                                "_args_parts": [],
-                            }
-                        if value.get("name") is not None:
-                            final_message["function_call"]["_name_parts"].append(
-                                value["name"]
-                            )
-                        if value.get("arguments") is not None:
-                            final_message["function_call"]["_args_parts"].append(
-                                value["arguments"]
-                            )
+                        else:  # Generic key handling for other data like 'reasoning'
+                            if key == "role":
+                                final_message[key] = value
+                            elif isinstance(value, str):
+                                if key not in _generic_str_parts:
+                                    _generic_str_parts[key] = []
+                                _generic_str_parts[key].append(value)
+                            else:
+                                final_message[key] = value
 
-                    else:  # Generic key handling for other data like 'reasoning'
-                        if key == "role":
-                            final_message[key] = value
-                        elif isinstance(value, str):
-                            if key not in _generic_str_parts:
-                                _generic_str_parts[key] = []
-                            _generic_str_parts[key].append(value)
-                        else:
-                            final_message[key] = value
+                    if "finish_reason" in choice and choice["finish_reason"]:
+                        finish_reason = choice["finish_reason"]
 
-                if "finish_reason" in choice and choice["finish_reason"]:
-                    finish_reason = choice["finish_reason"]
-
-            if "usage" in chunk and chunk["usage"]:
-                usage_data = chunk["usage"]
+                if "usage" in chunk and chunk["usage"]:
+                    usage_data = chunk["usage"]
     except (GeneratorExit, asyncio.CancelledError):
         raise
     except Exception as e:

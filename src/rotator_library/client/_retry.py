@@ -230,7 +230,7 @@ class RetryMixin:
                 api_format="oai",
                 parent_dir=parent_log_dir,
             )
-            transaction_logger.log_request(kwargs)
+            await transaction_logger.log_request(kwargs)
 
         credentials_for_provider = list(self.all_credentials[provider])
         offset = self._cred_offset.get(provider, 0)
@@ -423,7 +423,7 @@ class RetryMixin:
                                     if hasattr(response, "model_dump")
                                     else response
                                 )
-                                transaction_logger.log_response(response_data)
+                                await transaction_logger.log_response(response_data)
 
                             # Reset consecutive quota failures on success
                             self.reset_quota_failures(current_cred)
@@ -581,7 +581,7 @@ class RetryMixin:
                     is_oauth = provider in self.oauth_providers
                     if is_oauth:  # Standard OAuth provider (not custom)
                         # ... (logic to set headers) ...
-                        pass
+                        lib_logger.debug("OAuth header handling handled by _apply_provider_headers")
                     else:  # API Key
                         litellm_kwargs["api_key"] = current_cred
 
@@ -714,7 +714,7 @@ class RetryMixin:
                                     if hasattr(response, "model_dump")
                                     else response
                                 )
-                                transaction_logger.log_response(response_data)
+                                await transaction_logger.log_response(response_data)
 
                             # Reset consecutive quota failures on success
                             self.reset_quota_failures(current_cred)

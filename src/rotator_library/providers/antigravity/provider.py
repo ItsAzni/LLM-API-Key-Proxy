@@ -769,7 +769,7 @@ class AntigravityProvider(
         payload = self._transform_to_antigravity_format(
             gemini_payload, model, project_id, max_tokens, reasoning_effort, tool_choice
         )
-        file_logger.log_request(payload)
+        await file_logger.log_request(payload)
 
         # Pre-build tool schema map for malformed call handling
         # This maps original tool names (without prefix) to their schemas

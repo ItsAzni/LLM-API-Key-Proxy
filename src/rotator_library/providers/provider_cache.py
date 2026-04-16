@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 from orjson import JSONDecodeError
 import logging
-import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -96,8 +95,7 @@ class ProviderCache:
         self._memory_ttl = memory_ttl_seconds
         self._disk_ttl = disk_ttl_seconds
         self._rw_lock = ReadWriteLock()
-        self._sync_lock = threading.Lock()  # Sync callers only (retrieve/contains)
-        self._async_lock = asyncio.Lock()   # Async callers (store_async/retrieve_async)
+        self._async_lock = asyncio.Lock()   # All cache mutations and async reads
         self._disk_lock = asyncio.Lock()
         self._max_entries = max_entries
         self._evicted_count = 0
@@ -408,6 +406,17 @@ class ProviderCache:
         """
         await self._async_store(key, value)
 
+    async def _touch_key(self, key: str) -> None:
+        """Move key to end of LRU (called from sync retrieve via create_task)."""
+        async with self._async_lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+
+    async def _remove_expired_key(self, key: str) -> None:
+        """Remove an expired key from memory cache (called from sync retrieve via create_task)."""
+        async with self._async_lock:
+            self._cache.pop(key, None)
+
     def retrieve(self, key: str) -> Optional[str]:
         """
         Retrieve a value by key (synchronous, with optional async disk fallback).
@@ -423,22 +432,21 @@ class ProviderCache:
                 f"ProviderCache[{self._cache_name}]: retrieve('{key}') called "
                 "before async init completed — disk data not yet loaded"
             )
-        with self._sync_lock:
-            if key in self._cache:
-                entry = self._cache[key]
-                if time.time() - entry["timestamp"] <= self._memory_ttl:
-                    self._stats["memory_hits"] += 1
-                    entry["accessed"] = time.time()
-                    self._cache.move_to_end(key)  # Mark as most-recently-used
-                    return entry["value"]
-                else:
-                    # Entry expired from memory - remove from memory only
-                    # Don't set dirty flag: disk copy should persist until disk_ttl
-                    del self._cache[key]
+        # Read-only access: dict.__getitem__ and time.time() are atomic in CPython.
+        # Mutation (move_to_end, del) requires async lock — defer to cleanup.
+        entry = self._cache.get(key)
+        if entry is not None:
+            if time.time() - entry["timestamp"] <= self._memory_ttl:
+                self._stats["memory_hits"] += 1
+                # Schedule LRU re-order and expiry cleanup asynchronously
+                asyncio.create_task(self._touch_key(key))
+                return entry["value"]
+            else:
+                # Entry expired — schedule removal via async path (no race)
+                asyncio.create_task(self._remove_expired_key(key))
 
         self._stats["misses"] += 1
         if self._enable_disk:
-            # Schedule async disk lookup for next time
             asyncio.create_task(self._disk_lookup(key))
         return None
 
@@ -557,16 +565,14 @@ class ProviderCache:
 
     def contains(self, key: str) -> bool:
         """Check if key exists in memory cache (without updating stats)."""
-        with self._sync_lock:
-            if key in self._cache:
-                entry = self._cache[key]
-                return time.time() - entry["timestamp"] <= self._memory_ttl
+        entry = self._cache.get(key)
+        if entry is not None:
+            return time.time() - entry["timestamp"] <= self._memory_ttl
         return False
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics including disk health."""
-        with self._sync_lock:
-            memory_entries = len(self._cache)
+        memory_entries = len(self._cache)
         return {
             **self._stats,
             "memory_entries": memory_entries,

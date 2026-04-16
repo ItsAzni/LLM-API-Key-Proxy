@@ -70,7 +70,7 @@ class AnthropicAdapter:
                 api_format="ant",
             )
             # Log original Anthropic request
-            anthropic_logger.log_request(
+            await anthropic_logger.log_request(
                 raw_body_data if raw_body_data is not None else request.model_dump(exclude_none=True),
                 filename="anthropic_request.json",
             )
@@ -154,7 +154,7 @@ class AnthropicAdapter:
 
             # Log Anthropic response
             if anthropic_logger:
-                anthropic_logger.log_response(
+                await anthropic_logger.log_response(
                     anthropic_response,
                     filename="anthropic_response.json",
                 )

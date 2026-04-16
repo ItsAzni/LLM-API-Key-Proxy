@@ -266,7 +266,7 @@ class StreamingMixin:
                     and isinstance(chunk, dict)
                 ):
                     chunks.append(chunk)
-                    transaction_logger.log_stream_chunk(chunk)
+                    await transaction_logger.log_stream_chunk(chunk)
         finally:
             # Assemble and log final response after stream ends
             if transaction_logger and chunks:
@@ -274,7 +274,7 @@ class StreamingMixin:
                     final_response = TransactionLogger.assemble_streaming_response(
                         chunks, request_data
                     )
-                    transaction_logger.log_response(final_response)
+                    await transaction_logger.log_response(final_response)
                 except Exception as e:
                     lib_logger.warning(
                         f"TransactionLogger: Failed to assemble/log final response: {e}"

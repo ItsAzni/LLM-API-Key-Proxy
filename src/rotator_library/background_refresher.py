@@ -76,7 +76,7 @@ class BackgroundRefresher:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    lib_logger.debug(f"Cancelled provider job task for '{provider}'")
                 lib_logger.debug(f"Stopped background job for '{provider}'")
 
         self._provider_job_tasks.clear()
@@ -87,7 +87,7 @@ class BackgroundRefresher:
             try:
                 await self._usage_reset_task
             except asyncio.CancelledError:
-                pass
+                lib_logger.debug("Usage reset task cancelled during stop")
         self._usage_reset_task = None
 
         # Cancel main task
@@ -96,7 +96,7 @@ class BackgroundRefresher:
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                lib_logger.debug("Main refresher task cancelled during stop")
             lib_logger.info("Background token refresher stopped.")
 
     async def _initialize_credentials(self):

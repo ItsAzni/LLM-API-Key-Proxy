@@ -157,7 +157,7 @@ class BatchedPersistence:
                     if age >= self._config.write_interval or age >= self._config.max_dirty_age:
                         await self._write_to_disk()
         except asyncio.CancelledError:
-            pass
+            lib_logger.debug("Writer loop cancelled")
 
     async def _write_to_disk(self) -> bool:
         """Write current state to disk (non-blocking)."""
@@ -186,7 +186,7 @@ class BatchedPersistence:
                     try:
                         self._stats["bytes_written"] += self._file_path.stat().st_size
                     except OSError:
-                        pass
+                        lib_logger.debug("Could not stat file for bytes_written tracking")
                     return True
                 else:
                     self._stats["write_errors"] += 1
@@ -244,7 +244,7 @@ class BatchedPersistence:
             try:
                 await self._writer_task
             except asyncio.CancelledError:
-                pass
+                lib_logger.debug("Writer task cancelled during stop")
 
         # Final write
         if self._dirty and self._state is not None:

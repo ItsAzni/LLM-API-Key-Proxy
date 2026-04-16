@@ -74,7 +74,7 @@ class ACompletionMixin(StreamingResponseMixin):
             endpoint = self._get_stream_endpoint(model)
             url = f"{api_base.rstrip('/')}{endpoint}"
 
-            file_logger.log_request(payload)
+            await file_logger.log_request(payload)
             lib_logger.debug(f"{self.provider_name} Request URL: {url}")
 
             return client.stream(
@@ -121,7 +121,7 @@ class ACompletionMixin(StreamingResponseMixin):
 
                         else:
                             error_msg = f"{self.provider_name} HTTP {response.status_code} error: {error_text}"
-                            file_logger.log_error(error_msg)
+                            await file_logger.log_error(error_msg)
                             raise httpx.HTTPStatusError(
                                 f"HTTP {response.status_code}: {error_text}",
                                 request=response.request,
@@ -141,7 +141,7 @@ class ACompletionMixin(StreamingResponseMixin):
             except httpx.HTTPStatusError:
                 raise
             except Exception as e:
-                file_logger.log_error(
+                await file_logger.log_error(
                     f"Error during {self.provider_name} stream processing: {e}"
                 )
                 lib_logger.error(
@@ -161,7 +161,7 @@ class ACompletionMixin(StreamingResponseMixin):
                     final_response = self._stream_to_completion_response(
                         openai_chunks
                     )
-                    file_logger.log_final_response(final_response.dict())
+                    await file_logger.log_final_response(final_response.dict())
 
         if kwargs.get("stream"):
             return logging_stream_wrapper()

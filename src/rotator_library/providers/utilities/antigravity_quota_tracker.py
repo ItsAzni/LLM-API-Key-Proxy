@@ -21,7 +21,6 @@ Required from provider:
     - self._load_tier_from_file(cred_path) -> Optional[str]
 """
 
-import asyncio
 import logging
 import time
 from datetime import datetime

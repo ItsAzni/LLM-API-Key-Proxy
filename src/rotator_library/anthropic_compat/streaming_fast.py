@@ -233,7 +233,7 @@ async def _finalize_anthropic_stream(
         yield remaining
 
     if transaction_logger:
-        _log_anthropic_response(
+        await _log_anthropic_response(
             transaction_logger, request_id, original_model,
             "".join(_thinking_parts), "".join(_text_parts),
             tool_calls_by_index, input_tokens, output_tokens,
@@ -528,7 +528,7 @@ async def anthropic_streaming_wrapper_fast(
         yield f"event: error\ndata: {json_dumps(error_event)}\n\n"
 
 
-def _log_anthropic_response(
+async def _log_anthropic_response(
     transaction_logger: "TransactionLogger",
     request_id: str,
     model: str,
@@ -596,7 +596,7 @@ def _log_anthropic_response(
         "usage": log_usage,
     }
 
-    transaction_logger.log_response(
+    await transaction_logger.log_response(
         anthropic_response,
         filename="anthropic_response.json",
     )

@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+import aiofiles
+
 from .utils.paths import get_logs_dir
 
 lib_logger = logging.getLogger("rotator_library")
@@ -183,7 +185,7 @@ class TransactionLogger:
             )
         return self._context
 
-    def log_request(
+    async def log_request(
         self, request_data: Dict[str, Any], filename: str = "request.json"
     ) -> None:
         """
@@ -203,9 +205,9 @@ class TransactionLogger:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "data": request_data,
         }
-        self._write_json(filename, data)
+        await self._write_json(filename, data)
 
-    def log_stream_chunk(self, chunk: Dict[str, Any]) -> None:
+    async def log_stream_chunk(self, chunk: Dict[str, Any]) -> None:
         """
         Log an individual chunk from a streaming response.
 
@@ -220,9 +222,9 @@ class TransactionLogger:
             "chunk": chunk,
         }
         content = orjson.dumps(log_entry).decode() + "\n"
-        self._append_text("streaming_chunks.jsonl", content)
+        await self._append_text("streaming_chunks.jsonl", content)
 
-    def log_response(
+    async def log_response(
         self,
         response_data: Dict[str, Any],
         status_code: int = 200,
@@ -252,12 +254,12 @@ class TransactionLogger:
             "headers": dict(headers) if headers else None,
             "data": response_data,
         }
-        self._write_json(filename, data)
+        await self._write_json(filename, data)
 
         # Also write metadata
-        self._log_metadata(response_data, status_code, duration_ms)
+        await self._log_metadata(response_data, status_code, duration_ms)
 
-    def _log_metadata(
+    async def _log_metadata(
         self, response_data: Dict[str, Any], status_code: int, duration_ms: float
     ) -> None:
         """Log transaction metadata summary."""
@@ -304,7 +306,7 @@ class TransactionLogger:
             metadata["reasoning_found"] = True
             metadata["reasoning_content"] = reasoning
 
-        self._write_json("metadata.json", metadata)
+        await self._write_json("metadata.json", metadata)
 
     def _extract_reasoning(self, response_data: Dict[str, Any]) -> Optional[str]:
         """Recursively search for and extract 'reasoning' fields from response."""
@@ -323,23 +325,23 @@ class TransactionLogger:
 
         return None
 
-    def _write_json(self, filename: str, data: Dict[str, Any]) -> None:
+    async def _write_json(self, filename: str, data: Dict[str, Any]) -> None:
         """Write JSON data to a file in the log directory."""
         if not self.log_dir:
             return
         try:
-            with open(self.log_dir / filename, "w", encoding="utf-8") as f:
-                f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode("utf-8"))
+            async with aiofiles.open(self.log_dir / filename, "w", encoding="utf-8") as f:
+                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode("utf-8"))
         except Exception as e:
             lib_logger.error(f"TransactionLogger: Failed to write {filename}: {e}")
 
-    def _append_text(self, filename: str, text: str) -> None:
+    async def _append_text(self, filename: str, text: str) -> None:
         """Append text to a file in the log directory."""
         if not self.log_dir:
             return
         try:
-            with open(self.log_dir / filename, "a", encoding="utf-8") as f:
-                f.write(text)
+            async with aiofiles.open(self.log_dir / filename, "a", encoding="utf-8") as f:
+                await f.write(text)
         except Exception as e:
             lib_logger.error(f"TransactionLogger: Failed to append to {filename}: {e}")
 
@@ -509,34 +511,34 @@ class ProviderLogger:
             lib_logger.error(f"ProviderLogger: Failed to create directory: {e}")
             self.enabled = False
 
-    def log_request(self, payload: Dict[str, Any]) -> None:
+    async def log_request(self, payload: Dict[str, Any]) -> None:
         """
         Log the request payload sent to the provider API.
 
         Args:
             payload: The transformed request payload
         """
-        self._write_json("request_payload.json", payload)
+        await self._write_json("request_payload.json", payload)
 
-    def log_response_chunk(self, chunk: str) -> None:
+    async def log_response_chunk(self, chunk: str) -> None:
         """
         Log a raw chunk from the provider's response stream.
 
         Args:
             chunk: Raw chunk string from the stream
         """
-        self._append_text("response_stream.log", chunk + "\n")
+        await self._append_text("response_stream.log", chunk + "\n")
 
-    def log_final_response(self, response_data: Dict[str, Any]) -> None:
+    async def log_final_response(self, response_data: Dict[str, Any]) -> None:
         """
         Log the final, reassembled response from the provider.
 
         Args:
             response_data: The complete response data
         """
-        self._write_json("final_response.json", response_data)
+        await self._write_json("final_response.json", response_data)
 
-    def log_error(self, error_message: str) -> None:
+    async def log_error(self, error_message: str) -> None:
         """
         Log an error message with timestamp.
 
@@ -544,9 +546,9 @@ class ProviderLogger:
             error_message: The error message to log
         """
         timestamp = datetime.now(timezone.utc).isoformat()
-        self._append_text("error.log", f"[{timestamp}] {error_message}\n")
+        await self._append_text("error.log", f"[{timestamp}] {error_message}\n")
 
-    def log_extra(self, filename: str, data: Union[Dict[str, Any], str]) -> None:
+    async def log_extra(self, filename: str, data: Union[Dict[str, Any], str]) -> None:
         """
         Log arbitrary data to a custom file.
 
@@ -557,27 +559,27 @@ class ProviderLogger:
             data: Either a dict (written as JSON) or string (written as text)
         """
         if isinstance(data, dict):
-            self._write_json(filename, data)
+            await self._write_json(filename, data)
         else:
-            self._append_text(filename, data)
+            await self._append_text(filename, data)
 
-    def _write_json(self, filename: str, data: Dict[str, Any]) -> None:
+    async def _write_json(self, filename: str, data: Dict[str, Any]) -> None:
         """Write JSON data to a file in the log directory."""
         if not self.enabled or not self.log_dir:
             return
         try:
-            with open(self.log_dir / filename, "w", encoding="utf-8") as f:
-                f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode("utf-8"))
+            async with aiofiles.open(self.log_dir / filename, "w", encoding="utf-8") as f:
+                await f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2).decode("utf-8"))
         except Exception as e:
             lib_logger.error(f"ProviderLogger: Failed to write {filename}: {e}")
 
-    def _append_text(self, filename: str, text: str) -> None:
+    async def _append_text(self, filename: str, text: str) -> None:
         """Append text to a file in the log directory."""
         if not self.enabled or not self.log_dir:
             return
         try:
-            with open(self.log_dir / filename, "a", encoding="utf-8") as f:
-                f.write(text)
+            async with aiofiles.open(self.log_dir / filename, "a", encoding="utf-8") as f:
+                await f.write(text)
         except Exception as e:
             lib_logger.error(f"ProviderLogger: Failed to append to {filename}: {e}")
 
@@ -590,7 +592,7 @@ class AntigravityProviderLogger(ProviderLogger):
     retries and auto-fix attempts.
     """
 
-    def log_malformed_retry_request(
+    async def log_malformed_retry_request(
         self, retry_num: int, payload: Dict[str, Any]
     ) -> None:
         """
@@ -600,9 +602,9 @@ class AntigravityProviderLogger(ProviderLogger):
             retry_num: The retry attempt number
             payload: The retry request payload
         """
-        self._write_json(f"malformed_retry_{retry_num}_request.json", payload)
+        await self._write_json(f"malformed_retry_{retry_num}_request.json", payload)
 
-    def log_malformed_retry_response(self, retry_num: int, chunk: str) -> None:
+    async def log_malformed_retry_response(self, retry_num: int, chunk: str) -> None:
         """
         Append a chunk to the malformed retry response log.
 
@@ -610,9 +612,9 @@ class AntigravityProviderLogger(ProviderLogger):
             retry_num: The retry attempt number
             chunk: Response chunk from the retry
         """
-        self._append_text(f"malformed_retry_{retry_num}_response.log", chunk + "\n")
+        await self._append_text(f"malformed_retry_{retry_num}_response.log", chunk + "\n")
 
-    def log_malformed_autofix(
+    async def log_malformed_autofix(
         self, tool_name: str, raw_args: str, fixed_json: str
     ) -> None:
         """
@@ -623,7 +625,7 @@ class AntigravityProviderLogger(ProviderLogger):
             raw_args: The original malformed arguments
             fixed_json: The fixed JSON arguments
         """
-        self._write_json(
+        await self._write_json(
             "malformed_autofix.json",
             {
                 "tool_name": tool_name,
