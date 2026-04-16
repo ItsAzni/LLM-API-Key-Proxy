@@ -309,13 +309,14 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                 lib_logger.warning(f"Invalid JSON from nanogpt subscription models: {e}, body={response.text[:200]}")
                 data = {}
 
-            self._subscription_models.clear()
+            new_models = set()
             for model in data.get("data", []):
                 if not isinstance(model, dict):
                     continue
                 model_id = model.get("id", "")
                 if model_id and not model_id.startswith("auto-model"):
-                    self._subscription_models.add(model_id)
+                    new_models.add(model_id)
+            self._subscription_models = new_models
 
             lib_logger.debug(
                 f"Discovered {len(self._subscription_models)} subscription models for nanogpt"
@@ -415,7 +416,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
         semaphore = asyncio.Semaphore(QUOTA_FETCH_CONCURRENCY)
 
         async def refresh_single_credential(
-            api_key: str, client: httpx.AsyncClient
+            api_key: str, client: httpx.AsyncClient, counters: dict
         ) -> None:
             async with semaphore:
                 try:
@@ -426,6 +427,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                     )
 
                     if usage_data.get("status") == "success":
+                        counters["success"] += 1
                         # Update tier cache
                         state = usage_data.get("state", "inactive")
                         tier = self.get_tier_from_state(state)
@@ -467,21 +469,26 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                             reset_timestamp=monthly_reset_ts if monthly_reset_ts > 0 else None,
                         )
 
-                        lib_logger.debug(
-                            f"Updated NanoGPT quota baselines: "
-                            f"daily={daily_remaining}/{daily_limit}, "
-                            f"monthly={monthly_remaining}/{monthly_limit}"
-                        )
-
                 except Exception as e:
+                    counters["errors"] += 1
                     lib_logger.warning(
                         f"Failed to refresh NanoGPT subscription usage: {e}"
                     )
 
         # Fetch all credentials in parallel using a shared client
+        counters = {"success": 0, "errors": 0}
         pool = await get_http_pool()
         client = await pool.get_client_async()
         tasks = [
-            refresh_single_credential(api_key, client) for api_key in credentials
+            refresh_single_credential(api_key, client, counters) for api_key in credentials
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        total = len(credentials)
+        if counters["success"] == total:
+            lib_logger.debug(f"NanoGPT quota refresh: all {total} credentials updated")
+        elif counters["success"] > 0 or counters["errors"] > 0:
+            lib_logger.debug(
+                f"NanoGPT quota refresh: {counters['success']}/{total} ok, "
+                f"{counters['errors']} errors"
+            )

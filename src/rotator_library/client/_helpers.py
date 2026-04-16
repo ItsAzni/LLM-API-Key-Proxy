@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 from ..env_cache import get_provider_env_cache
 from ..error_types import mask_credential
-from ..http_client_pool import HttpClientPool, close_http_pool, get_http_pool
+from ..http_client_pool import HttpClientPool, get_http_pool
 from ..providers.utilities import DEFAULT_GENERIC_SAFETY_SETTINGS, DEFAULT_SAFETY_SETTINGS
 
 lib_logger = logging.getLogger("rotator_library")
@@ -320,8 +320,6 @@ class HelpersMixin:
         Returns:
             List of URLs to pre-warm connections for
         """
-        endpoints = []
-
         # Map of provider names to their default API base URLs
         # These are only used as fallbacks if no custom API_BASE is configured
         provider_urls = {
@@ -332,23 +330,7 @@ class HelpersMixin:
             "iflow": "https://api.iflow.ai",
         }
 
-        # Add endpoints for configured providers
-        # Priority: custom API_BASE from env > hardcoded defaults
-        for provider in self.all_credentials.keys():
-            # First check if provider has a custom API_BASE configured
-            if provider in self.provider_config.api_bases:
-                api_base = self.provider_config.api_bases[provider]
-                if api_base:
-                    # Extract just the origin for warmup
-                    parsed = urlparse(api_base)
-                    if parsed.scheme and parsed.netloc:
-                        endpoints.append(f"{parsed.scheme}://{parsed.netloc}")
-                        continue
-            # Fall back to hardcoded defaults
-            if provider in provider_urls:
-                endpoints.append(provider_urls[provider])
-
-        # Cache resolved endpoints for later use
+        # Build endpoint dict in a single pass, then derive list from it
         self._provider_endpoints = {}
         for provider in self.all_credentials.keys():
             if provider in self.provider_config.api_bases:
@@ -363,7 +345,7 @@ class HelpersMixin:
             if provider in provider_urls:
                 self._provider_endpoints[provider] = provider_urls[provider]
 
-        return list(set(endpoints))[:5]  # Dedupe and limit
+        return list(set(self._provider_endpoints.values()))[:5]  # Dedupe and limit
 
     async def _get_http_client(self, streaming: bool = False) -> httpx.AsyncClient:
         """
@@ -379,10 +361,12 @@ class HelpersMixin:
         """
         # If pool reference not set, bind to the singleton pool
         # (this should rarely happen if initialize() is called properly)
-        if self._http_pool is None:
+        if self._http_pool is None or not self._pool_initialized:
             lib_logger.warning("HTTP pool accessed before initialization")
-            self._http_pool = HttpClientPool()
-        return await self._http_pool.get_client_async(streaming=streaming)
+            pool = await self._ensure_http_pool()
+        else:
+            pool = self._http_pool
+        return await pool.get_client_async(streaming=streaming)
 
     async def _get_http_client_async(
         self, streaming: bool = False
@@ -494,23 +478,6 @@ class HelpersMixin:
             f"LiteLLM Callback Handled Error: Model={model} | "
             f"Type={error_class} | Message='{error_message}'"
         )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
-
-    async def close(self):
-        """Release reference to the shared HTTP client pool.
-
-        Does NOT close the pool — it is a singleton shared across all
-        RotatingClient instances.  Pool lifecycle is managed via
-        close_http_pool() during application shutdown.
-        """
-        await close_http_pool()
-        self._http_pool = None
-        self._pool_initialized = False
 
     def _apply_default_safety_settings(
         self, litellm_kwargs: Dict[str, Any], provider: str
@@ -637,6 +604,4 @@ class HelpersMixin:
                     f"Failed to parse {provider_headers_key}: {e}"
                 )
 
-    def get_oauth_credentials(self) -> Dict[str, List[str]]:
-        return self.oauth_credentials
 

@@ -59,7 +59,7 @@ class StreamingMixin:
         try:
             while True:
                 # Check disconnection every 20 chunks to avoid per-chunk syscall overhead
-                if chunk_index % 50 == 0 and request and await request.is_disconnected():
+                if chunk_index % 200 == 0 and request and await request.is_disconnected():
                     lib_logger.info(
                         f"Client disconnected. Aborting stream for credential {mask_credential(key)}."
                     )

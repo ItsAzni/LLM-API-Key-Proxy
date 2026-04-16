@@ -19,7 +19,12 @@ See DOCUMENTATION.md for detailed descriptions of each setting.
 import os
 from typing import Dict, Optional
 
+import logging
+
 _TRUTHY_VALUES = frozenset({"true", "1", "yes", "on"})
+
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
 
 
 def env_bool(key: str, default: bool = False) -> bool:

@@ -37,6 +37,11 @@ from .config.defaults import (
 
 lib_logger = logging.getLogger("rotator_library")
 
+# Deduplication cache for repeated circuit breaker messages.
+# Prevents log spam when HALF_OPEN state rejects many concurrent requests.
+_CB_DEDUP_CACHE: Dict[str, float] = {}
+_CB_DEDUP_TTL = 5.0  # seconds to suppress identical messages
+
 
 class CircuitState(Enum):
     """Circuit breaker states."""
@@ -128,6 +133,24 @@ class ProviderCircuitBreaker:
             failure_threshold, recovery_timeout, half_open_requests,
             list(self._provider_overrides.keys())
         )
+
+    @staticmethod
+    def _dedup_log(key: str) -> bool:
+        """Check if a deduplicated log message should be suppressed.
+
+        Returns True if the message was logged recently (should skip).
+        """
+        now = time.monotonic()
+        last = _CB_DEDUP_CACHE.get(key, 0.0)
+        if now - last < _CB_DEDUP_TTL:
+            return True  # suppress
+        _CB_DEDUP_CACHE[key] = now
+        # Evict stale entries periodically
+        if len(_CB_DEDUP_CACHE) > 64:
+            stale = [k for k, v in _CB_DEDUP_CACHE.items() if now - v > _CB_DEDUP_TTL]
+            for k in stale:
+                del _CB_DEDUP_CACHE[k]
+        return False
 
     def _get_provider_threshold(self, provider: str) -> int:
         """Get failure threshold for a provider (with overrides)."""
@@ -232,17 +255,19 @@ class ProviderCircuitBreaker:
                     # Increment active counter - will be decremented on completion
                     circuit.half_open_active += 1
                     circuit.half_open_attempts += 1  # Keep for metrics/logging
-                    lib_logger.debug(
-                        "Circuit for '%s' in HALF_OPEN, active %d/%d (total attempts: %d)",
-                        provider, circuit.half_open_active, half_open_max, circuit.half_open_attempts
-                    )
+                    if not self._dedup_log(f"ho_active:{provider}"):
+                        lib_logger.debug(
+                            "Circuit for '%s' in HALF_OPEN, active %d/%d (total attempts: %d)",
+                            provider, circuit.half_open_active, half_open_max, circuit.half_open_attempts
+                        )
                     return True
 
                 # Exceeded half-open concurrent requests, stay blocked
-                lib_logger.debug(
-                    "Circuit for '%s' in HALF_OPEN, max concurrent requests reached (%d/%d)",
-                    provider, circuit.half_open_active, half_open_max
-                )
+                if not self._dedup_log(f"ho_max:{provider}"):
+                    lib_logger.debug(
+                        "Circuit for '%s' in HALF_OPEN, max concurrent requests reached (%d/%d)",
+                        provider, circuit.half_open_active, half_open_max
+                    )
                 return False
 
         return True # Should never reach here
@@ -279,10 +304,11 @@ class ProviderCircuitBreaker:
                         provider
                     )
                 else:
-                    lib_logger.debug(
-                        "Circuit for '%s' in HALF_OPEN, request succeeded, %d active requests remaining",
-                        provider, circuit.half_open_active
-                    )
+                    if not self._dedup_log(f"ho_success:{provider}"):
+                        lib_logger.debug(
+                            "Circuit for '%s' in HALF_OPEN, request succeeded, %d active requests remaining",
+                            provider, circuit.half_open_active
+                        )
 
             elif circuit.state == CircuitState.CLOSED:
                 # Reset failure count on success
@@ -356,10 +382,11 @@ class ProviderCircuitBreaker:
             circuit = self._get_or_create_circuit(provider)
             if circuit.half_open_active > 0:
                 circuit.half_open_active = max(0, circuit.half_open_active - 1)
-                lib_logger.debug(
-                    "Circuit for '%s' half_open slot released (state=%s), active %d",
-                    provider, circuit.state.value, circuit.half_open_active
-                )
+                if not self._dedup_log(f"ho_release:{provider}"):
+                    lib_logger.debug(
+                        "Circuit for '%s' half_open slot released (state=%s), active %d",
+                        provider, circuit.state.value, circuit.half_open_active
+                    )
 
     async def open_immediately(
         self,

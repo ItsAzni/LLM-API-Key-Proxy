@@ -358,71 +358,51 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
 
         return litellm_kwargs
 
-    def _is_model_ignored(self, provider: str, model_id: str) -> bool:
+    def _match_model_pattern(
+        self, provider: str, model_id: str, pattern_dict: dict, wildcard_return: bool = False
+    ) -> bool:
         """
-        Checks if a model should be ignored based on the ignore list.
-        Supports full glob/fnmatch patterns for both full model IDs and model names.
+        Checks if a model matches any pattern in the given dict.
+
+        Args:
+            provider: Provider name
+            model_id: Full model ID (e.g., "openai/gpt-4")
+            pattern_dict: Dict mapping provider -> list of fnmatch patterns
+            wildcard_return: Return value when pattern list is ["*"] (True for ignore, False for whitelist)
 
         Pattern examples:
         - "gpt-4" - exact match
         - "gpt-4*" - prefix wildcard (matches gpt-4, gpt-4-turbo, etc.)
-        - "*-preview" - suffix wildcard (matches gpt-4-preview, o1-preview, etc.)
-        - "*-preview*" - contains wildcard (matches anything with -preview)
+        - "*-preview" - suffix wildcard
         - "*" - match all
         """
         model_provider = model_id.split("/")[0]
-        if model_provider not in self.ignore_models:
+        if model_provider not in pattern_dict:
             return False
 
-        ignore_list = self.ignore_models[model_provider]
-        if ignore_list == ["*"]:
-            return True
+        pattern_list = pattern_dict[model_provider]
+        if pattern_list == ["*"]:
+            return wildcard_return
 
         try:
-            # This is the model name as the provider sees it (e.g., "gpt-4" or "google/gemma-7b")
             provider_model_name = model_id.split("/", 1)[1]
         except IndexError:
             provider_model_name = model_id
 
-        for ignored_pattern in ignore_list:
-            # Use fnmatch for full glob pattern support
-            if fnmatch.fnmatch(provider_model_name, ignored_pattern) or fnmatch.fnmatch(
-                model_id, ignored_pattern
+        for pattern in pattern_list:
+            if fnmatch.fnmatch(provider_model_name, pattern) or fnmatch.fnmatch(
+                model_id, pattern
             ):
                 return True
         return False
 
+    def _is_model_ignored(self, provider: str, model_id: str) -> bool:
+        """Checks if a model should be ignored based on the ignore list."""
+        return self._match_model_pattern(provider, model_id, self.ignore_models, wildcard_return=True)
+
     def _is_model_whitelisted(self, provider: str, model_id: str) -> bool:
-        """
-        Checks if a model is explicitly whitelisted.
-        Supports full glob/fnmatch patterns for both full model IDs and model names.
-
-        Pattern examples:
-        - "gpt-4" - exact match
-        - "gpt-4*" - prefix wildcard (matches gpt-4, gpt-4-turbo, etc.)
-        - "*-preview" - suffix wildcard (matches gpt-4-preview, o1-preview, etc.)
-        - "*-preview*" - contains wildcard (matches anything with -preview)
-        - "*" - match all
-        """
-        model_provider = model_id.split("/")[0]
-        if model_provider not in self.whitelist_models:
-            return False
-
-        whitelist = self.whitelist_models[model_provider]
-
-        try:
-            # This is the model name as the provider sees it (e.g., "gpt-4" or "google/gemma-7b")
-            provider_model_name = model_id.split("/", 1)[1]
-        except IndexError:
-            provider_model_name = model_id
-
-        for whitelisted_pattern in whitelist:
-            # Use fnmatch for full glob pattern support
-            if fnmatch.fnmatch(
-                provider_model_name, whitelisted_pattern
-            ) or fnmatch.fnmatch(model_id, whitelisted_pattern):
-                return True
-        return False
+        """Checks if a model is explicitly whitelisted."""
+        return self._match_model_pattern(provider, model_id, self.whitelist_models, wildcard_return=False)
 
     def get_oauth_credentials(self) -> Dict[str, List[str]]:
         return self.oauth_credentials

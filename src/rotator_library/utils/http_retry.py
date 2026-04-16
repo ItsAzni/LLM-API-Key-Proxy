@@ -34,7 +34,7 @@ def compute_backoff_with_jitter(
         wait_time = max(min_wait, wait_time + jitter_amount)
 
     if retry_after is not None and retry_after > 0:
-        wait_time = max(wait_time, retry_after, min_wait)
+        wait_time = min(max(wait_time, retry_after, min_wait), max_wait)
 
     return wait_time
 

@@ -6,6 +6,8 @@ import os
 from .utils.json_utils import json_loads
 import time
 import logging
+from .config.defaults import TRACE
+
 import asyncio
 import random
 from datetime import datetime, timezone, time as dt_time
@@ -3822,7 +3824,8 @@ class UsageManager:
                                     f"{max_requests}/{max_requests}"
                                 )
 
-            lib_logger.debug(
+            lib_logger.log(
+                TRACE,
                 f"Updated quota baseline for {mask_credential(credential)} model={model}: "
                 f"remaining={remaining_fraction:.2%}, synced_request_count={synced_count}"
             )

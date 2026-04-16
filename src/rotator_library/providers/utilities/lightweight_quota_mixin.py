@@ -195,7 +195,7 @@ class LightweightQuotaMixin:
         """
 
         async def refresh_single_credential(
-            api_key: str, client: Any
+            api_key: str, client: Any, counters: Dict[str, int]
         ) -> None:
             async with semaphore:
                 try:
@@ -203,6 +203,7 @@ class LightweightQuotaMixin:
 
                     if usage_data.get("status") == "success":
                         self._quota_cache[api_key] = usage_data
+                        counters["success"] += 1
 
                         remaining_fraction = usage_data.get("remaining_fraction", 0.0)
                         reset_ts = usage_data.get("reset_at")
@@ -221,17 +222,14 @@ class LightweightQuotaMixin:
                             **baseline_kwargs,
                         )
 
-                        lib_logger.debug(
-                            f"Updated {self.provider_name} quota baseline for credential: "
-                            f"{usage_data.get('remaining', 0):.0f}/{usage_data.get('quota', 0)} remaining "
-                            f"({remaining_fraction * 100:.0f}%)"
-                        )
                     elif usage_data.get("status") == "transient_error" or usage_data.get("remaining_fraction") is None:
+                        counters["transient"] += 1
                         lib_logger.warning(
                             f"Transient error refreshing {self.provider_name} quota for credential ...{api_key[-4:]} "
                             f"(error: {usage_data.get('error')}), preserving previous baseline"
                         )
                     else:
+                        counters["failed"] += 1
                         self._quota_cache[api_key] = usage_data
                         await usage_manager.update_quota_baseline(
                             api_key,
@@ -245,6 +243,7 @@ class LightweightQuotaMixin:
                         )
 
                 except Exception as e:
+                    counters["errors"] += 1
                     lib_logger.warning(
                         f"Failed to refresh {self.provider_name} quota usage: {e}"
                     )
@@ -253,10 +252,23 @@ class LightweightQuotaMixin:
             from ...http_client_pool import get_http_pool as _get_pool
             get_http_pool_fn = _get_pool
 
+        counters: Dict[str, int] = {"success": 0, "transient": 0, "failed": 0, "errors": 0}
         semaphore = asyncio.Semaphore(quota_fetch_concurrency)
         pool = await get_http_pool_fn()
         client = await pool.get_client_async()
         tasks = [
-            refresh_single_credential(api_key, client) for api_key in credentials
+            refresh_single_credential(api_key, client, counters) for api_key in credentials
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        total = len(credentials)
+        if counters["success"] == total:
+            lib_logger.debug(
+                f"{self.provider_name} quota refresh: all {total} credentials updated"
+            )
+        elif counters["success"] > 0:
+            lib_logger.debug(
+                f"{self.provider_name} quota refresh: {counters['success']}/{total} ok, "
+                f"{counters['transient']} transient, {counters['failed']} failed, "
+                f"{counters['errors']} errors"
+            )

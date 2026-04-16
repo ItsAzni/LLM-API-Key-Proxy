@@ -13,6 +13,28 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
 import httpx
+
+from ..config.defaults import TRACE
+
+lib_logger = logging.getLogger("rotator_library")
+
+# Deduplication cache for repeated circuit-breaker-open messages.
+_CB_OPEN_DEDUP: dict = {}
+_CB_OPEN_DEDUP_TTL = 5.0
+
+
+def _should_suppress_cb_open(provider: str) -> bool:
+    """Suppress repeated 'Circuit breaker OPEN' messages within TTL window."""
+    now = time.monotonic()
+    last = _CB_OPEN_DEDUP.get(provider, 0.0)
+    if now - last < _CB_OPEN_DEDUP_TTL:
+        return True
+    _CB_OPEN_DEDUP[provider] = now
+    if len(_CB_OPEN_DEDUP) > 64:
+        stale = [k for k, v in _CB_OPEN_DEDUP.items() if now - v > _CB_OPEN_DEDUP_TTL]
+        for k in stale:
+            del _CB_OPEN_DEDUP[k]
+    return False
 import litellm
 import orjson
 from litellm.exceptions import APIConnectionError, BadRequestError, InvalidRequestError
@@ -39,8 +61,6 @@ from ..utils.model_utils import (
     extract_provider_from_model,
     normalize_model_string,
 )
-
-lib_logger = logging.getLogger("rotator_library")
 
 
 class HalfOpenSlot:
@@ -182,7 +202,8 @@ class RetryMixin:
         )
 
         if credential_priorities:
-            lib_logger.debug(
+            lib_logger.log(
+                TRACE,
                 f"Credential priorities for {provider}: {', '.join(f'P{p}={len([c for c in credentials_for_provider if credential_priorities.get(c) == p])}' for p in sorted(set(credential_priorities.values())))}"
             )
 
@@ -1082,10 +1103,11 @@ class RetryMixin:
                             provider
                         )
                         backoff = min(remaining, 5.0)
-                        lib_logger.debug(
-                            f"Circuit breaker OPEN for provider '{provider}', "
-                            f"backing off {backoff:.1f}s (recovery in {remaining:.0f}s)"
-                        )
+                        if not _should_suppress_cb_open(provider):
+                            lib_logger.debug(
+                                f"Circuit breaker OPEN for provider '{provider}', "
+                                f"backing off {backoff:.1f}s (recovery in {remaining:.0f}s)"
+                            )
                         if time.monotonic() + backoff < deadline:
                             await asyncio.sleep(backoff)
                         continue

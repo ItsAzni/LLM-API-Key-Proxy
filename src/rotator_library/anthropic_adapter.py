@@ -2,6 +2,8 @@
 # Copyright (c) 2026 ShmidtS
 
 import logging
+from .config.defaults import TRACE
+
 from typing import Any, Optional, TYPE_CHECKING
 
 import orjson
@@ -104,7 +106,8 @@ class AnthropicAdapter:
                         tools=tools,
                         tool_choice=tool_choice,
                     )
-                    lib_logger.debug(
+                    lib_logger.log(
+                        TRACE,
                         f"Pre-computed input tokens for {original_model}: {precomputed_input_tokens}"
                     )
             except Exception as e:

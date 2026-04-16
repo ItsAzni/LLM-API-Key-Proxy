@@ -13,6 +13,8 @@ This module handles:
 
 import os
 import logging
+from .config.defaults import TRACE
+
 from typing import Dict, Any, Set, Optional
 
 from .litellm_providers import SCRAPED_PROVIDERS
@@ -279,7 +281,8 @@ class ProviderConfig:
                     f"Stripping provider prefix for inception model: {model} -> {model_name}"
                 )
             kwargs["api_base"] = api_base
-            lib_logger.debug(
+            lib_logger.log(
+                TRACE,
                 f"Applying api_base override for known provider {provider}: {api_base}"
             )
         else:

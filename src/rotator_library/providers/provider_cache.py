@@ -114,6 +114,8 @@ class ProviderCache:
         # Background tasks
         self._writer_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._init_task: Optional[asyncio.Task] = None
+        self._pending_tasks: set = set()
         self._running = False
 
         # Statistics
@@ -142,7 +144,7 @@ class ProviderCache:
                 f"ProviderCache[{self._cache_name}]: Disk enabled "
                 f"(memory_ttl={memory_ttl_seconds}s, disk_ttl={disk_ttl_seconds}s)"
             )
-            asyncio.create_task(self._async_init())
+            self._init_task = asyncio.create_task(self._async_init())
         else:
             lib_logger.debug(f"ProviderCache[{self._cache_name}]: Memory-only mode")
 
@@ -231,9 +233,11 @@ class ProviderCache:
         async with self._disk_lock:
             now = time.time()
 
-            # Step 1: Load existing disk entries (if any)
+            # Step 1: Use in-memory disk cache if valid, otherwise read from disk
             existing_entries: Dict[str, Dict[str, Any]] = {}
-            if self._cache_file.exists():
+            if self._disk_cache_valid:
+                existing_entries = self._disk_entry_cache
+            elif self._cache_file.exists():
                 try:
                     raw = await asyncio.to_thread(_read_file_sync, self._cache_file)
                     data = json_loads(raw)
@@ -282,7 +286,10 @@ class ProviderCache:
             ):
                 self._stats["writes"] += 1
                 self._disk_available = True
-                self._disk_cache_valid = False
+                # Cache the merged entries as the in-memory disk snapshot
+                # so next save merges from memory instead of re-reading the file
+                self._disk_entry_cache = merged_entries
+                self._disk_cache_valid = True
                 # Log merge info only when we preserved disk-only entries (infrequent)
                 if preserved_from_disk > 0:
                     lib_logger.debug(
@@ -374,6 +381,12 @@ class ProviderCache:
     # CORE OPERATIONS
     # =========================================================================
 
+    def _schedule_task(self, coro) -> None:
+        """Create a tracked background task that auto-removes when done."""
+        task = asyncio.create_task(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
     def store(self, key: str, value: str) -> None:
         """
         Store a value synchronously (schedules async storage).
@@ -382,7 +395,12 @@ class ProviderCache:
             key: Cache key
             value: Value to store (typically JSON-serialized data)
         """
-        asyncio.create_task(self._async_store(key, value))
+        try:
+            self._schedule_task(self._async_store(key, value))
+        except RuntimeError:
+            lib_logger.warning(
+                f"ProviderCache[{self._cache_name}]: store() called outside event loop"
+            )
 
     async def _async_store(self, key: str, value: str) -> None:
         """Async implementation of store."""
@@ -434,7 +452,7 @@ class ProviderCache:
                 self._stats["memory_hits"] += 1
                 # Schedule LRU re-order and expiry cleanup asynchronously
                 try:
-                    asyncio.create_task(self._touch_key(key))
+                    self._schedule_task(self._touch_key(key))
                 except RuntimeError:
                     lib_logger.warning(
                         f"ProviderCache[{self._cache_name}]: retrieve() called outside event loop; touch skipped"
@@ -443,20 +461,13 @@ class ProviderCache:
             else:
                 # Entry expired — schedule removal via async path (no race)
                 try:
-                    asyncio.create_task(self._remove_expired_key(key))
+                    self._schedule_task(self._remove_expired_key(key))
                 except RuntimeError:
                     lib_logger.warning(
                         f"ProviderCache[{self._cache_name}]: retrieve() called outside event loop; expired key removal skipped"
                     )
 
         self._stats["misses"] += 1
-        if self._enable_disk:
-            try:
-                asyncio.create_task(self._disk_lookup(key))
-            except RuntimeError:
-                lib_logger.warning(
-                    f"ProviderCache[{self._cache_name}]: retrieve() called outside event loop; disk lookup skipped"
-                )
         return None
 
     async def retrieve_async(self, key: str) -> Optional[str]:
@@ -602,6 +613,14 @@ class ProviderCache:
         lib_logger.info(f"ProviderCache[{self._cache_name}]: Shutting down...")
         self._running = False
 
+        # Cancel init task if still running
+        if self._init_task and not self._init_task.done():
+            self._init_task.cancel()
+            try:
+                await self._init_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         # Cancel background tasks
         for task in (self._writer_task, self._cleanup_task):
             if task:
@@ -610,7 +629,13 @@ class ProviderCache:
                     await task
                 except asyncio.CancelledError:
                     lib_logger.debug(f"ProviderCache[{self._cache_name}]: Shutdown cancelled")
-                    raise
+                except Exception as e:
+                    lib_logger.debug(f"ProviderCache[{self._cache_name}]: Shutdown task error: {e}")
+
+        # Wait for pending tasks to complete
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+            self._pending_tasks.clear()
 
         # Final save
         if self._dirty and self._enable_disk:
