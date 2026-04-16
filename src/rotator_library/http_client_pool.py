@@ -40,7 +40,6 @@ DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20 if _IS_WIN else 100
 DEFAULT_MAX_CONNECTIONS = 100 if _IS_WIN else 500
 DEFAULT_KEEPALIVE_EXPIRY = 60.0  # Seconds to keep idle connections alive
 DEFAULT_WARMUP_CONNECTIONS = 3  # Connections to pre-warm per provider
-DEFAULT_WARMUP_TIMEOUT = 10.0  # Max seconds for warmup
 DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
 DEFAULT_HTTP2_ENABLED = not _IS_WIN  # HTTP/2 unreliable with SelectorEventLoop on Windows
 
@@ -139,31 +138,6 @@ def _env_ssl_verify() -> Union[bool, List[str]]:
     return True
 
 
-def should_skip_ssl_for_host(host: str, ssl_verify: Union[bool, List[str]]) -> bool:
-    """
-    Check if SSL verification should be skipped for a specific host.
-
-    Args:
-    host: Hostname to check (e.g., "chatgpt.com")
-    ssl_verify: SSL verification setting from _env_ssl_verify()
-
-    Returns:
-    True if SSL verification should be skipped for this host
-    """
-    if ssl_verify is False:
-        return True
-    if ssl_verify is True:
-        return False
-    if isinstance(ssl_verify, list):
-        # Check for exact match or subdomain match
-        for skip_host in ssl_verify:
-            if host == skip_host or host.endswith(f".{skip_host}"):
-                return True
-    return False
-
-
-
-
 
 class HttpClientPool(metaclass=SingletonMeta):
     """
@@ -259,6 +233,9 @@ class HttpClientPool(metaclass=SingletonMeta):
         self._warmed_up = False
         self._warmup_hosts: list = [] # Hosts to pre-warm
         self._warmup_task: Optional[asyncio.Task] = None
+
+        # Orphan close task tracking (prevents GC from collecting fire-and-forget tasks)
+        self._orphan_close_tasks: set[asyncio.Task] = set()
 
         # Statistics
         # No lock needed: asyncio is single-threaded, so integer counter
@@ -568,7 +545,9 @@ class HttpClientPool(metaclass=SingletonMeta):
         """Schedule closure of an orphaned client created by a concurrent lazy-init race."""
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(client.aclose())
+            task = loop.create_task(client.aclose())
+            self._orphan_close_tasks.add(task)
+            task.add_done_callback(self._orphan_close_tasks.discard)
         except RuntimeError:
             pass
 

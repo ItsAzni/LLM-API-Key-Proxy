@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 from ..env_cache import _provider_env_cache
 from ..error_types import mask_credential
-from ..http_client_pool import HttpClientPool, get_http_pool
+from ..http_client_pool import HttpClientPool, close_http_pool, get_http_pool
 from ..providers.openai_compatible_provider import OpenAICompatibleProvider
 from ..providers.utilities import DEFAULT_GENERIC_SAFETY_SETTINGS, DEFAULT_SAFETY_SETTINGS
 from ..utils.model_utils import get_or_create_provider_instance
@@ -599,10 +599,13 @@ class HelpersMixin:
         await self.close()
 
     async def close(self):
-        """Close the HTTP client pool to prevent resource leaks."""
-        # Note: We don't close the global pool here as it may be shared
-        # across multiple RotatingClient instances.
-        # The pool will be closed on application shutdown via close_http_pool().
+        """Release reference to the shared HTTP client pool.
+
+        Does NOT close the pool — it is a singleton shared across all
+        RotatingClient instances.  Pool lifecycle is managed via
+        close_http_pool() during application shutdown.
+        """
+        await close_http_pool()
         self._http_pool = None
         self._pool_initialized = False
 

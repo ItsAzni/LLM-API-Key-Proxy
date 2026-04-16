@@ -16,7 +16,6 @@ by GoogleOAuthBase -> {GeminiAuthBase, AntigravityAuthBase, QwenAuthBase, IFlowA
 
 import asyncio
 import logging
-import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -57,13 +56,13 @@ class BaseTokenManager:
         # Cache and lock management
         self._credentials_cache: TTLDict = TTLDict(maxsize=200, default_ttl=self._cache_default_ttl)
         self._refresh_locks: Dict[str, asyncio.Lock] = {}
-        self._locks_lock = threading.Lock()  # Thread-safe, non-async for dict access
+        self._locks_lock = asyncio.Lock()
 
         # Refresh failure tracking
         self._refresh_failures: Dict[str, int] = {}
         self._next_refresh_after: Dict[str, float] = {}
 
-        # Queue infrastructure
+        # Queue infrastructure (Python 3.10+ required: asyncio.Queue in __init__ binds to the running loop lazily)
         self._refresh_queue: asyncio.Queue = asyncio.Queue()
         self._queue_processor_task: Optional[asyncio.Task] = None
         self._reauth_queue: asyncio.Queue = asyncio.Queue()
@@ -113,7 +112,7 @@ class AuthQueueMixin:
     - _queue_processor_task: task reference for the refresh processor
     - _unavailable_credentials: dict tracking unavailable credentials
     - _unavailable_ttl_seconds: int, TTL for unavailable credential entries
-    - _locks_lock: threading.Lock for protecting lock creation (thread-safe, non-async)
+    - _locks_lock: asyncio.Lock for protecting lock creation
     - _refresh_locks: dict of asyncio.Lock per credential path
     - _next_refresh_after: dict tracking backoff times
     - _refresh_timeout_seconds: int, timeout for refresh operations
@@ -130,18 +129,17 @@ class AuthQueueMixin:
     # LOCK MANAGEMENT
     # =========================================================================
 
-    def _get_lock(self, path: str) -> asyncio.Lock:
+    async def _get_lock(self, path: str) -> asyncio.Lock:
         """Gets or creates a lock for the given credential path.
 
-        Uses a thread-safe master lock to prevent TOCTOU race conditions during lock creation.
-        This is a synchronous method - no async overhead for simple dict access.
+        Uses an asyncio.Lock to prevent TOCTOU race conditions during lock creation.
         """
         # Fast path - lock already exists
         if path in self._refresh_locks:
             return self._refresh_locks[path]
 
-        # Thread-safe creation (no async overhead)
-        with self._locks_lock:
+        # Async-safe creation
+        async with self._locks_lock:
             if path not in self._refresh_locks:
                 self._refresh_locks[path] = asyncio.Lock()
             return self._refresh_locks[path]
@@ -303,7 +301,7 @@ class AuthQueueMixin:
                     # Try-lock: if a user request holds the per-path lock,
                     # skip this round — background refresh is best-effort and
                     # must not block incoming API requests.
-                    lock = self._get_lock(path)
+                    lock = await self._get_lock(path)
                     if lock.locked():
                         lib_logger.debug(
                             f"Skipping refresh for '{Path(path).name}': "

@@ -518,22 +518,3 @@ PROVIDER_CATEGORIES = [
     ("local", "Local / Self-Hosted"),
     ("other", "Other"),
 ]
-
-
-def get_provider_ui_config(provider_key: str) -> Dict[str, Any]:
-    """Get UI configuration for a provider.
-
-    Returns the UI-specific config (category, note, extra_vars) if defined,
-    otherwise returns a default config.
-    """
-    return LITELLM_PROVIDERS.get(provider_key, {"category": "other"})
-
-
-def get_full_provider_config(provider_key: str) -> Dict[str, Any]:
-    """Get combined provider config (scraped data + UI config).
-
-    Merges scraped provider data with UI configuration.
-    """
-    scraped = SCRAPED_PROVIDERS.get(provider_key, {})
-    ui_config = LITELLM_PROVIDERS.get(provider_key, {"category": "other"})
-    return {**scraped, **ui_config}

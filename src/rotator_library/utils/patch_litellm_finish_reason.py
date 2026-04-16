@@ -173,34 +173,3 @@ def patch_litellm_finish_reason():
     _patch_litellm_choices()
 
     _patched = True
-
-
-def unpatch_litellm_finish_reason():
-    """Remove all monkey-patches (OpenAI ChatCompletionChunk and LiteLLM Choices)."""
-    global _original_chat_completion_chunk_model_validate, _original_litellm_choices_init, _patched
-
-    if not _patched:
-        return
-
-    # Restore OpenAI ChatCompletionChunk
-    try:
-        from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
-
-        if _original_chat_completion_chunk_model_validate is not None:
-            ChatCompletionChunk.model_validate = _original_chat_completion_chunk_model_validate
-            _original_chat_completion_chunk_model_validate = None
-    except Exception as e:
-        logger.error(f"Error removing OpenAI patch: {e}")
-
-    # Restore LiteLLM Choices
-    try:
-        from litellm.types.utils import Choices
-
-        if _original_litellm_choices_init is not None:
-            Choices.__init__ = _original_litellm_choices_init
-            _original_litellm_choices_init = None
-    except Exception as e:
-        logger.error(f"Error removing LiteLLM Choices patch: {e}")
-
-    _patched = False
-    logger.info("Removed all finish_reason patches")

@@ -134,9 +134,6 @@ GEMINI_MODEL_ALIAS_MAP: Dict[str, str] = {
     "gemini-3-pro-low": "gemini-3-pro-preview",
     "gemini-3-pro-high": "gemini-3-pro-preview",
 }
-GEMINI_MODEL_ALIAS_REVERSE: Dict[str, str] = {
-    v: k for k, v in GEMINI_MODEL_ALIAS_MAP.items()
-}
 
 
 def alias_to_internal_model(alias: str, reverse_alias_map: Dict[str, str]) -> str:

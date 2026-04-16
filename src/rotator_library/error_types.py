@@ -176,17 +176,6 @@ ABNORMAL_ERROR_TYPES = frozenset(
     }
 )
 
-# Normal/expected errors during operation - only report if ALL credentials fail
-NORMAL_ERROR_TYPES = frozenset(
-    {
-        "rate_limit",  # 429 - expected during high load
-        "ip_rate_limit",  # 429 - IP-based rate limit (affects all credentials)
-        "quota_exceeded",  # Expected when quota runs out
-        "server_error",  # 5xx - transient provider issues
-        "api_connection",  # Network issues - transient
-    }
-)
-
 
 def is_abnormal_error(classified_error: ClassifiedError) -> bool:
     """

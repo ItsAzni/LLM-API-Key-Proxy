@@ -82,7 +82,7 @@ class QwenAuthBase(GoogleOAuthBase):
     # _load_credentials: removed — inherited from GoogleOAuthBase (calls self._load_from_env)
 
     async def _refresh_token(self, path: str, creds: Optional[Dict[str, Any]] = None, force: bool = False) -> Dict[str, Any]:
-        async with self._get_lock(path):
+        async with await self._get_lock(path):
             cached_creds = self._credentials_cache.get(path)
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds

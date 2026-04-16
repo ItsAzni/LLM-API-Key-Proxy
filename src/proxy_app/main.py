@@ -698,8 +698,8 @@ async def lifespan(app: FastAPI):
                     try:
                         if hasattr(stream_gen, "aclose"):
                             await stream_gen.aclose()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.debug("Error during stream cleanup: %s", e)
                 active_stream_gens.clear()
     except Exception as e:
         logging.debug("Error waiting for active streams during shutdown: %s", e)
@@ -883,7 +883,8 @@ if __name__ == "__main__":
 
         if sys.platform == "win32":
             import signal as _signal
-            _signal.signal(_signal.SIGBREAK, lambda *_: _signal.raise_signal(_signal.SIGINT))
+            if hasattr(_signal, "SIGBREAK"):
+                _signal.signal(_signal.SIGBREAK, lambda *_: _signal.raise_signal(_signal.SIGINT))
 
         uvicorn.run(
             app,

@@ -3,10 +3,6 @@
 
 from typing import TYPE_CHECKING
 
-import sys
-import asyncio
-
-
 from .client import RotatingClient
 from .utils.json_utils import STREAM_DONE
 

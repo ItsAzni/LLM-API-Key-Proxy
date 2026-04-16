@@ -62,17 +62,3 @@ class EnrichedModelCard(BaseModel):
     _match_type: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")  # Allow extra fields from the service
-
-
-class ModelList(BaseModel):
-    """List of models response."""
-
-    object: str = "list"
-    data: List[ModelCard]
-
-
-class EnrichedModelList(BaseModel):
-    """List of enriched models with pricing and capabilities."""
-
-    object: str = "list"
-    data: List[EnrichedModelCard]

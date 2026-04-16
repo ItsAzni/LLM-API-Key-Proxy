@@ -197,11 +197,11 @@ async def run_background_job(
 | Antigravity | `antigravity_quota_refresh` | 300s (5 min) | Fetches quota status from API to update remaining quota estimates |
 | Gemini CLI | `gemini_cli_quota_refresh` | 300s (5 min) | Fetches quota status from `retrieveUserQuota` API to update remaining quota estimates |
 
-### 2.6. Credential Management Architecture
+### 2.5. Credential Management Architecture
 
 The `CredentialManager` class (`credential_manager.py`) centralizes the lifecycle of all API credentials. It adheres to a "Local First" philosophy.
 
-#### 2.6.1. Automated Discovery & Preparation
+#### 2.5.1. Automated Discovery & Preparation
 
 On startup (unless `SKIP_OAUTH_INIT_CHECK=true`), the manager performs a comprehensive sweep:
 
@@ -223,7 +223,7 @@ On startup (unless `SKIP_OAUTH_INIT_CHECK=true`), the manager performs a compreh
 
 4. **Isolation**: The project's credentials in `oauth_creds/` are completely isolated from system-wide credentials, preventing cross-contamination
 
-#### 2.6.2. Credential Loading & Stateless Operation
+#### 2.5.2. Credential Loading & Stateless Operation
 
 The manager supports loading credentials from two sources, with a clear priority:
 
@@ -309,7 +309,7 @@ Examples:
 - env://antigravity/1 → ANTIGRAVITY_1_ACCESS_TOKEN, etc.
 ```
 
-#### 2.6.3. Credential Tool Integration
+#### 2.5.3. Credential Tool Integration
 
 The `credential_tool.py` provides a user-friendly CLI interface to the `CredentialManager`:
 
@@ -320,7 +320,7 @@ The `credential_tool.py` provides a user-friendly CLI interface to the `Credenti
 
 ---
 
-### 2.7. Request Sanitizer (`request_sanitizer.py`)
+### 2.6. Request Sanitizer (`request_sanitizer.py`)
 
 The `sanitize_request_payload` function ensures requests are compatible with each provider's specific requirements:
 
@@ -347,7 +347,7 @@ Implemented in individual provider classes (`QwenCodeProvider`, `IFlowProvider`)
 
 ---
 
-### 2.8. Error Classification (`error_handler.py`)
+### 2.7. Error Classification (`error_handler.py`)
 
 The `ClassifiedError` class wraps all exceptions from `litellm` and categorizes them for intelligent handling:
 
@@ -391,7 +391,7 @@ class ErrorType(Enum):
 
 ---
 
-### 2.9. Cooldown Management (`cooldown_manager.py`)
+### 2.8. Cooldown Management (`cooldown_manager.py`)
 
 The `CooldownManager` handles IP or account-level rate limiting that affects all keys for a provider:
 
@@ -419,7 +419,7 @@ The `CooldownManager` handles IP or account-level rate limiting that affects all
 - All subsequent `acquire_key()` calls for that provider will wait until the cooldown expires
 
 
-### 2.10. Credential Prioritization System (`client.py` & `usage_manager.py`)
+### 2.9. Credential Prioritization System (`client.py` & `usage_manager.py`)
 
 The library now includes an intelligent credential prioritization system that automatically detects credential tiers and ensures optimal credential selection for each request.
 
@@ -482,7 +482,7 @@ The `acquire_key()` method has been enhanced to:
 
 ---
 
-### 2.11. Provider Cache System (`providers/provider_cache.py`)
+### 2.10. Provider Cache System (`providers/provider_cache.py`)
 
 A modular, shared caching system for providers to persist conversation state across requests.
 
@@ -492,652 +492,84 @@ A modular, shared caching system for providers to persist conversation state acr
 - **Background Persistence**: Batched disk writes every 60 seconds (configurable)
 - **Automatic Cleanup**: Background task removes expired entries from memory cache
 
-### 2.15. Antigravity Quota Tracker (`providers/utilities/antigravity_quota_tracker.py`)
+### 2.11. Google OAuth Base (`providers/google_oauth_base.py`)
 
-A mixin class providing quota tracking functionality for the Antigravity provider. This enables accurate remaining quota estimation based on API-fetched baselines and local request counting.
+A refactored, reusable OAuth2 base class that eliminates code duplication across Google-based providers.
 
-#### Core Concepts
+**Refactoring Benefits:**
 
-**Quota Baseline Tracking:**
-- Periodically fetches quota status from the Antigravity `fetchAvailableModels` API
-- Stores the remaining fraction as a baseline in UsageManager
-- Tracks requests since baseline to estimate current remaining quota
-- Syncs local request count with API's authoritative values
+- **Single Source of Truth**: All OAuth logic centralized in one class
+- **Easy Provider Addition**: New providers only need to override constants
+- **Consistent Behavior**: Token refresh, expiry handling, and validation work identically across providers
+- **Maintainability**: OAuth bugs fixed once apply to all inheriting providers
 
-**Quota Cost Constants:**
-Based on empirical testing (see `docs/ANTIGRAVITY_QUOTA_REPORT.md`), quota costs are known per model and tier:
-
-| Tier | Model Group | Cost per Request | Requests per 100% |
-|------|-------------|------------------|-------------------|
-| standard-tier | Claude/GPT-OSS | 0.40% | 250 |
-| standard-tier | Gemini 3 Pro | 0.25% | 400 |
-| standard-tier | Gemini 2.5 Flash | 0.0333% | ~3000 |
-| free-tier | Claude/GPT-OSS | 1.333% | 75 |
-| free-tier | Gemini 3 Pro | 0.40% | 250 |
-
-**Model Name Mappings:**
-Some user-facing model names don't exist directly in the API response:
-- `claude-opus-4-5` → `claude-opus-4-5-thinking` (Opus only exists as thinking variant)
-- `gemini-3-pro-preview` → `gemini-3-pro-high` (preview maps to high by default)
-
-#### Key Methods
-
-**`fetch_quota_from_api(credential_path)`:**
-Fetches current quota status from the Antigravity API. Returns remaining fraction and reset times for all models.
-
-**`estimate_remaining_quota(credential_path, model, model_data, tier)`:**
-Estimates remaining quota based on baseline + request tracking. Returns confidence level (high/medium/low) based on baseline age.
-
-**`refresh_active_quota_baselines(credentials, usage_data)`:**
-Only refreshes baselines for credentials that have been used recently (within the refresh interval).
-
-**`discover_quota_costs(credential_path, models_to_test)`:**
-Manual utility to discover quota costs by making test requests and measuring before/after quota. Saves learned costs to `cache/antigravity/learned_quota_costs.json`.
-
-#### Integration with Background Jobs
-
-The Antigravity provider defines a background job for quota baseline refresh:
+**Provider Implementation:**
 
 ```python
-def get_background_job_config(self) -> Optional[Dict[str, Any]]:
-    return {
-        "interval": 300,  # 5 minutes (configurable via ANTIGRAVITY_QUOTA_REFRESH_INTERVAL)
-        "name": "quota_baseline_refresh",
-        "run_on_start": True,
-    }
+class AntigravityAuthBase(GoogleOAuthBase):
+    # Required overrides
+    CLIENT_ID = "antigravity-client-id"
+    CLIENT_SECRET = "antigravity-secret"
+    OAUTH_SCOPES = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/cclog",  # Antigravity-specific
+        "https://www.googleapis.com/auth/experimentsandconfigs",
+    ]
+    ENV_PREFIX = "ANTIGRAVITY"  # Used for env var loading
+    
+    # Optional overrides (defaults provided)
+    CALLBACK_PORT = 51121
+    CALLBACK_PATH = "/oauthcallback"
 ```
 
-This job:
-1. Identifies credentials used since the last refresh
-2. Fetches current quota from the API for those credentials
-3. Updates baselines in UsageManager for accurate estimation
+**Inherited Features:**
 
-#### Data Storage
+- Automatic token refresh with exponential backoff
+- Invalid grant re-authentication flow
+- Stateless deployment support (env var loading)
+- Atomic credential file writes
+- Headless environment detection
+- Sequential refresh queue processing
 
-Quota baselines are stored in UsageManager's per-model data:
+#### OAuth Callback Port Configuration
 
-```json
-{
-  "credential_path": {
-    "models": {
-      "antigravity/claude-sonnet-4-5": {
-        "request_count": 15,
-        "baseline_remaining_fraction": 0.94,
-        "baseline_fetched_at": 1734567890.0,
-        "requests_at_baseline": 15,
-        "quota_max_requests": 250,
-        "quota_display": "15/250"
-      }
-    }
-  }
-}
-```
+Each OAuth provider uses a local callback server during authentication. The callback port can be customized via environment variables to avoid conflicts with other services.
 
-### 2.16. TransientQuotaError (`error_handler.py`)
+**Default Ports:**
 
-A new error type for handling bare 429 responses without retry timing information.
+| Provider | Default Port | Environment Variable |
+|----------|-------------|---------------------|
+| Gemini CLI | 8085 | `GEMINI_CLI_OAUTH_PORT` |
+| Antigravity | 51121 | `ANTIGRAVITY_OAUTH_PORT` |
+| iFlow | 11451 | `IFLOW_OAUTH_PORT` |
 
-**When Raised:**
-- Provider returns HTTP 429 status code
-- Response doesn't contain retry timing info (no `quotaResetTimeStamp` or `retryDelay`)
-- After internal retry attempts are exhausted
+**Configuration Methods:**
 
-**Behavior:**
-- Classified as `server_error` (status 503) rather than quota exhaustion
-- Causes credential rotation to try the next credential
-- Does NOT trigger long-term quota cooldowns
+1. **Via TUI Settings Menu:**
+   - Main Menu → `4. View Provider & Advanced Settings` → `1. Launch Settings Tool`
+   - Select the provider (Gemini CLI, Antigravity, or iFlow)
+   - Modify the `*_OAUTH_PORT` setting
+   - Use "Reset to Default" to restore the original port
 
-**Implementation in Antigravity:**
-```python
-# Non-streaming and streaming both retry bare 429s
-for attempt in range(EMPTY_RESPONSE_MAX_ATTEMPTS):
-    try:
-        result = await self._handle_request(...)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            quota_info = self.parse_quota_error(e)
-            if quota_info is None:
-                # Bare 429 - retry like empty response
-                if attempt < EMPTY_RESPONSE_MAX_ATTEMPTS - 1:
-                    await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
-                    continue
-                else:
-                    raise TransientQuotaError(provider, model, message)
-            # Has retry info - real quota exhaustion
-            raise
-```
+2. **Via `.env` file:**
+   ```env
+   # Custom OAuth callback ports (optional)
+   GEMINI_CLI_OAUTH_PORT=8085
+   ANTIGRAVITY_OAUTH_PORT=51121
+   IFLOW_OAUTH_PORT=11451
+   ```
 
-**Rationale:**
-Some 429 responses are transient rate limits rather than true quota exhaustion. These occur when the API is temporarily overloaded but the credential still has quota available. Retrying internally before rotating credentials provides better resilience.
+**When to Change Ports:**
 
-### 2.17. Gemini CLI Quota Tracker (`providers/utilities/gemini_cli_quota_tracker.py`)
+- If the default port conflicts with another service on your system
+- If running multiple proxy instances on the same machine
+- If firewall rules require specific port ranges
 
-A mixin class providing quota tracking functionality for the Gemini CLI provider. This mirrors the Antigravity quota tracker (Section 2.15) and enables accurate remaining quota estimation based on API-fetched baselines and local request counting.
-
-#### Core Concepts
-
-**Quota Baseline Tracking:**
-- Periodically fetches quota status from the `retrieveUserQuota` API endpoint
-- Stores the remaining fraction as a baseline in UsageManager
-- Tracks requests since baseline to estimate current remaining quota
-- Syncs local request count with API's authoritative values
-
-**Quota Cost Constants:**
-Based on empirical testing, quota limits are known per model and tier:
-
-| Tier | Model Group | Max Requests per 100% |
-|------|-------------|----------------------|
-| standard-tier | Pro (gemini-2.5-pro, gemini-3-pro-preview) | 250 |
-| standard-tier | 2.5-Flash (gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-flash-lite) | 1500 |
-| standard-tier | 3-Flash (gemini-3-flash-preview) | 1500 |
-| free-tier | Pro | 100 |
-| free-tier | 2.5-Flash | 1000 |
-| free-tier | 3-Flash | 1000 |
-
-**Reset Windows:**
-- All tiers use 24-hour fixed windows from first request (verified 2026-01-07)
-- The reset time is set when the first request is made and does NOT roll forward
-
-**Model Quota Groups:**
-Models that share quota limits are grouped together:
-- `pro`: `gemini-2.5-pro`, `gemini-3-pro-preview`
-- `25-flash`: `gemini-2.0-flash`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`
-- `3-flash`: `gemini-3-flash-preview`
-
-Groups can be overridden via environment variables: `QUOTA_GROUPS_GEMINI_CLI_{GROUP}="model1,model2"`
-
-#### Key Methods
-
-**`retrieve_user_quota(credential_path)`:**
-Fetches current quota status from the Gemini CLI `retrieveUserQuota` API. Returns remaining fraction and reset times for all models.
-
-**`get_all_quota_info(credential_paths, oauth_base_dir, usage_data, include_estimates)`:**
-Gets structured quota info for all credentials, suitable for the TUI quota viewer and stats endpoint.
-
-**`get_max_requests_for_model(model, tier)`:**
-Returns the maximum number of requests for a model/tier combination. Uses learned values if available, otherwise falls back to defaults.
-
-**`discover_quota_costs(credential_path, models_to_test)`:**
-Manual utility to discover quota costs by making test requests and measuring before/after quota. Saves learned costs to `cache/gemini_cli/learned_quota_costs.json`.
-
-#### Integration with Background Jobs
-
-The Gemini CLI provider defines a background job for quota baseline refresh:
-
-```python
-def get_background_job_config(self) -> Optional[Dict[str, Any]]:
-    return {
-        "interval": 300,  # 5 minutes (configurable via GEMINI_CLI_QUOTA_REFRESH_INTERVAL)
-        "name": "gemini_cli_quota_refresh",
-        "run_on_start": True,
-    }
-```
-
-This job:
-1. On first run: Fetches quota for ALL credentials to establish baselines
-2. On subsequent runs: Only fetches for credentials used since last refresh
-3. Updates baselines in UsageManager for accurate estimation
-
-#### Data Storage
-
-Quota baselines are stored in UsageManager's per-model data:
-
-```json
-{
-  "credential_path": {
-    "models": {
-      "gemini_cli/gemini-2.5-pro": {
-        "request_count": 15,
-        "baseline_remaining_fraction": 0.94,
-        "baseline_fetched_at": 1734567890.0,
-        "requests_at_baseline": 15,
-        "quota_max_requests": 250,
-        "quota_display": "15/250"
-      }
-    }
-  }
-}
-```
-
-#### Environment Variables
-
-```env
-# Background job interval in seconds (default: 300 = 5 min)
-GEMINI_CLI_QUOTA_REFRESH_INTERVAL=300
-
-# Override default quota groups
-QUOTA_GROUPS_GEMINI_CLI_PRO="gemini-2.5-pro,gemini-3-pro-preview"
-QUOTA_GROUPS_GEMINI_CLI_25_FLASH="gemini-2.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
-QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
-```
-
-### 2.18. Shared Gemini OAuth Utilities (`providers/utilities/`)
-
-The PR refactors shared logic between Gemini CLI and Antigravity providers into reusable utility modules:
-
-| Module | Purpose |
-|--------|---------|
-| `gemini_shared_utils.py` | Shared constants (FINISH_REASON_MAP, DEFAULT_SAFETY_SETTINGS, CODE_ASSIST_ENDPOINT), helper functions (env_bool, env_int, inline_schema_refs, recursively_parse_json_strings) |
-| `base_quota_tracker.py` | Abstract base class for quota tracking with learned costs, credential discovery, and baseline management |
-| `gemini_credential_manager.py` | Mixin for OAuth credential tier management, initialization, and background job interface |
-| `gemini_file_logger.py` | Transaction-level file logging for debugging API requests and responses |
-| `gemini_tool_handler.py` | Tool schema transformation and Gemini 3 tool fix logic |
-
-**Benefits:**
-- Eliminates code duplication between Gemini CLI and Antigravity providers
-- Single source of truth for shared constants and logic
-- Easier maintenance and bug fixes
-- Consistent behavior across Google OAuth-based providers
-
-### 2.19. Fair Cycle Rotation
-
-Fair Cycle Rotation ensures each credential is used at least once before any credential can be reused within a tier. This prevents a single credential from being repeatedly used and exhausted while others sit idle.
-
-**Problem Solved:**
-- In sequential mode, the same high-priority credential might be used repeatedly
-- When exhausted, it gets a cooldown, but after cooldown expires, it's used again
-- Other credentials of the same tier never get used
-
-**Solution:**
-- When a credential hits a long cooldown (> threshold), mark it as "exhausted"
-- Exhausted credentials are skipped until ALL credentials in the tier exhaust
-- Once all exhaust OR cycle duration expires, the cycle resets
-
-**Configuration (Environment Variables):**
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `FAIR_CYCLE_{PROVIDER}` | bool | sequential only | Enable/disable fair cycle |
-| `FAIR_CYCLE_TRACKING_MODE_{PROVIDER}` | string | `model_group` | `model_group` or `credential` |
-| `FAIR_CYCLE_CROSS_TIER_{PROVIDER}` | bool | `false` | Track across all tiers |
-| `FAIR_CYCLE_DURATION_{PROVIDER}` | int | `86400` | Cycle duration in seconds |
-| `EXHAUSTION_COOLDOWN_THRESHOLD_{PROVIDER}` | int | `300` | Threshold in seconds |
-
-**Defaults:** All defaults are defined in `src/rotator_library/config/defaults.py`.
-
-**Logging Format:**
-```
-Acquiring key for model antigravity/claude-opus-4.5. Tried keys: 0/12(17,cd:3,fc:2)
-# Breakdown: 0 tried, 12 available, 17 total, 3 on cooldown, 2 fair-cycle excluded
-```
-
-**Persistence:**
-Cycle state is persisted in `key_usage.json` under the `__fair_cycle__` key.
-
-### 2.20. Custom Caps
-
-Custom Caps allow setting custom usage limits per tier, per model/group that are MORE restrictive than actual API limits. When the custom cap is reached, the credential is put on cooldown BEFORE hitting the actual API limit.
-
-**Use Cases:**
-- Pace usage across quota window (don't burn 150 requests in first hour)
-- Reserve capacity for certain times of day
-- Add safety buffer (stop at 120/150 to avoid edge cases)
-- Extend cooldown beyond natural reset for pacing
-
-**Key Principle: More Restrictive Only**
-- Custom cap is always <= actual max (clamped if set higher)
-- Custom cooldown is always >= natural reset time (clamped if set shorter)
-
-**Configuration (Environment Variables):**
-
-```bash
-# Format
-CUSTOM_CAP_{PROVIDER}_T{TIER}_{MODEL_OR_GROUP}=<value>
-CUSTOM_CAP_COOLDOWN_{PROVIDER}_T{TIER}_{MODEL_OR_GROUP}=<mode>:<value>
-
-# Examples
-CUSTOM_CAP_ANTIGRAVITY_T2_CLAUDE=100
-CUSTOM_CAP_COOLDOWN_ANTIGRAVITY_T2_CLAUDE=quota_reset
-
-CUSTOM_CAP_ANTIGRAVITY_T3_CLAUDE=30
-CUSTOM_CAP_COOLDOWN_ANTIGRAVITY_T3_CLAUDE=offset:3600
-```
-
-**Cap Values:**
-- Absolute number: `100`
-- Percentage of actual max: `"80%"`
-
-**Cooldown Modes:**
-
-| Mode | Formula | Use Case |
-|------|---------|----------|
-| `quota_reset` | `quota_reset_ts` | Same as natural behavior |
-| `offset` | `quota_reset_ts + value` | Add buffer time |
-| `fixed` | `window_start_ts + value` | Fixed window from start |
-
-**Resolution Priority:**
-1. Tier + Model (most specific)
-2. Tier + Group (model's quota group)
-3. Default + Model
-4. Default + Group
-5. No custom cap (use actual API limits)
-
-**Integration with Fair Cycle:**
-When a custom cap triggers a cooldown longer than the exhaustion threshold, it also marks the credential as exhausted for fair cycle rotation.
-
-**Defaults:** See `src/rotator_library/config/defaults.py` for all configurable defaults.
-
-### 2.21. Anthropic API Compatibility (`anthropic_compat/`)
-
-A translation layer that enables Anthropic API clients (like Claude Code) to use any OpenAI-compatible provider through the proxy.
-
-#### Architecture
-
-The module consists of three components:
-
-| File | Purpose |
-|------|---------|
-| `models.py` | Pydantic models for Anthropic request/response formats (`AnthropicMessagesRequest`, `AnthropicMessage`, `AnthropicTool`, etc.) |
-| `translator.py` | Bidirectional format translation functions |
-| `streaming.py` | SSE format conversion for streaming responses |
-
-#### Request Translation (`translate_anthropic_request`)
-
-Converts Anthropic Messages API requests to OpenAI Chat Completions format:
-
-**Message Conversion:**
-- Anthropic `system` field → OpenAI system message
-- `content` blocks (text, image, tool_use, tool_result) → OpenAI format
-- Image blocks with base64 data → OpenAI `image_url` with data URI
-- Document blocks (PDF, etc.) → OpenAI `image_url` format
-
-**Tool Conversion:**
-- Anthropic `tools` with `input_schema` → OpenAI `tools` with `parameters`
-- `tool_choice.type: "any"` → `"required"`
-- `tool_choice.type: "tool"` → `{"type": "function", "function": {"name": ...}}`
-
-**Thinking Configuration:**
-- `thinking.type: "enabled"` → `reasoning_effort: "high"` + `thinking_budget`
-- `thinking.type: "disabled"` → `reasoning_effort: "disable"`
-- Opus models default to thinking enabled
-
-**Special Handling:**
-- Reorders assistant content blocks: thinking → text → tool_use
-- Injects `[Continue]` prompt for fresh thinking turns
-- Preserves thinking signatures for multi-turn conversations
-
-#### Response Translation (`openai_to_anthropic_response`)
-
-Converts OpenAI Chat Completions responses to Anthropic Messages format:
-
-**Content Blocks:**
-- `reasoning_content` → thinking block with signature
-- `content` → text block
-- `tool_calls` → tool_use blocks with parsed JSON input
-
-**Field Mapping:**
-- `finish_reason: "stop"` → `stop_reason: "end_turn"`
-- `finish_reason: "length"` → `stop_reason: "max_tokens"`
-- `finish_reason: "tool_calls"` → `stop_reason: "tool_use"`
-
-**Usage Translation:**
-- `prompt_tokens` minus `cached_tokens` → `input_tokens`
-- `completion_tokens` → `output_tokens`
-- `prompt_tokens_details.cached_tokens` → `cache_read_input_tokens`
-
-#### Streaming Wrapper (`anthropic_streaming_wrapper`)
-
-Converts OpenAI SSE streaming format to Anthropic's event-based format:
-
-**Event Types Generated:**
-```
-message_start      → Initial message metadata
-content_block_start → Start of text/thinking/tool_use block
-content_block_delta → Incremental content (text_delta, thinking_delta, input_json_delta)
-content_block_stop  → End of content block
-message_delta      → Final metadata (stop_reason, usage)
-message_stop       → End of message
-```
-
-**Features:**
-- Accumulates tool call arguments across chunks
-- Handles thinking/reasoning content from `delta.reasoning_content`
-- Proper block indexing for multiple content blocks
-- Cache token handling in usage statistics
-- Error recovery with proper message structure
-
-#### Client Integration
-
-The `RotatingClient` provides two methods for Anthropic compatibility:
-
-```python
-async def anthropic_messages(self, request, raw_request=None, pre_request_callback=None):
-    """Handle Anthropic Messages API requests."""
-    # 1. Translate Anthropic request to OpenAI format
-    # 2. Call acompletion() with translated request
-    # 3. Convert response back to Anthropic format
-    # 4. For streaming: wrap with anthropic_streaming_wrapper
-
-async def anthropic_count_tokens(self, request):
-    """Count tokens for Anthropic-format request."""
-    # Translates messages and tools, then uses token_count()
-```
-
-#### Authentication
-
-The proxy accepts both Anthropic and OpenAI authentication styles:
-- `x-api-key` header (Anthropic style)
-- `Authorization: Bearer` header (OpenAI style)
-
-### 3.5. Antigravity (`antigravity_provider.py`)
-
-The most sophisticated provider implementation, supporting Google's internal Antigravity API for Gemini 3 and Claude models (including **Claude Opus 4.5**, Anthropic's most powerful model).
-
-#### Architecture
-
-- **Unified Streaming/Non-Streaming**: Single code path handles both response types with optimal transformations
-- **Thought Signature Caching**: Server-side caching of encrypted signatures for multi-turn Gemini 3 conversations
-- **Model-Specific Logic**: Automatic configuration based on model type (Gemini 3, Claude Sonnet, Claude Opus)
-- **Credential Prioritization**: Automatic tier detection with paid credentials prioritized over free (paid tier resets every 5 hours, free tier resets weekly)
-- **Sequential Rotation Mode**: Default rotation mode is sequential (use credentials until exhausted) to maximize thought signature cache hits
-- **Per-Model Quota Tracking**: Each model tracks independent usage windows with authoritative reset timestamps from quota errors
-- **Quota Groups**: Models that share quota limits are grouped together (Claude/GPT-OSS share quota, Gemini 3 Pro variants share quota, Gemini 2.5 Flash variants share quota)
-- **Priority Multipliers**: Paid tier credentials get higher concurrency limits (Priority 1: 5x, Priority 2: 3x, Priority 3+: 2x in sequential mode)
-- **Quota Baseline Tracking**: Background job fetches quota status from API to provide accurate remaining quota estimates
-- **TransientQuotaError Handling**: Bare 429 responses (without retry info) are retried internally before credential rotation
-
-#### Model Support
-
-**Gemini 3 Pro:**
-- Uses `thinkingLevel` parameter (string: "low" or "high")
-- **Tool Hallucination Prevention**:
-  - Automatic system instruction injection explaining custom tool schema rules
-  - Parameter signature injection into tool descriptions (e.g., "STRICT PARAMETERS: files (ARRAY_OF_OBJECTS[path: string REQUIRED, ...])")
-  - Namespace prefix for tool names (`gemini3_` prefix) to avoid training data conflicts
-  - Malformed JSON auto-correction (handles extra trailing braces)
-- **ThoughtSignature Management**:
-  - Caching signatures from responses for reuse in follow-up messages
-  - Automatic injection into functionCalls for multi-turn conversations
-  - Fallback to bypass value if signature unavailable
-- **Parallel Tool Usage Instruction**: Configurable instruction injection to encourage parallel tool calls (disabled by default for Gemini 3)
-
-**Gemini 2.5 Flash:**
-- Uses `-thinking` variant when `reasoning_effort` is provided
-- Shares quota with `gemini-2.5-flash-thinking` and `gemini-2.5-flash-lite` variants
-- Parallel tool usage instruction configurable
-
-**Gemini 2.5 Flash Lite:**
-- Configurable thinking budget, no name change required
-- Shares quota with Flash variants
-
-**Claude Opus 4.5:**
-- Anthropic's most powerful model, now available via Antigravity proxy
-- **Always uses thinking variant** - `claude-opus-4-5-thinking` is the only available variant (non-thinking version doesn't exist)
-- Uses `thinkingBudget` parameter for extended thinking control (-1 for auto, 0 to disable, or specific token count)
-- Full support for tool use with schema cleaning
-- Same thinking preservation and sanitization features as Sonnet
-- Increased default max output tokens to 64000 to accommodate thinking output
-
-**Claude Sonnet 4.5:**
-- Proxied through Antigravity API
-- **Supports both thinking and non-thinking modes**:
-  - With `reasoning_effort`: Uses `claude-sonnet-4-5-thinking` variant with `thinkingBudget`
-  - Without `reasoning_effort`: Uses standard `claude-sonnet-4-5` variant
-- **Thinking Preservation**: Caches thinking content using composite keys (tool_call_id + text_hash)
-- **Schema Cleaning**: Removes unsupported properties (`$schema`, `additionalProperties`, `const` → `enum`)
-- **Parallel Tool Usage Instruction**: Automatic instruction injection to encourage parallel tool calls (enabled by default for Claude)
-
-**GPT-OSS 120B Medium:**
-- OpenAI-compatible model available via Antigravity
-- Shares quota with Claude models (Claude/GPT-OSS quota group)
-
-#### Base URL Fallback
-
-Automatic fallback chain for resilience:
-1. `daily-cloudcode-pa.sandbox.googleapis.com` (primary sandbox)
-2. `autopush-cloudcode-pa.sandbox.googleapis.com` (fallback sandbox)
-3. `cloudcode-pa.googleapis.com` (production fallback)
-
-#### Message Transformation
-
-**OpenAI → Gemini Format:**
-- System messages → `systemInstruction` with parts array
-- Multi-part content (text + images) → `inlineData` format
-- Tool calls → `functionCall` with args and id
-- Tool responses → `functionResponse` with name and response
-- ThoughtSignatures preserved/injected as needed
-
-**Tool Response Grouping:**
-- Converts linear format (call, response, call, response) to grouped format
-- Groups all function calls in one `model` message
-- Groups all responses in one `user` message
-- Required for Antigravity API compatibility
-
-#### Configuration (Environment Variables)
-
-```env
-# Cache control
-ANTIGRAVITY_SIGNATURE_CACHE_TTL=3600  # Memory cache TTL
-ANTIGRAVITY_SIGNATURE_DISK_TTL=86400  # Disk cache TTL
-ANTIGRAVITY_ENABLE_SIGNATURE_CACHE=true
-
-# Feature flags
-ANTIGRAVITY_PRESERVE_THOUGHT_SIGNATURES=true  # Include signatures in client responses
-ANTIGRAVITY_ENABLE_DYNAMIC_MODELS=false  # Use API model discovery
-ANTIGRAVITY_GEMINI3_TOOL_FIX=true  # Enable Gemini 3 hallucination prevention
-ANTIGRAVITY_CLAUDE_THINKING_SANITIZATION=true  # Enable Claude thinking mode auto-correction
-
-# Gemini 3 tool fix customization
-ANTIGRAVITY_GEMINI3_TOOL_PREFIX="gemini3_"  # Namespace prefix
-ANTIGRAVITY_GEMINI3_DESCRIPTION_PROMPT="\n\nSTRICT PARAMETERS: {params}."
-ANTIGRAVITY_GEMINI3_SYSTEM_INSTRUCTION="..."  # Full system prompt
-
-# Parallel tool usage instruction
-ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION_CLAUDE=true  # Inject parallel tool instruction for Claude (default: true)
-ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION_GEMINI3=false  # Inject parallel tool instruction for Gemini 3 (default: false)
-ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION="..."  # Custom instruction text
-
-# Quota tracking
-ANTIGRAVITY_QUOTA_REFRESH_INTERVAL=300  # Background quota refresh interval in seconds (default: 300 = 5 min)
-```
-
-#### Claude Extended Thinking Sanitization
-
-The provider now includes robust automatic sanitization for Claude's extended thinking mode, handling all common error scenarios with conversation history.
-
-**Problem**: Claude's extended thinking API requires strict consistency in thinking blocks:
-- If thinking is enabled, the final assistant turn must start with a thinking block
-- If thinking is disabled, no thinking blocks can be present in the final turn
-- Tool use loops are part of a single "assistant turn"
-- You **cannot** toggle thinking mode mid-turn (this is invalid per Claude API)
-
-**Scenarios Handled**:
-
-| Scenario | Action |
-|----------|--------|
-| Tool loop WITH thinking + thinking enabled | Preserve thinking, continue normally |
-| Tool loop WITHOUT thinking + thinking enabled | **Inject synthetic closure** to start fresh turn with thinking |
-| Thinking disabled | Strip all thinking blocks |
-| Normal conversation (no tool loop) | Strip old thinking, new response adds thinking naturally |
-| Function call ID mismatch | Three-tier recovery: ID match → name match → fallback |
-| Missing tool responses | Automatic placeholder injection |
-| Compacted/cached conversations | Recover thinking from cache post-transformation |
-
-**Key Implementation Details**:
-
-The `_sanitize_thinking_for_claude()` method now:
-- Operates on Gemini-format messages (`parts[]` with `"thought": true` markers)
-- Detects tool results as user messages with `functionResponse` parts
-- Uses `_analyze_turn_state()` to classify conversation state on Gemini format
-- Recovers thinking from cache when client strips reasoning_content
-- When enabling thinking in a tool loop started without thinking:
-  - Injects synthetic assistant message to close the previous turn
-  - Allows Claude to start fresh turn with thinking capability
-
-**Function Call Response Grouping**:
-
-The enhanced pairing system ensures conversation history integrity:
-```
-Problem: Client/proxy may mutate response IDs or lose responses during context processing
-
-Solution:
-1. Try direct ID match (tool_call_id == response.id)
-2. If no match, try function name match (tool.name == response.name)
-3. If still no match, use order-based fallback (nth tool → nth response)
-4. Repair "unknown_function" responses with correct names
-5. Create placeholders for completely missing responses
-```
-
-**Configuration**:
-```env
-ANTIGRAVITY_CLAUDE_THINKING_SANITIZATION=true  # Enable/disable auto-correction (default: true)
-```
-
-**Note**: These fixes ensure Claude thinking mode works seamlessly with tool use, model switching, context compression, and cached conversations. No manual intervention required.
-
-#### File Logging
-
-Optional transaction logging for debugging:
-- Enabled via `enable_request_logging` parameter
-- Creates `logs/antigravity_logs/TIMESTAMP_MODEL_UUID/` directory per request
-- Logs: `request_payload.json`, `response_stream.log`, `final_response.json`, `error.log`
+**Note:** Port changes take effect on the next OAuth authentication attempt. Existing tokens are not affected.
 
 ---
 
-
-- **Atomic Disk Writes**: Uses temp-file-and-move pattern to prevent corruption
-
-**Key Methods:**
-
-1. **`store(key, value)`**: Synchronously queues value for storage (schedules async write)
-2. **`retrieve(key)`**: Synchronously retrieves from memory, optionally schedules disk fallback
-3. **`store_async(key, value)`**: Awaitable storage for guaranteed persistence
-4. **`retrieve_async(key)`**: Awaitable retrieval with disk fallback
-
-**Use Cases:**
-
-- **Gemini 3 ThoughtSignatures**: Caching tool call signatures for multi-turn conversations
-- **Claude Thinking**: Preserving thinking content for consistency across conversation turns
-- **Any Transient State**: Generic key-value storage for provider-specific needs
-
-**Configuration (Environment Variables):**
-
-```env
-# Cache control (prefix can be customized per cache instance)
-PROVIDER_CACHE_ENABLE=true
-PROVIDER_CACHE_WRITE_INTERVAL=60  # seconds between disk writes
-PROVIDER_CACHE_CLEANUP_INTERVAL=1800  # 30 min between cleanups
-
-# Gemini 3 specific
-GEMINI_CLI_SIGNATURE_CACHE_ENABLE=true
-GEMINI_CLI_SIGNATURE_CACHE_TTL=3600  # 1 hour memory TTL
-GEMINI_CLI_SIGNATURE_DISK_TTL=86400  # 24 hours disk TTL
-```
-
-**File Structure:**
-
-```
-cache/
-├── gemini_cli/
-│   └── gemini3_signatures.json
-└── antigravity/
-    ├── gemini3_signatures.json
-    └── claude_thinking.json
-```
-
----
-
-### 2.13. Sequential Rotation & Per-Model Quota Tracking
+### 2.12. Sequential Rotation & Per-Model Quota Tracking
 
 A comprehensive credential rotation and quota management system introduced in PR #31.
 
@@ -1376,84 +808,7 @@ class AntigravityProvider(ProviderInterface):
 
 ---
 
-### 2.12. Google OAuth Base (`providers/google_oauth_base.py`)
-
-A refactored, reusable OAuth2 base class that eliminates code duplication across Google-based providers.
-
-**Refactoring Benefits:**
-
-- **Single Source of Truth**: All OAuth logic centralized in one class
-- **Easy Provider Addition**: New providers only need to override constants
-- **Consistent Behavior**: Token refresh, expiry handling, and validation work identically across providers
-- **Maintainability**: OAuth bugs fixed once apply to all inheriting providers
-
-**Provider Implementation:**
-
-```python
-class AntigravityAuthBase(GoogleOAuthBase):
-    # Required overrides
-    CLIENT_ID = "antigravity-client-id"
-    CLIENT_SECRET = "antigravity-secret"
-    OAUTH_SCOPES = [
-        "https://www.googleapis.com/auth/cloud-platform",
-        "https://www.googleapis.com/auth/cclog",  # Antigravity-specific
-        "https://www.googleapis.com/auth/experimentsandconfigs",
-    ]
-    ENV_PREFIX = "ANTIGRAVITY"  # Used for env var loading
-    
-    # Optional overrides (defaults provided)
-    CALLBACK_PORT = 51121
-    CALLBACK_PATH = "/oauthcallback"
-```
-
-**Inherited Features:**
-
-- Automatic token refresh with exponential backoff
-- Invalid grant re-authentication flow
-- Stateless deployment support (env var loading)
-- Atomic credential file writes
-- Headless environment detection
-- Sequential refresh queue processing
-
-#### OAuth Callback Port Configuration
-
-Each OAuth provider uses a local callback server during authentication. The callback port can be customized via environment variables to avoid conflicts with other services.
-
-**Default Ports:**
-
-| Provider | Default Port | Environment Variable |
-|----------|-------------|---------------------|
-| Gemini CLI | 8085 | `GEMINI_CLI_OAUTH_PORT` |
-| Antigravity | 51121 | `ANTIGRAVITY_OAUTH_PORT` |
-| iFlow | 11451 | `IFLOW_OAUTH_PORT` |
-
-**Configuration Methods:**
-
-1. **Via TUI Settings Menu:**
-   - Main Menu → `4. View Provider & Advanced Settings` → `1. Launch Settings Tool`
-   - Select the provider (Gemini CLI, Antigravity, or iFlow)
-   - Modify the `*_OAUTH_PORT` setting
-   - Use "Reset to Default" to restore the original port
-
-2. **Via `.env` file:**
-   ```env
-   # Custom OAuth callback ports (optional)
-   GEMINI_CLI_OAUTH_PORT=8085
-   ANTIGRAVITY_OAUTH_PORT=51121
-   IFLOW_OAUTH_PORT=11451
-   ```
-
-**When to Change Ports:**
-
-- If the default port conflicts with another service on your system
-- If running multiple proxy instances on the same machine
-- If firewall rules require specific port ranges
-
-**Note:** Port changes take effect on the next OAuth authentication attempt. Existing tokens are not affected.
-
----
-
-### 2.14. HTTP Timeout Configuration (`timeout_config.py`)
+### 2.13. HTTP Timeout Configuration (`timeout_config.py`)
 
 Centralized timeout configuration for all HTTP requests to LLM providers.
 
@@ -1600,7 +955,7 @@ The provider employs a sophisticated, cached discovery mechanism to find a valid
 
 #### Quota Tracking
 
-The provider implements quota tracking via the `GeminiCliQuotaTracker` mixin (see Section 2.17):
+The provider implements quota tracking via the `GeminiCliQuotaTracker` mixin (see Section 2.16):
 
 *   **Real-Time Quota API**: Fetches quota status from `retrieveUserQuota` endpoint
 *   **Background Refresh**: Configurable interval (default: 5 minutes) via `GEMINI_CLI_QUOTA_REFRESH_INTERVAL`
@@ -2037,3 +1392,814 @@ The GUI modifies the same environment variables that the `RotatingClient` reads:
 
 **Note**: The proxy must be restarted to pick up rule changes made via the GUI (or use the Launcher TUI's reload functionality if available).
 
+### 2.14. Antigravity Quota Tracker (`providers/utilities/antigravity_quota_tracker.py`)
+
+A mixin class providing quota tracking functionality for the Antigravity provider. This enables accurate remaining quota estimation based on API-fetched baselines and local request counting.
+
+#### Core Concepts
+
+**Quota Baseline Tracking:**
+- Periodically fetches quota status from the Antigravity `fetchAvailableModels` API
+- Stores the remaining fraction as a baseline in UsageManager
+- Tracks requests since baseline to estimate current remaining quota
+- Syncs local request count with API's authoritative values
+
+**Quota Cost Constants:**
+Based on empirical testing (see `docs/ANTIGRAVITY_QUOTA_REPORT.md`), quota costs are known per model and tier:
+
+| Tier | Model Group | Cost per Request | Requests per 100% |
+|------|-------------|------------------|-------------------|
+| standard-tier | Claude/GPT-OSS | 0.40% | 250 |
+| standard-tier | Gemini 3 Pro | 0.25% | 400 |
+| standard-tier | Gemini 2.5 Flash | 0.0333% | ~3000 |
+| free-tier | Claude/GPT-OSS | 1.333% | 75 |
+| free-tier | Gemini 3 Pro | 0.40% | 250 |
+
+**Model Name Mappings:**
+Some user-facing model names don't exist directly in the API response:
+- `claude-opus-4-5` → `claude-opus-4-5-thinking` (Opus only exists as thinking variant)
+- `gemini-3-pro-preview` → `gemini-3-pro-high` (preview maps to high by default)
+
+#### Key Methods
+
+**`fetch_quota_from_api(credential_path)`:**
+Fetches current quota status from the Antigravity API. Returns remaining fraction and reset times for all models.
+
+**`estimate_remaining_quota(credential_path, model, model_data, tier)`:**
+Estimates remaining quota based on baseline + request tracking. Returns confidence level (high/medium/low) based on baseline age.
+
+**`refresh_active_quota_baselines(credentials, usage_data)`:**
+Only refreshes baselines for credentials that have been used recently (within the refresh interval).
+
+**`discover_quota_costs(credential_path, models_to_test)`:**
+Manual utility to discover quota costs by making test requests and measuring before/after quota. Saves learned costs to `cache/antigravity/learned_quota_costs.json`.
+
+#### Integration with Background Jobs
+
+The Antigravity provider defines a background job for quota baseline refresh:
+
+```python
+def get_background_job_config(self) -> Optional[Dict[str, Any]]:
+    return {
+        "interval": 300,  # 5 minutes (configurable via ANTIGRAVITY_QUOTA_REFRESH_INTERVAL)
+        "name": "quota_baseline_refresh",
+        "run_on_start": True,
+    }
+```
+
+This job:
+1. Identifies credentials used since the last refresh
+2. Fetches current quota from the API for those credentials
+3. Updates baselines in UsageManager for accurate estimation
+
+#### Data Storage
+
+Quota baselines are stored in UsageManager's per-model data:
+
+```json
+{
+  "credential_path": {
+    "models": {
+      "antigravity/claude-sonnet-4-5": {
+        "request_count": 15,
+        "baseline_remaining_fraction": 0.94,
+        "baseline_fetched_at": 1734567890.0,
+        "requests_at_baseline": 15,
+        "quota_max_requests": 250,
+        "quota_display": "15/250"
+      }
+    }
+  }
+}
+```
+
+### 2.15. TransientQuotaError (`error_handler.py`)
+
+A new error type for handling bare 429 responses without retry timing information.
+
+**When Raised:**
+- Provider returns HTTP 429 status code
+- Response doesn't contain retry timing info (no `quotaResetTimeStamp` or `retryDelay`)
+- After internal retry attempts are exhausted
+
+**Behavior:**
+- Classified as `server_error` (status 503) rather than quota exhaustion
+- Causes credential rotation to try the next credential
+- Does NOT trigger long-term quota cooldowns
+
+**Implementation in Antigravity:**
+```python
+# Non-streaming and streaming both retry bare 429s
+for attempt in range(EMPTY_RESPONSE_MAX_ATTEMPTS):
+    try:
+        result = await self._handle_request(...)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            quota_info = self.parse_quota_error(e)
+            if quota_info is None:
+                # Bare 429 - retry like empty response
+                if attempt < EMPTY_RESPONSE_MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
+                    continue
+                else:
+                    raise TransientQuotaError(provider, model, message)
+            # Has retry info - real quota exhaustion
+            raise
+```
+
+**Rationale:**
+Some 429 responses are transient rate limits rather than true quota exhaustion. These occur when the API is temporarily overloaded but the credential still has quota available. Retrying internally before rotating credentials provides better resilience.
+
+### 2.16. Gemini CLI Quota Tracker (`providers/utilities/gemini_cli_quota_tracker.py`)
+
+A mixin class providing quota tracking functionality for the Gemini CLI provider. This mirrors the Antigravity quota tracker (Section 2.14) and enables accurate remaining quota estimation based on API-fetched baselines and local request counting.
+
+#### Core Concepts
+
+**Quota Baseline Tracking:**
+- Periodically fetches quota status from the `retrieveUserQuota` API endpoint
+- Stores the remaining fraction as a baseline in UsageManager
+- Tracks requests since baseline to estimate current remaining quota
+- Syncs local request count with API's authoritative values
+
+**Quota Cost Constants:**
+Based on empirical testing, quota limits are known per model and tier:
+
+| Tier | Model Group | Max Requests per 100% |
+|------|-------------|----------------------|
+| standard-tier | Pro (gemini-2.5-pro, gemini-3-pro-preview) | 250 |
+| standard-tier | 2.5-Flash (gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-flash-lite) | 1500 |
+| standard-tier | 3-Flash (gemini-3-flash-preview) | 1500 |
+| free-tier | Pro | 100 |
+| free-tier | 2.5-Flash | 1000 |
+| free-tier | 3-Flash | 1000 |
+
+**Reset Windows:**
+- All tiers use 24-hour fixed windows from first request (verified 2026-01-07)
+- The reset time is set when the first request is made and does NOT roll forward
+
+**Model Quota Groups:**
+Models that share quota limits are grouped together:
+- `pro`: `gemini-2.5-pro`, `gemini-3-pro-preview`
+- `25-flash`: `gemini-2.0-flash`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`
+- `3-flash`: `gemini-3-flash-preview`
+
+Groups can be overridden via environment variables: `QUOTA_GROUPS_GEMINI_CLI_{GROUP}="model1,model2"`
+
+#### Key Methods
+
+**`retrieve_user_quota(credential_path)`:**
+Fetches current quota status from the Gemini CLI `retrieveUserQuota` API. Returns remaining fraction and reset times for all models.
+
+**`get_all_quota_info(credential_paths, oauth_base_dir, usage_data, include_estimates)`:**
+Gets structured quota info for all credentials, suitable for the TUI quota viewer and stats endpoint.
+
+**`get_max_requests_for_model(model, tier)`:**
+Returns the maximum number of requests for a model/tier combination. Uses learned values if available, otherwise falls back to defaults.
+
+**`discover_quota_costs(credential_path, models_to_test)`:**
+Manual utility to discover quota costs by making test requests and measuring before/after quota. Saves learned costs to `cache/gemini_cli/learned_quota_costs.json`.
+
+#### Integration with Background Jobs
+
+The Gemini CLI provider defines a background job for quota baseline refresh:
+
+```python
+def get_background_job_config(self) -> Optional[Dict[str, Any]]:
+    return {
+        "interval": 300,  # 5 minutes (configurable via GEMINI_CLI_QUOTA_REFRESH_INTERVAL)
+        "name": "gemini_cli_quota_refresh",
+        "run_on_start": True,
+    }
+```
+
+This job:
+1. On first run: Fetches quota for ALL credentials to establish baselines
+2. On subsequent runs: Only fetches for credentials used since last refresh
+3. Updates baselines in UsageManager for accurate estimation
+
+#### Data Storage
+
+Quota baselines are stored in UsageManager's per-model data:
+
+```json
+{
+  "credential_path": {
+    "models": {
+      "gemini_cli/gemini-2.5-pro": {
+        "request_count": 15,
+        "baseline_remaining_fraction": 0.94,
+        "baseline_fetched_at": 1734567890.0,
+        "requests_at_baseline": 15,
+        "quota_max_requests": 250,
+        "quota_display": "15/250"
+      }
+    }
+  }
+}
+```
+
+#### Environment Variables
+
+```env
+# Background job interval in seconds (default: 300 = 5 min)
+GEMINI_CLI_QUOTA_REFRESH_INTERVAL=300
+
+# Override default quota groups
+QUOTA_GROUPS_GEMINI_CLI_PRO="gemini-2.5-pro,gemini-3-pro-preview"
+QUOTA_GROUPS_GEMINI_CLI_25_FLASH="gemini-2.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
+QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
+```
+
+### 2.17. Shared Gemini OAuth Utilities (`providers/utilities/`)
+
+The PR refactors shared logic between Gemini CLI and Antigravity providers into reusable utility modules:
+
+| Module | Purpose |
+|--------|---------|
+| `gemini_shared_utils.py` | Shared constants (FINISH_REASON_MAP, DEFAULT_SAFETY_SETTINGS, CODE_ASSIST_ENDPOINT), helper functions (env_bool, env_int, inline_schema_refs, recursively_parse_json_strings) |
+| `base_quota_tracker.py` | Abstract base class for quota tracking with learned costs, credential discovery, and baseline management |
+| `gemini_credential_manager.py` | Mixin for OAuth credential tier management, initialization, and background job interface |
+| `gemini_file_logger.py` | Transaction-level file logging for debugging API requests and responses |
+| `gemini_tool_handler.py` | Tool schema transformation and Gemini 3 tool fix logic |
+
+**Benefits:**
+- Eliminates code duplication between Gemini CLI and Antigravity providers
+- Single source of truth for shared constants and logic
+- Easier maintenance and bug fixes
+- Consistent behavior across Google OAuth-based providers
+
+### 2.18. Fair Cycle Rotation
+
+Fair Cycle Rotation ensures each credential is used at least once before any credential can be reused within a tier. This prevents a single credential from being repeatedly used and exhausted while others sit idle.
+
+**Problem Solved:**
+- In sequential mode, the same high-priority credential might be used repeatedly
+- When exhausted, it gets a cooldown, but after cooldown expires, it's used again
+- Other credentials of the same tier never get used
+
+**Solution:**
+- When a credential hits a long cooldown (> threshold), mark it as "exhausted"
+- Exhausted credentials are skipped until ALL credentials in the tier exhaust
+- Once all exhaust OR cycle duration expires, the cycle resets
+
+**Configuration (Environment Variables):**
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `FAIR_CYCLE_{PROVIDER}` | bool | sequential only | Enable/disable fair cycle |
+| `FAIR_CYCLE_TRACKING_MODE_{PROVIDER}` | string | `model_group` | `model_group` or `credential` |
+| `FAIR_CYCLE_CROSS_TIER_{PROVIDER}` | bool | `false` | Track across all tiers |
+| `FAIR_CYCLE_DURATION_{PROVIDER}` | int | `86400` | Cycle duration in seconds |
+| `EXHAUSTION_COOLDOWN_THRESHOLD_{PROVIDER}` | int | `300` | Threshold in seconds |
+
+**Defaults:** All defaults are defined in `src/rotator_library/config/defaults.py`.
+
+**Logging Format:**
+```
+Acquiring key for model antigravity/claude-opus-4.5. Tried keys: 0/12(17,cd:3,fc:2)
+# Breakdown: 0 tried, 12 available, 17 total, 3 on cooldown, 2 fair-cycle excluded
+```
+
+**Persistence:**
+Cycle state is persisted in `key_usage.json` under the `__fair_cycle__` key.
+
+### 2.19. Custom Caps
+
+Custom Caps allow setting custom usage limits per tier, per model/group that are MORE restrictive than actual API limits. When the custom cap is reached, the credential is put on cooldown BEFORE hitting the actual API limit.
+
+**Use Cases:**
+- Pace usage across quota window (don't burn 150 requests in first hour)
+- Reserve capacity for certain times of day
+- Add safety buffer (stop at 120/150 to avoid edge cases)
+- Extend cooldown beyond natural reset for pacing
+
+**Key Principle: More Restrictive Only**
+- Custom cap is always <= actual max (clamped if set higher)
+- Custom cooldown is always >= natural reset time (clamped if set shorter)
+
+**Configuration (Environment Variables):**
+
+```bash
+# Format
+CUSTOM_CAP_{PROVIDER}_T{TIER}_{MODEL_OR_GROUP}=<value>
+CUSTOM_CAP_COOLDOWN_{PROVIDER}_T{TIER}_{MODEL_OR_GROUP}=<mode>:<value>
+
+# Examples
+CUSTOM_CAP_ANTIGRAVITY_T2_CLAUDE=100
+CUSTOM_CAP_COOLDOWN_ANTIGRAVITY_T2_CLAUDE=quota_reset
+
+CUSTOM_CAP_ANTIGRAVITY_T3_CLAUDE=30
+CUSTOM_CAP_COOLDOWN_ANTIGRAVITY_T3_CLAUDE=offset:3600
+```
+
+**Cap Values:**
+- Absolute number: `100`
+- Percentage of actual max: `"80%"`
+
+**Cooldown Modes:**
+
+| Mode | Formula | Use Case |
+|------|---------|----------|
+| `quota_reset` | `quota_reset_ts` | Same as natural behavior |
+| `offset` | `quota_reset_ts + value` | Add buffer time |
+| `fixed` | `window_start_ts + value` | Fixed window from start |
+
+**Resolution Priority:**
+1. Tier + Model (most specific)
+2. Tier + Group (model's quota group)
+3. Default + Model
+4. Default + Group
+5. No custom cap (use actual API limits)
+
+**Integration with Fair Cycle:**
+When a custom cap triggers a cooldown longer than the exhaustion threshold, it also marks the credential as exhausted for fair cycle rotation.
+
+**Defaults:** See `src/rotator_library/config/defaults.py` for all configurable defaults.
+
+### 2.20. Anthropic API Compatibility (`anthropic_compat/`)
+
+A translation layer that enables Anthropic API clients (like Claude Code) to use any OpenAI-compatible provider through the proxy.
+
+#### Architecture
+
+The module consists of three components:
+
+| File | Purpose |
+|------|---------|
+| `models.py` | Pydantic models for Anthropic request/response formats (`AnthropicMessagesRequest`, `AnthropicMessage`, `AnthropicTool`, etc.) |
+| `translator.py` | Bidirectional format translation functions |
+| `streaming.py` | SSE format conversion for streaming responses |
+
+#### Request Translation (`translate_anthropic_request`)
+
+Converts Anthropic Messages API requests to OpenAI Chat Completions format:
+
+**Message Conversion:**
+- Anthropic `system` field → OpenAI system message
+- `content` blocks (text, image, tool_use, tool_result) → OpenAI format
+- Image blocks with base64 data → OpenAI `image_url` with data URI
+- Document blocks (PDF, etc.) → OpenAI `image_url` format
+
+**Tool Conversion:**
+- Anthropic `tools` with `input_schema` → OpenAI `tools` with `parameters`
+- `tool_choice.type: "any"` → `"required"`
+- `tool_choice.type: "tool"` → `{"type": "function", "function": {"name": ...}}`
+
+**Thinking Configuration:**
+- `thinking.type: "enabled"` → `reasoning_effort: "high"` + `thinking_budget`
+- `thinking.type: "disabled"` → `reasoning_effort: "disable"`
+- Opus models default to thinking enabled
+
+**Special Handling:**
+- Reorders assistant content blocks: thinking → text → tool_use
+- Injects `[Continue]` prompt for fresh thinking turns
+- Preserves thinking signatures for multi-turn conversations
+
+#### Response Translation (`openai_to_anthropic_response`)
+
+Converts OpenAI Chat Completions responses to Anthropic Messages format:
+
+**Content Blocks:**
+- `reasoning_content` → thinking block with signature
+- `content` → text block
+- `tool_calls` → tool_use blocks with parsed JSON input
+
+**Field Mapping:**
+- `finish_reason: "stop"` → `stop_reason: "end_turn"`
+- `finish_reason: "length"` → `stop_reason: "max_tokens"`
+- `finish_reason: "tool_calls"` → `stop_reason: "tool_use"`
+
+**Usage Translation:**
+- `prompt_tokens` minus `cached_tokens` → `input_tokens`
+- `completion_tokens` → `output_tokens`
+- `prompt_tokens_details.cached_tokens` → `cache_read_input_tokens`
+
+#### Streaming Wrapper (`anthropic_streaming_wrapper`)
+
+Converts OpenAI SSE streaming format to Anthropic's event-based format:
+
+**Event Types Generated:**
+```
+message_start      → Initial message metadata
+content_block_start → Start of text/thinking/tool_use block
+content_block_delta → Incremental content (text_delta, thinking_delta, input_json_delta)
+content_block_stop  → End of content block
+message_delta      → Final metadata (stop_reason, usage)
+message_stop       → End of message
+```
+
+**Features:**
+- Accumulates tool call arguments across chunks
+- Handles thinking/reasoning content from `delta.reasoning_content`
+- Proper block indexing for multiple content blocks
+- Cache token handling in usage statistics
+- Error recovery with proper message structure
+
+#### Client Integration
+
+The `RotatingClient` provides two methods for Anthropic compatibility:
+
+```python
+async def anthropic_messages(self, request, raw_request=None, pre_request_callback=None):
+    """Handle Anthropic Messages API requests."""
+    # 1. Translate Anthropic request to OpenAI format
+    # 2. Call acompletion() with translated request
+    # 3. Convert response back to Anthropic format
+    # 4. For streaming: wrap with anthropic_streaming_wrapper
+
+async def anthropic_count_tokens(self, request):
+    """Count tokens for Anthropic-format request."""
+    # Translates messages and tools, then uses token_count()
+```
+
+#### Authentication
+
+The proxy accepts both Anthropic and OpenAI authentication styles:
+- `x-api-key` header (Anthropic style)
+- `Authorization: Bearer` header (OpenAI style)
+
+### 3.5. Antigravity (`antigravity_provider.py`)
+
+The most sophisticated provider implementation, supporting Google's internal Antigravity API for Gemini 3 and Claude models (including **Claude Opus 4.5**, Anthropic's most powerful model).
+
+#### Architecture
+
+- **Unified Streaming/Non-Streaming**: Single code path handles both response types with optimal transformations
+- **Thought Signature Caching**: Server-side caching of encrypted signatures for multi-turn Gemini 3 conversations
+- **Model-Specific Logic**: Automatic configuration based on model type (Gemini 3, Claude Sonnet, Claude Opus)
+- **Credential Prioritization**: Automatic tier detection with paid credentials prioritized over free (paid tier resets every 5 hours, free tier resets weekly)
+- **Sequential Rotation Mode**: Default rotation mode is sequential (use credentials until exhausted) to maximize thought signature cache hits
+- **Per-Model Quota Tracking**: Each model tracks independent usage windows with authoritative reset timestamps from quota errors
+- **Quota Groups**: Models that share quota limits are grouped together (Claude/GPT-OSS share quota, Gemini 3 Pro variants share quota, Gemini 2.5 Flash variants share quota)
+- **Priority Multipliers**: Paid tier credentials get higher concurrency limits (Priority 1: 5x, Priority 2: 3x, Priority 3+: 2x in sequential mode)
+- **Quota Baseline Tracking**: Background job fetches quota status from API to provide accurate remaining quota estimates
+- **TransientQuotaError Handling**: Bare 429 responses (without retry info) are retried internally before credential rotation
+
+#### Model Support
+
+**Gemini 3 Pro:**
+- Uses `thinkingLevel` parameter (string: "low" or "high")
+- **Tool Hallucination Prevention**:
+  - Automatic system instruction injection explaining custom tool schema rules
+  - Parameter signature injection into tool descriptions (e.g., "STRICT PARAMETERS: files (ARRAY_OF_OBJECTS[path: string REQUIRED, ...])")
+  - Namespace prefix for tool names (`gemini3_` prefix) to avoid training data conflicts
+  - Malformed JSON auto-correction (handles extra trailing braces)
+- **ThoughtSignature Management**:
+  - Caching signatures from responses for reuse in follow-up messages
+  - Automatic injection into functionCalls for multi-turn conversations
+  - Fallback to bypass value if signature unavailable
+- **Parallel Tool Usage Instruction**: Configurable instruction injection to encourage parallel tool calls (disabled by default for Gemini 3)
+
+**Gemini 2.5 Flash:**
+- Uses `-thinking` variant when `reasoning_effort` is provided
+- Shares quota with `gemini-2.5-flash-thinking` and `gemini-2.5-flash-lite` variants
+- Parallel tool usage instruction configurable
+
+**Gemini 2.5 Flash Lite:**
+- Configurable thinking budget, no name change required
+- Shares quota with Flash variants
+
+**Claude Opus 4.5:**
+- Anthropic's most powerful model, now available via Antigravity proxy
+- **Always uses thinking variant** - `claude-opus-4-5-thinking` is the only available variant (non-thinking version doesn't exist)
+- Uses `thinkingBudget` parameter for extended thinking control (-1 for auto, 0 to disable, or specific token count)
+- Full support for tool use with schema cleaning
+- Same thinking preservation and sanitization features as Sonnet
+- Increased default max output tokens to 64000 to accommodate thinking output
+
+**Claude Sonnet 4.5:**
+- Proxied through Antigravity API
+- **Supports both thinking and non-thinking modes**:
+  - With `reasoning_effort`: Uses `claude-sonnet-4-5-thinking` variant with `thinkingBudget`
+  - Without `reasoning_effort`: Uses standard `claude-sonnet-4-5` variant
+- **Thinking Preservation**: Caches thinking content using composite keys (tool_call_id + text_hash)
+- **Schema Cleaning**: Removes unsupported properties (`$schema`, `additionalProperties`, `const` → `enum`)
+- **Parallel Tool Usage Instruction**: Automatic instruction injection to encourage parallel tool calls (enabled by default for Claude)
+
+**GPT-OSS 120B Medium:**
+- OpenAI-compatible model available via Antigravity
+- Shares quota with Claude models (Claude/GPT-OSS quota group)
+
+#### Base URL Fallback
+
+Automatic fallback chain for resilience:
+1. `daily-cloudcode-pa.sandbox.googleapis.com` (primary sandbox)
+2. `autopush-cloudcode-pa.sandbox.googleapis.com` (fallback sandbox)
+3. `cloudcode-pa.googleapis.com` (production fallback)
+
+#### Message Transformation
+
+**OpenAI → Gemini Format:**
+- System messages → `systemInstruction` with parts array
+- Multi-part content (text + images) → `inlineData` format
+- Tool calls → `functionCall` with args and id
+- Tool responses → `functionResponse` with name and response
+- ThoughtSignatures preserved/injected as needed
+
+**Tool Response Grouping:**
+- Converts linear format (call, response, call, response) to grouped format
+- Groups all function calls in one `model` message
+- Groups all responses in one `user` message
+- Required for Antigravity API compatibility
+
+#### Configuration (Environment Variables)
+
+```env
+# Cache control
+ANTIGRAVITY_SIGNATURE_CACHE_TTL=3600  # Memory cache TTL
+ANTIGRAVITY_SIGNATURE_DISK_TTL=86400  # Disk cache TTL
+ANTIGRAVITY_ENABLE_SIGNATURE_CACHE=true
+
+# Feature flags
+ANTIGRAVITY_PRESERVE_THOUGHT_SIGNATURES=true  # Include signatures in client responses
+ANTIGRAVITY_ENABLE_DYNAMIC_MODELS=false  # Use API model discovery
+ANTIGRAVITY_GEMINI3_TOOL_FIX=true  # Enable Gemini 3 hallucination prevention
+ANTIGRAVITY_CLAUDE_THINKING_SANITIZATION=true  # Enable Claude thinking mode auto-correction
+
+# Gemini 3 tool fix customization
+ANTIGRAVITY_GEMINI3_TOOL_PREFIX="gemini3_"  # Namespace prefix
+ANTIGRAVITY_GEMINI3_DESCRIPTION_PROMPT="\n\nSTRICT PARAMETERS: {params}."
+ANTIGRAVITY_GEMINI3_SYSTEM_INSTRUCTION="..."  # Full system prompt
+
+# Parallel tool usage instruction
+ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION_CLAUDE=true  # Inject parallel tool instruction for Claude (default: true)
+ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION_GEMINI3=false  # Inject parallel tool instruction for Gemini 3 (default: false)
+ANTIGRAVITY_PARALLEL_TOOL_INSTRUCTION="..."  # Custom instruction text
+
+# Quota tracking
+ANTIGRAVITY_QUOTA_REFRESH_INTERVAL=300  # Background quota refresh interval in seconds (default: 300 = 5 min)
+```
+
+#### Claude Extended Thinking Sanitization
+
+The provider now includes robust automatic sanitization for Claude's extended thinking mode, handling all common error scenarios with conversation history.
+
+**Problem**: Claude's extended thinking API requires strict consistency in thinking blocks:
+- If thinking is enabled, the final assistant turn must start with a thinking block
+- If thinking is disabled, no thinking blocks can be present in the final turn
+- Tool use loops are part of a single "assistant turn"
+- You **cannot** toggle thinking mode mid-turn (this is invalid per Claude API)
+
+**Scenarios Handled**:
+
+| Scenario | Action |
+|----------|--------|
+| Tool loop WITH thinking + thinking enabled | Preserve thinking, continue normally |
+| Tool loop WITHOUT thinking + thinking enabled | **Inject synthetic closure** to start fresh turn with thinking |
+| Thinking disabled | Strip all thinking blocks |
+| Normal conversation (no tool loop) | Strip old thinking, new response adds thinking naturally |
+| Function call ID mismatch | Three-tier recovery: ID match → name match → fallback |
+| Missing tool responses | Automatic placeholder injection |
+| Compacted/cached conversations | Recover thinking from cache post-transformation |
+
+**Key Implementation Details**:
+
+The `_sanitize_thinking_for_claude()` method now:
+- Operates on Gemini-format messages (`parts[]` with `"thought": true` markers)
+- Detects tool results as user messages with `functionResponse` parts
+- Uses `_analyze_turn_state()` to classify conversation state on Gemini format
+- Recovers thinking from cache when client strips reasoning_content
+- When enabling thinking in a tool loop started without thinking:
+  - Injects synthetic assistant message to close the previous turn
+  - Allows Claude to start fresh turn with thinking capability
+
+**Function Call Response Grouping**:
+
+The enhanced pairing system ensures conversation history integrity:
+```
+Problem: Client/proxy may mutate response IDs or lose responses during context processing
+
+Solution:
+1. Try direct ID match (tool_call_id == response.id)
+2. If no match, try function name match (tool.name == response.name)
+3. If still no match, use order-based fallback (nth tool → nth response)
+4. Repair "unknown_function" responses with correct names
+5. Create placeholders for completely missing responses
+```
+
+**Configuration**:
+```env
+ANTIGRAVITY_CLAUDE_THINKING_SANITIZATION=true  # Enable/disable auto-correction (default: true)
+```
+
+**Note**: These fixes ensure Claude thinking mode works seamlessly with tool use, model switching, context compression, and cached conversations. No manual intervention required.
+
+#### File Logging
+
+Optional transaction logging for debugging:
+- Enabled via `enable_request_logging` parameter
+- Creates `logs/antigravity_logs/TIMESTAMP_MODEL_UUID/` directory per request
+- Logs: `request_payload.json`, `response_stream.log`, `final_response.json`, `error.log`
+
+---
+
+
+- **Atomic Disk Writes**: Uses temp-file-and-move pattern to prevent corruption
+
+**Key Methods:**
+
+1. **`store(key, value)`**: Synchronously queues value for storage (schedules async write)
+2. **`retrieve(key)`**: Synchronously retrieves from memory, optionally schedules disk fallback
+3. **`store_async(key, value)`**: Awaitable storage for guaranteed persistence
+4. **`retrieve_async(key)`**: Awaitable retrieval with disk fallback
+
+**Use Cases:**
+
+- **Gemini 3 ThoughtSignatures**: Caching tool call signatures for multi-turn conversations
+- **Claude Thinking**: Preserving thinking content for consistency across conversation turns
+- **Any Transient State**: Generic key-value storage for provider-specific needs
+
+**Configuration (Environment Variables):**
+
+```env
+# Cache control (prefix can be customized per cache instance)
+PROVIDER_CACHE_ENABLE=true
+PROVIDER_CACHE_WRITE_INTERVAL=60  # seconds between disk writes
+PROVIDER_CACHE_CLEANUP_INTERVAL=1800  # 30 min between cleanups
+
+# Gemini 3 specific
+GEMINI_CLI_SIGNATURE_CACHE_ENABLE=true
+GEMINI_CLI_SIGNATURE_CACHE_TTL=3600  # 1 hour memory TTL
+GEMINI_CLI_SIGNATURE_DISK_TTL=86400  # 24 hours disk TTL
+```
+
+**File Structure:**
+
+```
+cache/
+├── gemini_cli/
+│   └── gemini3_signatures.json
+└── antigravity/
+    ├── gemini3_signatures.json
+    └── claude_thinking.json
+```
+
+---
+
+
+---
+
+### 2.21. Adaptive Rate Limiter (`adaptive_rate_limiter.py`)
+
+Proactive per-provider request pacing using a token bucket with AIMD (Additive Increase / Multiplicative Decrease) rate adjustment. When a provider returns 429, the rate is reduced by a configurable factor; on success, the rate is gradually increased. A ceiling mechanism remembers the rate that caused the last 429 and probes only to 90% of that ceiling until the ceiling expires.
+
+**Key Parameters:**
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `INITIAL_RATE` | 2.0 req/s | Starting request rate per provider |
+| `MIN_RATE` | 0.1 req/s | Floor after multiplicative decrease |
+| `INCREASE_FACTOR` | 1.05 | Additive increase per success |
+| `DECREASE_FACTOR` | 0.5 | Multiplicative decrease on 429 |
+| `CEILING_EXPIRY` | 300s | Time before ceiling is forgotten |
+
+**Integration:** The `AdaptiveRateLimiter` is called before each request in the `RotatingClient` key-selection loop. When `acquire()` returns `False`, the key is skipped and the next credential is tried.
+
+---
+
+### 2.22. IP Throttle Detector (`ip_throttle_detector.py`)
+
+Detects when a single IP address is being throttled across multiple API keys for the same provider. This commonly occurs when running many keys from one machine against providers with IP-level rate limits (e.g., Google Gemini).
+
+**Mechanism:**
+
+1. Tracks 429 responses per `(provider, ip)` pair with a sliding window
+2. When a provider-key combo returns 429, checks if other keys from the same IP also got 429 recently
+3. If `min(3, available_keys)` or more keys are throttled at the same IP, declares IP-level throttle
+4. Declares a cooldown on the IP-provider pair with exponential backoff
+
+**Configuration:**
+
+- `IP_THROTTLE_MIN_KEYS`: Minimum keys seeing 429 to declare IP throttle (default: 3)
+- `IP_THROTTLE_WINDOW`: Sliding window in seconds (default: 120)
+- `IP_THROTTLE_COOLDOWN`: Base cooldown in seconds (default: 60)
+
+**Integration:** Uses `asyncio.Lock` internally. Called from the retry logic in `client.py` after a 429 error is classified.
+
+---
+
+### 2.23. Credential Weight Cache (`credential_weight_cache.py`)
+
+Caches the computed weight (priority score) for each credential to avoid recalculating on every request. Weights combine quota remaining, error rate, and cooldown proximity into a single float.
+
+**Design:**
+
+- **Lazy Computation**: Weight is computed on first access, then cached with a configurable TTL
+- **Invalidation Triggers**: Weight is invalidated when a credential goes on cooldown, returns an error, or quota is refreshed
+- **Thread Safety**: Uses a simple dict with atomic reads (single-coroutine writer pattern)
+
+**API:**
+
+| Method | Purpose |
+|--------|---------|
+| `get_weight(key_id)` | Return cached weight or compute on miss |
+| `invalidate(key_id)` | Force recompute on next access |
+| `invalidate_all()` | Clear entire cache |
+
+---
+
+### 2.24. DNS Fix (`dns_fix.py`)
+
+Monkey-patches `aiohttp`'s DNS resolver to use DNS-over-HTTPS (DoH) instead of the system resolver. This is critical for environments where the system DNS is unreliable or blocks provider endpoints.
+
+**Behavior:**
+
+- Patches `aiohttp.connector.TCPConnector._resolve_host` with a DoH implementation
+- Uses Google's `dns.google/resolve` endpoint by default
+- Falls back to system DNS if DoH request fails
+- Must be imported before any `aiohttp` usage (load-bearing import order)
+
+**Configuration:**
+
+- `DOH_ENDPOINT`: Override the default DoH server URL
+- `DOH_TIMEOUT`: Timeout for DoH requests in seconds (default: 5)
+
+---
+
+### 2.25. SSL Patch (`ssl_patch.py`)
+
+Provides a monkey-patch to disable SSL certificate verification for `httpx` and `aiohttp` clients when the `HTTP_SSL_VERIFY=false` environment variable is set.
+
+**Why This Exists:**
+
+- Some corporate environments use MITM proxies with custom CA certificates
+- Docker containers may not have the full CA bundle
+- Development/testing against self-signed endpoints
+
+**Safety:** The patch only activates when explicitly opted in via environment variable. It logs a warning at startup when active.
+
+---
+
+### 2.26. HTTP Client Pool (`http_client_pool.py`)
+
+Manages a shared pool of `httpx.AsyncClient` instances used for non-LiteLLM HTTP requests (OAuth token refreshes, quota API calls, health checks). Sharing clients avoids the overhead of creating a new connection pool per request.
+
+**Architecture:**
+
+- **Lazy Initialization**: Clients are created on first use per `(ssl_verify, timeout_profile)` combination
+- **Connection Reuse**: HTTP/2 multiplexing where supported; HTTP/1.1 keep-alive otherwise
+- **Graceful Shutdown**: `close_http_pool()` drains active requests, then closes all clients
+- **Fire-and-Forget Safety**: Orphan close tasks are tracked in `_orphan_close_tasks` with `add_done_callback` to prevent garbage collection before completion
+
+**Key Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `get_http_client(ssl_verify, timeout)` | Get or create a pooled client |
+| `close_http_pool()` | Gracefully close all clients |
+| `warmup_pool()` | Pre-create clients at startup |
+
+---
+
+### 2.27. Transaction Logger (`transaction_logger.py`)
+
+Provides structured, per-request transaction logging for audit and debugging. Each API request gets a unique transaction ID, and all events (key selection, retry, error, completion) are logged with this ID for correlation.
+
+**Output Format:**
+
+- JSON lines to a dedicated transaction log file
+- Includes: transaction_id, timestamp, provider, model, key_id (hashed), event_type, duration_ms, error_class
+
+**Configuration:**
+
+- `TRANSACTION_LOG_PATH`: File path for transaction logs (default: `logs/transactions.jsonl`)
+- `TRANSACTION_LOG_ENABLED`: Enable/disable (default: `false`)
+
+---
+
+### 2.28. Batched Persistence (`batched_persistence.py`)
+
+Batches disk writes for frequently-updated state files (usage stats, quota data) to reduce I/O pressure. Instead of writing to disk on every state change, changes are accumulated in memory and flushed periodically.
+
+**Design:**
+
+- **In-Memory Buffer**: Changed data is held in a dict, keyed by file path
+- **Periodic Flush**: A background task writes all dirty entries every N seconds (default: 60)
+- **Dirty Tracking**: Only files that actually changed are written
+- **Graceful Shutdown**: On `stop()`, all pending writes are flushed synchronously
+
+**Integration:** Used by `UsageManager` and `ProviderCache` for their persistence needs.
+
+---
+
+### 2.29. Async Locks (`async_locks.py`)
+
+Centralizes all `asyncio.Lock` and `asyncio.Semaphore` instances used across the library. This avoids scattered lock creation and makes it easy to inspect lock state for debugging.
+
+**Why Centralized:**
+
+- **Deadlock Prevention**: Single ownership makes lock ordering explicit
+- **Observability**: Can report which locks are held, which coroutines are waiting
+- **Consistent Initialization**: All locks created at client init time, not lazily
+
+**Locks Provided:**
+
+| Lock | Purpose |
+|------|---------|
+| `usage_lock` | Protects UsageManager state mutations |
+| `provider_cache_lock` | Protects ProviderCache memory/disk sync |
+| `ip_throttle_lock` | Protects IP throttle detector state |
+| `weight_cache_lock` | Protects credential weight cache |
+| `pool_lock` | Protects HTTP client pool initialization |
+| `persistence_lock` | Protects batched persistence flush |

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026 ShmidtS
 
+"""Cached environment variables for provider configuration. Pre-filtered at module load to avoid repeated O(P*E) scans of os.environ in provider __init__."""
+
 import os
 from typing import Dict
 
 
-# Cached environment variables for provider configuration
-# Pre-filtered at module load to avoid repeated O(P*E) scans in __init__
 _PROVIDER_ENV_PREFIXES = (
     "CONCURRENCY_MULTIPLIER_",
     "CUSTOM_CAP_",
@@ -18,11 +18,13 @@ _PROVIDER_ENV_PREFIXES = (
     "EXHAUSTION_COOLDOWN_THRESHOLD_",
     "_API_HEADERS",
 )
+"""Environment variable prefixes that are cached for provider configuration lookups."""
 
 _provider_env_cache: Dict[str, str] = {
     k: v for k, v in os.environ.items()
     if any(k.startswith(p) or k.endswith(p) for p in _PROVIDER_ENV_PREFIXES)
 }
+"""Dict of env vars matching provider prefixes, computed once at import time."""
 
 # Add global exhaustion cooldown threshold (no provider suffix)
 if "EXHAUSTION_COOLDOWN_THRESHOLD" in os.environ:

@@ -1,4 +1,4 @@
-# Universal LLM API Proxy & Resilience Library 
+# Universal LLM API Proxy & Resilience Library
 
 **One proxy. Any LLM provider. Zero code changes.**
 
@@ -17,7 +17,7 @@ This project consists of two components:
 - **One Endpoint, Many Providers** — Configure Gemini, OpenAI, Anthropic, and [any LiteLLM-supported provider](https://docs.litellm.ai/docs/providers) once. Access them all through a single API key
 - **Anthropic API Compatible** — Use Claude Code or any Anthropic SDK client with non-Anthropic providers like Gemini, OpenAI, or custom models
 - **Built-in Resilience** — Automatic key rotation, failover on errors, rate limit handling, and intelligent cooldowns
-- **Exclusive Provider Support** — Includes custom providers not available elsewhere: **Antigravity** (Gemini 3 + Claude Sonnet/Opus 4.5), **Gemini CLI**, **Qwen Code**, and **iFlow**
+- **Exclusive Provider Support** — Includes custom providers not available elsewhere: **Antigravity** (Gemini 3 + Claude Sonnet/Opus 4.5), **Gemini CLI**, **Qwen Code**, **iFlow**, **NVIDIA NIM**, **Colin**, **Chutes**, **Kilo Code**, **NanoGPT**, **OpenCode**, **Z.AI**, **Firmware**, and **Dynamic** (auto-from env vars)
 
 ---
 
@@ -28,8 +28,6 @@ This project consists of two components:
 1. **Download** the latest release from [GitHub Releases](https://github.com/ShmidtS/LLM-API-Key-Proxy/releases/latest)
 2. **Unzip** the downloaded file
 3. **Run** `proxy_app.exe` — the interactive TUI launcher opens
-
-<!-- TODO: Add TUI main menu screenshot here -->
 
 ### macOS / Linux
 
@@ -244,8 +242,6 @@ The proxy includes an interactive tool for managing all your API keys and OAuth 
 
 ### Using the TUI
 
-<!-- TODO: Add TUI credentials menu screenshot here -->
-
 1. Run the proxy without arguments to open the TUI
 2. Select **"🔑 Manage Credentials"**
 3. Choose to add API keys or OAuth credentials
@@ -327,8 +323,6 @@ See the [Library README](src/rotator_library/README.md) for complete documentati
 ## Interactive TUI
 
 The proxy includes a powerful text-based UI for configuration and management.
-
-<!-- TODO: Add TUI main menu screenshot here -->
 
 ### TUI Features
 

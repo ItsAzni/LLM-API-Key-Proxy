@@ -45,7 +45,7 @@ class TTLDict:
         self._data: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._maxsize = maxsize
         self._default_ttl = default_ttl
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # NOTE: threading.Lock blocks the event loop if called from async code; callers in oauth_base invoke TTLDict from async methods, but operations are fast in-memory dict lookups so blocking is negligible
 
     def _is_alive(self, entry: tuple[float, Any]) -> bool:
         return time.time() <= entry[0]

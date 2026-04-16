@@ -1284,11 +1284,6 @@ class ModelRegistry(metaclass=SingletonMeta):
 # Backward Compatibility Layer
 # ============================================================================
 
-# Alias for backward compatibility
-# Note: ModelInfo is now a real dataclass for extended model metadata
-# The old alias (ModelInfo = ModelMetadata) has been removed
-ModelInfoService = ModelRegistry
-
 # Compat wrapper — SingletonMeta handles singleton lifecycle
 def get_model_info_service() -> ModelRegistry:
     """Get or create the global registry instance (delegates to SingletonMeta)."""
@@ -1300,54 +1295,3 @@ async def init_model_info_service() -> ModelRegistry:
     registry = get_model_info_service()
     await registry.start()
     return registry
-
-
-# Compatibility shim - map old method names to new
-class _CompatibilityWrapper:
-    """Provides old API method names for gradual migration."""
-
-    def __init__(self, registry: ModelRegistry):
-        self._reg = registry
-
-    def get_model_info(self, model_id: str) -> Optional[ModelMetadata]:
-        return self._reg.lookup(model_id)
-
-    def get_cost_info(self, model_id: str) -> Optional[Dict[str, float]]:
-        return self._reg.get_pricing(model_id)
-
-    def calculate_cost(
-        self,
-        model_id: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-        cache_read_tokens: int = 0,
-        cache_creation_tokens: int = 0,
-    ) -> Optional[float]:
-        return self._reg.compute_cost(
-            model_id,
-            prompt_tokens,
-            completion_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-        )
-
-    def enrich_model_list(self, model_ids: List[str]) -> List[Dict[str, Any]]:
-        return self._reg.enrich_models(model_ids)
-
-    def get_all_source_models(self) -> Dict[str, Dict]:
-        return self._reg.all_raw_models()
-
-    def get_stats(self) -> Dict[str, Any]:
-        return self._reg.diagnostics()
-
-    async def start(self):
-        await self._reg.start()
-
-    async def stop(self):
-        await self._reg.stop()
-
-    async def wait_for_ready(self, timeout: float = 30.0) -> bool:
-        return await self._reg.await_ready(timeout)
-
-    def is_ready(self) -> bool:
-        return self._reg.is_ready

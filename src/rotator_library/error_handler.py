@@ -283,8 +283,8 @@ def _extract_retry_from_json_body(json_text: str) -> Optional[int]:
                     if result is not None:
                         return result
 
-    except (orjson.JSONDecodeError, IndexError, KeyError, TypeError):
-        pass
+    except (orjson.JSONDecodeError, IndexError, KeyError, TypeError) as e:
+        lib_logger.debug("Failed to extract retry info from response body: %s", e)
 
     return None
 
@@ -411,19 +411,6 @@ def get_retry_after(error: Exception) -> Optional[int]:
                 return result
 
     return None
-
-
-# SSE Stream Error Patterns
-STREAM_ABORT_INDICATORS = frozenset(
-    {
-        "finish_reason",  # When value is "error"
-        "native_finish_reason",  # When value is "abort"
-        "stream error",
-        "stream aborted",
-        "connection reset",
-        "mid-stream error",
-    }
-)
 
 
 def is_provider_abort(raw_response: Optional[Dict]) -> bool:
@@ -786,7 +773,7 @@ async def handle_429_error(
         return action
 
     # Step 3: Record 429 and correlate with other credentials
-    assessment = ip_throttle_detector.record_429(
+    assessment = await ip_throttle_detector.record_429(
         provider=provider,
         credential=mask_credential(credential),
         error_body=error_body,

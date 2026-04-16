@@ -321,7 +321,7 @@ class GoogleOAuthBase(AuthQueueMixin, OAuthMixin, OAuthFlowMixin, BaseTokenManag
         if path in self._credentials_cache:
             return self._credentials_cache[path]
 
-        async with self._get_lock(path):
+        async with await self._get_lock(path):
             if path in self._credentials_cache:
                 return self._credentials_cache[path]
 
@@ -415,7 +415,7 @@ class GoogleOAuthBase(AuthQueueMixin, OAuthMixin, OAuthFlowMixin, BaseTokenManag
     async def _refresh_token(
         self, path: str, creds: Dict[str, Any], force: bool = False
     ) -> Dict[str, Any]:
-        async with self._get_lock(path):
+        async with await self._get_lock(path):
             # Skip the expiry check if a refresh is being forced
             if not force and not self._is_token_expired(
                 self._credentials_cache.get(path, creds)

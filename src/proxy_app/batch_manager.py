@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ShmidtS
 
+"""Batch embedding request aggregation. Collects individual embedding requests and merges them into batched API calls for improved throughput."""
+
 import asyncio
 from typing import List, Dict, Any, Tuple
 import time
 from rotator_library import RotatingClient
 
 class EmbeddingBatcher:
+    """Aggregates individual embedding requests into batched calls. Collects requests via a queue, groups them by model, and sends batched API requests to reduce overhead."""
+
     def __init__(self, client: RotatingClient, batch_size: int = 64, timeout: float = 0.1):
+        """Initialize the batcher. Args: client: RotatingClient instance for making API calls. batch_size: Maximum number of requests per batch. timeout: Maximum seconds to wait before sending a partial batch."""
         self.client = client
         self.batch_size = batch_size
         self.timeout = timeout
@@ -15,11 +20,13 @@ class EmbeddingBatcher:
         self.worker_task = asyncio.create_task(self._batch_worker())
 
     async def add_request(self, request_data: Dict[str, Any]) -> Any:
+        """Submit a single embedding request and wait for its result. Args: request_data: Dict with model, input, and optional parameters. Returns: The embedding response for this specific request."""
         future = asyncio.Future()
         await self.queue.put((request_data, future))
         return await future
 
     async def _batch_worker(self):
+        """Background coroutine that gathers requests and sends batched API calls."""
         while True:
             batch, futures = await self._gather_batch()
             if not batch:
@@ -66,6 +73,7 @@ class EmbeddingBatcher:
                 raise
 
     async def _gather_batch(self) -> Tuple[List[Dict[str, Any]], List[asyncio.Future]]:
+        """Collect requests from the queue until batch_size or timeout is reached. Returns: Tuple of (batch request data list, corresponding futures list)."""
         batch = []
         futures = []
         start_time = time.time()
@@ -85,6 +93,7 @@ class EmbeddingBatcher:
         return batch, futures
 
     async def stop(self):
+        """Cancel the background worker and drain pending requests."""
         self.worker_task.cancel()
         try:
             await self.worker_task

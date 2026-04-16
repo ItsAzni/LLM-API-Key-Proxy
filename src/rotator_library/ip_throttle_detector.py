@@ -12,9 +12,9 @@ Detection heuristics:
 - Identical error_body hash between credentials (same error from same IP)
 """
 
+import asyncio
 import hashlib
 import logging
-import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -84,7 +84,7 @@ class IPThrottleDetector:
         detector = IPThrottleDetector()
 
         # Record a 429 error
-        assessment = detector.record_429(
+        assessment = await detector.record_429(
             provider="openai",
             credential="key_abc123",
             error_body='{"error": "Rate limit exceeded"}',
@@ -125,8 +125,8 @@ class IPThrottleDetector:
         self.ip_cooldown = ip_cooldown
         self.credential_cooldown = credential_cooldown
 
-        # Thread-safety lock for _records access
-        self._records_lock = threading.RLock()
+        # Lock for _records access
+        self._records_lock = asyncio.Lock()
 
         # Per-provider tracking: provider -> list of _ThrottleRecord
         self._records: Dict[str, List[_ThrottleRecord]] = defaultdict(list)
@@ -147,10 +147,10 @@ class IPThrottleDetector:
         normalized = "".join(error_body.split()).lower()
         return hashlib.md5(normalized.encode(), usedforsecurity=False).hexdigest()
 
-    def _cleanup_old_records(self, provider: str) -> None:
+    async def _cleanup_old_records(self, provider: str) -> None:
         """Remove records older than the detection window and enforce memory limit."""
         cutoff = time.monotonic() - self.window_seconds
-        with self._records_lock:
+        async with self._records_lock:
             self._records[provider] = [
                 r for r in self._records[provider] if r.timestamp > cutoff
             ]
@@ -160,7 +160,7 @@ class IPThrottleDetector:
                     -self.MAX_RECORDS_PER_PROVIDER :
                 ]
 
-    def record_429(
+    async def record_429(
         self,
         provider: str,
         credential: str,
@@ -193,14 +193,14 @@ class IPThrottleDetector:
             retry_after=retry_after,
             error_body=error_body[:500] if error_body else None,  # Truncate for storage
         )
-        with self._records_lock:
+        async with self._records_lock:
             self._records[provider].append(record)
 
         # Cleanup old records
-        self._cleanup_old_records(provider)
+        await self._cleanup_old_records(provider)
 
         # Assess throttle scope
-        assessment = self._assess_throttle_scope(provider)
+        assessment = await self._assess_throttle_scope(provider)
 
         # Override cooldown with retry_after if provided
         if retry_after and retry_after > assessment.suggested_cooldown:
@@ -213,7 +213,7 @@ class IPThrottleDetector:
 
         return assessment
 
-    def _assess_throttle_scope(self, provider: str) -> ThrottleAssessment:
+    async def _assess_throttle_scope(self, provider: str) -> ThrottleAssessment:
         """
         Assess the scope of throttling for a provider.
 
@@ -233,7 +233,7 @@ class IPThrottleDetector:
         Returns:
             ThrottleAssessment with detected scope and recommendations
         """
-        with self._records_lock:
+        async with self._records_lock:
             records = list(self._records[provider])
 
         if not records:
@@ -303,7 +303,7 @@ class IPThrottleDetector:
             },
         )
 
-    def get_active_ip_throttles(self) -> Dict[str, ThrottleAssessment]:
+    async def get_active_ip_throttles(self) -> Dict[str, ThrottleAssessment]:
         """
         Get all providers currently experiencing IP-level throttling.
 
@@ -311,35 +311,35 @@ class IPThrottleDetector:
             Dict mapping provider names to their ThrottleAssessment
         """
         result = {}
-        with self._records_lock:
+        async with self._records_lock:
             providers = list(self._records.keys())
         for provider in providers:
-            self._cleanup_old_records(provider)
-            with self._records_lock:
+            await self._cleanup_old_records(provider)
+            async with self._records_lock:
                 has_records = bool(self._records[provider])
             if has_records:
-                assessment = self._assess_throttle_scope(provider)
+                assessment = await self._assess_throttle_scope(provider)
                 if assessment.scope == ThrottleScope.IP:
                     result[provider] = assessment
         return result
 
-    def clear_provider(self, provider: str) -> None:
+    async def clear_provider(self, provider: str) -> None:
         """Clear all records for a provider (e.g., after cooldown expires)."""
-        with self._records_lock:
+        async with self._records_lock:
             if provider in self._records:
                 del self._records[provider]
         lib_logger.debug(f"IPThrottleDetector: cleared records for {provider}")
 
-    def clear_all(self) -> None:
+    async def clear_all(self) -> None:
         """Clear all records."""
-        with self._records_lock:
+        async with self._records_lock:
             self._records.clear()
             self._assessment_cache.clear()
         lib_logger.debug("IPThrottleDetector: cleared all records")
 
-    def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> Dict[str, Any]:
         """Get diagnostic statistics about the detector state."""
-        with self._records_lock:
+        async with self._records_lock:
             stats = {
                 "providers_tracked": len(self._records),
                 "total_records": sum(len(r) for r in self._records.values()),
@@ -368,11 +368,3 @@ def get_ip_throttle_detector() -> IPThrottleDetector:
     if _detector_instance is None:
         _detector_instance = IPThrottleDetector()
     return _detector_instance
-
-
-def reset_ip_throttle_detector() -> None:
-    """Reset the global IP throttle detector (mainly for testing)."""
-    global _detector_instance
-    if _detector_instance:
-        _detector_instance.clear_all()
-    _detector_instance = None

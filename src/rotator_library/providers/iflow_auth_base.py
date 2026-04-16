@@ -402,7 +402,7 @@ class IFlowAuthBase(GoogleOAuthBase):
         Refreshes the OAuth tokens and re-fetches the API key.
         CRITICAL: Must re-fetch user info to get potentially updated API key.
         """
-        async with self._get_lock(path):
+        async with await self._get_lock(path):
             cached_creds = self._credentials_cache.get(path)
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds

@@ -179,7 +179,3 @@ class RawIOLogger:
             metadata["reasoning_content"] = reasoning
 
         self._write_json("metadata.json", metadata)
-
-
-# Backward compatibility alias
-DetailedLogger = RawIOLogger

@@ -539,7 +539,6 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         # No conversion needed, return original
         self._resolve_model_id_cache[cache_key] = model
         return model
-        return model
 
     async def __aenter__(self):
         return self

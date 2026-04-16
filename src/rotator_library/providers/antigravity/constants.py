@@ -61,21 +61,6 @@ ANTIGRAVITY_HEADERS = {
     "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
 }
 
-# Headers to strip from incoming requests for privacy/security
-# These can potentially identify specific clients or leak sensitive info
-STRIPPED_CLIENT_HEADERS = {
-    "x-forwarded-for",
-    "x-real-ip",
-    "x-client-ip",
-    "cf-connecting-ip",
-    "true-client-ip",
-    "x-request-id",
-    "x-correlation-id",
-    "x-trace-id",
-    "x-amzn-trace-id",
-    "x-cloud-trace-context",
-}
-
 # Available models via Antigravity
 AVAILABLE_MODELS = [
     # Gemini models
@@ -422,20 +407,6 @@ def get_antigravity_preprompt_text() -> str:
         parts.append(override_instruction)
 
     return "\n".join(parts)
-
-
-def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
-    """
-    Strip identifiable client headers for privacy/security.
-
-    Removes headers that could potentially identify specific clients,
-    trace requests across systems, or leak sensitive information.
-    """
-    if not headers:
-        return headers
-    return {
-        k: v for k, v in headers.items() if k.lower() not in STRIPPED_CLIENT_HEADERS
-    }
 
 
 def _generate_request_id() -> str:

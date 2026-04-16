@@ -1478,27 +1478,3 @@ SCRAPED_PROVIDERS: dict[str, dict] = {
         "model_count": 9,
     },
 }
-
-
-def get_provider_route(provider_key: str) -> Optional[str]:
-    """Get the LiteLLM route prefix for a provider (without trailing slash)."""
-    info = SCRAPED_PROVIDERS.get(provider_key)
-    if info and info.get("route"):
-        return info["route"].rstrip("/")
-    return None
-
-
-def get_provider_api_key_var(provider_key: str) -> Optional[str]:
-    """Get the primary API key environment variable for a provider."""
-    info = SCRAPED_PROVIDERS.get(provider_key)
-    if info and info.get("api_key_env_vars"):
-        return info["api_key_env_vars"][0]
-    return None
-
-
-def get_provider_display_name(provider_key: str) -> str:
-    """Get the display name for a provider."""
-    info = SCRAPED_PROVIDERS.get(provider_key)
-    if info and info.get("display_name"):
-        return info["display_name"]
-    return provider_key.replace("_", " ").title()

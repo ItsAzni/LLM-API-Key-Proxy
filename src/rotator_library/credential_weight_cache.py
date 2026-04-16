@@ -342,10 +342,3 @@ class CredentialWeightCache(metaclass=SingletonMeta):
             lib_logger.info(f"Weight cache warmed up: {warmed} entries")
 
         return warmed
-
-
-# Singleton via SingletonMeta — use CredentialWeightCache() directly or .reset() to re-create
-# Compatibility wrapper for existing callers
-def get_weight_cache() -> CredentialWeightCache:
-    """Get the global weight cache singleton (thread-safe via SingletonMeta)."""
-    return CredentialWeightCache()
