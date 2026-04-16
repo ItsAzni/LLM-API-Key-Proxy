@@ -890,6 +890,6 @@ if __name__ == "__main__":
             app,
             host=args.host,
             port=args.port,
-            limit_concurrency=1000,
+            limit_concurrency=int(os.getenv("MAX_CONCURRENT_REQUESTS", "1000")),
             backlog=2048,
         )

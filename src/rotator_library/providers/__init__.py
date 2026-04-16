@@ -2,9 +2,13 @@
 # Copyright (c) 2026 ShmidtS
 
 import importlib
+import logging
 import pkgutil
 import os
 from typing import Dict, Type
+
+lib_logger = logging.getLogger("rotator_library")
+
 from .provider_interface import ProviderInterface
 from .gemini_auth_base import GeminiAuthBase
 from .qwen_auth_base import QwenAuthBase
@@ -57,8 +61,7 @@ def _try_load_from_module(module_path: str, provider_name: str):
             and attribute is not ProviderInterface
         ):
             PROVIDER_PLUGINS[provider_name] = attribute
-            import logging
-            logging.getLogger("rotator_library").debug(
+            lib_logger.debug(
                 f"Lazy-loaded provider: {provider_name}"
             )
             return attribute
@@ -162,8 +165,7 @@ def _ensure_dynamic_providers():
             # Create and register the plugin class
             plugin_class = create_plugin_class(provider_name)
             PROVIDER_PLUGINS[provider_name] = plugin_class
-            import logging
-            logging.getLogger("rotator_library").debug(
+            lib_logger.debug(
                 f"Registered dynamic provider: {provider_name}"
             )
 

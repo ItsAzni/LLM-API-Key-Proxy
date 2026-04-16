@@ -72,7 +72,7 @@ class OpenAICompatibleProvider(ProviderInterface):
             dynamic_models = [
                 f"{self.provider_name}/{model['id']}"
                 for model in response.json().get("data", [])
-                if model["id"] not in [m.split("/")[-1] for m in static_models]
+                if model["id"] not in {m.split("/")[-1] for m in static_models}
             ]
 
             if dynamic_models:

@@ -125,6 +125,16 @@ class AuthQueueMixin:
     - _is_token_truly_expired(creds): method to check if token is actually expired
     """
 
+    def _is_invalid_grant_error(self, error_body: str, status_code: int, error_type: str = "") -> bool:
+        """Check if an HTTP error indicates an invalid/expired refresh token needing re-auth.
+
+        Default: checks for 'invalid' in error body or 'invalid_request' error type.
+        Override in subclasses for provider-specific error patterns (e.g. Google checks 'invalid_grant').
+        """
+        if status_code == 400:
+            return "invalid" in error_body.lower() or error_type == "invalid_request"
+        return False
+
     # =========================================================================
     # LOCK MANAGEMENT
     # =========================================================================
@@ -339,13 +349,11 @@ class AuthQueueMixin:
                                 if not error_desc:
                                     error_desc = error_data.get("message", str(e))
                             except Exception:
+                                lib_logger.debug("Failed to parse OAuth error response JSON", exc_info=True)
                                 error_type = ""
                                 error_desc = str(e)
 
-                            if (
-                                "invalid" in error_desc.lower()
-                                or error_type == "invalid_request"
-                            ):
+                            if self._is_invalid_grant_error(error_desc, status_code, error_type):
                                 needs_reauth = True
                                 lib_logger.info(
                                     f"Credential '{Path(path).name}' needs re-auth (HTTP 400: {error_desc}). "
@@ -677,6 +685,34 @@ class OAuthFlowMixin:
     - _refresh_token(path, creds, force=False): async method
     - _execute_interactive_oauth(path, creds, display_name, provider_name, timeout): async method (from OAuthMixin)
     """
+
+    @staticmethod
+    def _generate_pkce_pair() -> tuple:
+        """Generate PKCE code_verifier and code_challenge pair.
+
+        PKCE (Proof Key for Code Exchange) prevents authorization code interception
+        attacks per RFC 7636. Uses URL-safe base64 encoding of random bytes + SHA-256.
+
+        Returns:
+            Tuple of (code_verifier, code_challenge)
+        """
+        import secrets
+        import hashlib
+        import base64
+
+        code_verifier = (
+            base64.urlsafe_b64encode(secrets.token_bytes(32))
+            .decode("utf-8")
+            .rstrip("=")
+        )
+        code_challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode("utf-8")).digest()
+            )
+            .decode("utf-8")
+            .rstrip("=")
+        )
+        return code_verifier, code_challenge
 
     async def initialize_token(
         self,

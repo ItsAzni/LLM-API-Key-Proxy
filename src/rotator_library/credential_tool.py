@@ -27,6 +27,8 @@ from .provider_ui_config import LITELLM_PROVIDERS, PROVIDER_CATEGORIES
 from .provider_routing_config import PROVIDER_BLACKLIST
 from .litellm_providers import SCRAPED_PROVIDERS
 
+_OAUTH_PROVIDERS = frozenset({"gemini_cli", "antigravity"})
+
 
 def _get_oauth_base_dir() -> Path:
     """Get the OAuth base directory (lazy, respects EXE vs script mode)."""
@@ -560,7 +562,7 @@ def _display_provider_credentials(provider_name: str):
     table.add_column("Email/Identifier", style="cyan")
 
     # Add tier/project columns for Google OAuth providers
-    if provider_name in ["gemini_cli", "antigravity"]:
+    if provider_name in _OAUTH_PROVIDERS:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
 
@@ -568,7 +570,7 @@ def _display_provider_credentials(provider_name: str):
         file_name = Path(cred["file_path"]).name
         email = cred.get("email", "unknown")
 
-        if provider_name in ["gemini_cli", "antigravity"]:
+        if provider_name in _OAUTH_PROVIDERS:
             tier = cred.get("tier", "-")
             project = cred.get("project_id", "-")
             if project and len(project) > 20:
@@ -801,7 +803,7 @@ async def _view_oauth_credentials_detail(provider_name: str):
     table.add_column("Email/Identifier", style="cyan")
 
     # Add tier/project columns for Google OAuth providers
-    if provider_name in ["gemini_cli", "antigravity"]:
+    if provider_name in _OAUTH_PROVIDERS:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
 
@@ -809,7 +811,7 @@ async def _view_oauth_credentials_detail(provider_name: str):
         file_name = Path(cred["file_path"]).name
         email = cred.get("email", "unknown")
 
-        if provider_name in ["gemini_cli", "antigravity"]:
+        if provider_name in _OAUTH_PROVIDERS:
             tier = _normalize_tier_name(cred.get("tier")) if cred.get("tier") else "-"
             project = cred.get("project_id", "-")
             if project and len(project) > 25:

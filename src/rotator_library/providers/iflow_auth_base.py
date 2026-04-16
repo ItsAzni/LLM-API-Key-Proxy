@@ -492,6 +492,7 @@ class IFlowAuthBase(GoogleOAuthBase):
                             if not error_desc:
                                 error_desc = error_data.get("message", error_body)
                         except Exception:
+                            lib_logger.debug("Failed to parse OAuth error response JSON", exc_info=True)
                             error_type = ""
                             error_desc = error_body
 

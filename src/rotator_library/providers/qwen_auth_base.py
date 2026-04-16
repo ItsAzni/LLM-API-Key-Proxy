@@ -3,9 +3,6 @@
 
 # src/rotator_library/providers/qwen_auth_base.py
 
-import secrets
-import hashlib
-import base64
 import time
 import asyncio
 import logging
@@ -29,11 +26,6 @@ from ..error_types import CredentialNeedsReauthError
 
 lib_logger = logging.getLogger("rotator_library")
 
-CLIENT_ID = (
-    "f0304373b74a44d2b584a3fb70ca9e56"  # https://api.kilocode.ai/extension-config.json
-)
-SCOPE = "openid profile email model.completion"
-TOKEN_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/token"
 console = Console()
 
 
@@ -45,7 +37,7 @@ class QwenAuthBase(GoogleOAuthBase):
     CLIENT_SECRET = ""  # Qwen uses public client (no secret)
     OAUTH_SCOPES = ["openid", "profile", "email", "model.completion"]
     ENV_PREFIX = "QWEN_CODE"
-    TOKEN_URI = TOKEN_ENDPOINT
+    TOKEN_URI = "https://chat.qwen.ai/api/v1/oauth2/token"
     REFRESH_EXPIRY_BUFFER_SECONDS = 3 * 60 * 60  # 3 hours buffer
     _cache_default_ttl: float = 14400.0  # 4hr: aligns with 3hr buffer + 1hr token lifetime
     BUFFER_ON_FAILURE: ClassVar[bool] = False
@@ -119,12 +111,12 @@ class QwenAuthBase(GoogleOAuthBase):
             for attempt in range(max_retries):
                 try:
                     response = await client.post(
-                        TOKEN_ENDPOINT,
+                        self.TOKEN_URI,
                         headers=headers,
                         data={
                             "grant_type": "refresh_token",
                             "refresh_token": refresh_token,
-                            "client_id": CLIENT_ID,
+                            "client_id": self.CLIENT_ID,
                         },
                         timeout=30.0,
                     )
@@ -150,6 +142,7 @@ class QwenAuthBase(GoogleOAuthBase):
                             error_type = error_data.get("error", "")
                             error_desc = error_data.get("error_description", "")
                         except Exception:
+                            lib_logger.debug("Failed to parse OAuth error response JSON", exc_info=True)
                             error_type = ""
                             error_desc = error_body
 
@@ -344,18 +337,7 @@ class QwenAuthBase(GoogleOAuthBase):
         # [HEADLESS DETECTION] Check if running in headless environment
         is_headless = is_headless_environment()
 
-        code_verifier = (
-            base64.urlsafe_b64encode(secrets.token_bytes(32))
-            .decode("utf-8")
-            .rstrip("=")
-        )
-        code_challenge = (
-            base64.urlsafe_b64encode(
-                hashlib.sha256(code_verifier.encode("utf-8")).digest()
-            )
-            .decode("utf-8")
-            .rstrip("=")
-        )
+        code_verifier, code_challenge = self._generate_pkce_pair()
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -365,8 +347,8 @@ class QwenAuthBase(GoogleOAuthBase):
         pool = await get_http_pool()
         client = await pool.get_client_async()
         request_data = {
-            "client_id": CLIENT_ID,
-            "scope": SCOPE,
+            "client_id": self.CLIENT_ID,
+            "scope": " ".join(self.OAUTH_SCOPES),
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
@@ -435,12 +417,12 @@ class QwenAuthBase(GoogleOAuthBase):
         ):
             while time.time() - start_time < dev_data["expires_in"]:
                 poll_response = await client.post(
-                    TOKEN_ENDPOINT,
+                    self.TOKEN_URI,
                     headers=headers,
                     data={
                         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                         "device_code": dev_data["device_code"],
-                        "client_id": CLIENT_ID,
+                        "client_id": self.CLIENT_ID,
                         "code_verifier": code_verifier,
                     },
                 )
