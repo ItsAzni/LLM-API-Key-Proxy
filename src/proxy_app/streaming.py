@@ -37,8 +37,6 @@ async def streaming_response_wrapper(
     usage_data = None
     finish_reason = None
     first_chunk_meta = None
-    _chunk_count = 0
-
     if logger is not None:
         final_message = {"role": "assistant"}
 
@@ -46,15 +44,10 @@ async def streaming_response_wrapper(
     try:
         _inc_streams(request)
     except AttributeError:
-        pass
+        logging.debug("stream_response: request lacks stream counter attribute on increment")
 
     try:
         async for chunk in response_stream:
-            _chunk_count += 1
-            if _chunk_count % 50 == 0:
-                if await request.is_disconnected():
-                    logging.warning("Client disconnected, stopping stream.")
-                    break
 
             # STREAM_DONE sentinel: emit SSE [DONE] and stop
             if chunk is STREAM_DONE:
@@ -171,7 +164,7 @@ async def streaming_response_wrapper(
         try:
             _dec_streams(request)
         except AttributeError:
-            logger.debug("stream_response: request lacks stream counter attribute on decrement")
+            logging.debug("stream_response: request lacks stream counter attribute on decrement")
         if logger:
             try:
                 if first_chunk_meta is not None:

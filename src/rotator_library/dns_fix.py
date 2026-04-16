@@ -333,7 +333,7 @@ def _custom_getaddrinfo_sync(
                     try:
                         dns_port = int(parts[1])
                     except ValueError:
-                        pass
+                        print(f"[DNS-FIX] Invalid DNS port in resolver: {dns_resolver}")
 
                 ip = _dns_query(host, dns_host, dns_port)
                 if ip:
@@ -426,7 +426,7 @@ def apply_dns_fix():
         try:
             dns_port = int(parts[1])
         except ValueError:
-            pass
+            print(f"[DNS-FIX] Invalid DNS port in resolver: {dns_resolver}")
 
     # Apply monkey-patch
     socket.getaddrinfo = _custom_getaddrinfo

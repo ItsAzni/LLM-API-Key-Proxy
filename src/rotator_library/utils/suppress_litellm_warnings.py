@@ -10,8 +10,9 @@ internal serialization. The warnings don't affect functionality.
 
 See: https://github.com/BerriAI/litellm/issues/11759
 
-TODO: Remove this workaround once litellm patches the issue above.
-      Check the GitHub issue for resolution status before removing.
+NOTE: litellm is pinned to <=1.82.6 for security (see requirements.txt).
+      This workaround stays pinned to that version constraint.
+      Re-evaluate only after updating the litellm pin.
 """
 
 import os

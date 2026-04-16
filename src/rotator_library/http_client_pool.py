@@ -320,8 +320,8 @@ class HttpClientPool(metaclass=SingletonMeta):
         # Use GzipRequestTransport for request body compression
         if HTTP_COMPRESS_REQUESTS:
             client_kwargs["transport"] = GzipRequestTransport(
-                verify=ssl_context,
                 limits=self._create_limits(),
+                verify=ssl_context,
                 http2=self._http2_enabled,
             )
 
@@ -549,7 +549,7 @@ class HttpClientPool(metaclass=SingletonMeta):
             self._orphan_close_tasks.add(task)
             task.add_done_callback(self._orphan_close_tasks.discard)
         except RuntimeError:
-            pass
+            lib_logger.debug("Could not schedule orphan client close")
 
     def _get_lazy_client(self, streaming: bool) -> httpx.AsyncClient:
         """
@@ -568,12 +568,25 @@ class HttpClientPool(metaclass=SingletonMeta):
         timeout = (
             TimeoutConfig.streaming() if streaming else TimeoutConfig.non_streaming()
         )
-        client = httpx.AsyncClient(
-            timeout=timeout,
-            limits=self._create_limits(),
-            follow_redirects=True,
-            verify=self._ssl_context,
-        )
+
+        # Build client kwargs consistent with _create_client()
+        client_kwargs = {
+            "timeout": timeout,
+            "limits": self._create_limits(),
+            "follow_redirects": True,
+            "http2": self._http2_enabled,
+            "http1": True,
+            "verify": self._ssl_context,
+        }
+
+        if HTTP_COMPRESS_REQUESTS:
+            client_kwargs["transport"] = GzipRequestTransport(
+                limits=self._create_limits(),
+                verify=self._ssl_context,
+                http2=self._http2_enabled,
+            )
+
+        client = httpx.AsyncClient(**client_kwargs)
 
         # Store in pool so close() can clean it up
         # Guard: close() may have set the attr to None concurrently

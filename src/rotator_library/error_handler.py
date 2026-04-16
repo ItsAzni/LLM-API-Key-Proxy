@@ -373,7 +373,7 @@ def get_retry_after(error: Exception) -> Optional[int]:
                 if wait_seconds > 0:
                     return wait_seconds
             except (ValueError, TypeError):
-                pass
+                lib_logger.debug("Invalid retry-after header value: %s", reset_header)
 
     # 1. Try to parse JSON from the error string representation
     # Some exceptions embed JSON in their string representation
@@ -530,12 +530,12 @@ def _get_provider_backoff_config(provider: Optional[str]) -> Dict[str, float]:
             try:
                 config["server_error_base"] = float(os.environ["KILOCODE_BACKOFF_BASE"])
             except ValueError:
-                pass
+                lib_logger.debug("Invalid KILOCODE_BACKOFF_BASE value")
         if "KILOCODE_MAX_BACKOFF" in os.environ:
             try:
                 config["max_backoff"] = float(os.environ["KILOCODE_MAX_BACKOFF"])
             except ValueError:
-                pass
+                lib_logger.debug("Invalid KILOCODE_MAX_BACKOFF value")
 
     # Env var overrides for inception
     if provider == 'inception':
@@ -543,12 +543,12 @@ def _get_provider_backoff_config(provider: Optional[str]) -> Dict[str, float]:
             try:
                 config['server_error_base'] = float(os.environ['INCEPTION_BACKOFF_BASE'])
             except ValueError:
-                pass
+                lib_logger.debug("Invalid INCEPTION_BACKOFF_BASE value")
         if 'INCEPTION_MAX_BACKOFF' in os.environ:
             try:
                 config['max_backoff'] = float(os.environ['INCEPTION_MAX_BACKOFF'])
             except ValueError:
-                pass
+                lib_logger.debug("Invalid INCEPTION_MAX_BACKOFF value")
 
     return config
 
