@@ -6,7 +6,6 @@ litellm cache reset, safety settings, model ignore/whitelist, litellm logger,
 provider resolution."""
 
 import asyncio
-import fnmatch
 import logging
 import random
 import time
@@ -24,9 +23,7 @@ if TYPE_CHECKING:
 from ..env_cache import _provider_env_cache
 from ..error_types import mask_credential
 from ..http_client_pool import HttpClientPool, close_http_pool, get_http_pool
-from ..providers.openai_compatible_provider import OpenAICompatibleProvider
 from ..providers.utilities import DEFAULT_GENERIC_SAFETY_SETTINGS, DEFAULT_SAFETY_SETTINGS
-from ..utils.model_utils import get_or_create_provider_instance
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -40,42 +37,6 @@ class HelpersMixin:
             return {}
         headers = getattr(request, "headers", None)
         return dict(headers) if headers else {}
-
-    async def _prepare_request_kwargs(
-        self,
-        base_kwargs: Dict[str, Any],
-        provider: str,
-        credential: str,
-        model: str,
-        *,
-        include_reasoning_effort: bool = False,
-    ) -> Dict[str, Any]:
-        """Clone and normalize per-attempt request kwargs before provider execution."""
-        litellm_kwargs = base_kwargs.copy()
-
-        self._strip_client_headers(litellm_kwargs)
-        await self._apply_provider_headers(litellm_kwargs, provider, credential)
-
-        if include_reasoning_effort and "reasoning_effort" in base_kwargs:
-            litellm_kwargs["reasoning_effort"] = base_kwargs["reasoning_effort"]
-
-        if provider in self.litellm_provider_params:
-            litellm_kwargs["litellm_params"] = {
-                **self.litellm_provider_params[provider],
-                **litellm_kwargs.get("litellm_params", {}),
-            }
-
-        provider_plugin = self._get_provider_instance(provider)
-        if provider_plugin and hasattr(provider_plugin, "get_model_options"):
-            model_options = provider_plugin.get_model_options(model)
-            if model_options:
-                for key, value in model_options.items():
-                    if key == "reasoning_effort":
-                        litellm_kwargs["reasoning_effort"] = value
-                    elif key not in litellm_kwargs:
-                        litellm_kwargs[key] = value
-
-        return litellm_kwargs
 
     async def _sleep_within_budget(
         self, attempt: int, deadline: float, classified_error: "ClassifiedError"
@@ -444,72 +405,6 @@ class HelpersMixin:
         from ..client_config import parse_custom_cap_env_key
         return parse_custom_cap_env_key(remainder)
 
-    def _is_model_ignored(self, provider: str, model_id: str) -> bool:
-        """
-        Checks if a model should be ignored based on the ignore list.
-        Supports full glob/fnmatch patterns for both full model IDs and model names.
-
-        Pattern examples:
-        - "gpt-4" - exact match
-        - "gpt-4*" - prefix wildcard (matches gpt-4, gpt-4-turbo, etc.)
-        - "*-preview" - suffix wildcard (matches gpt-4-preview, o1-preview, etc.)
-        - "*-preview*" - contains wildcard (matches anything with -preview)
-        - "*" - match all
-        """
-        model_provider = model_id.split("/")[0]
-        if model_provider not in self.ignore_models:
-            return False
-
-        ignore_list = self.ignore_models[model_provider]
-        if ignore_list == ["*"]:
-            return True
-
-        try:
-            # This is the model name as the provider sees it (e.g., "gpt-4" or "google/gemma-7b")
-            provider_model_name = model_id.split("/", 1)[1]
-        except IndexError:
-            provider_model_name = model_id
-
-        for ignored_pattern in ignore_list:
-            # Use fnmatch for full glob pattern support
-            if fnmatch.fnmatch(provider_model_name, ignored_pattern) or fnmatch.fnmatch(
-                model_id, ignored_pattern
-            ):
-                return True
-        return False
-
-    def _is_model_whitelisted(self, provider: str, model_id: str) -> bool:
-        """
-        Checks if a model is explicitly whitelisted.
-        Supports full glob/fnmatch patterns for both full model IDs and model names.
-
-        Pattern examples:
-        - "gpt-4" - exact match
-        - "gpt-4*" - prefix wildcard (matches gpt-4, gpt-4-turbo, etc.)
-        - "*-preview" - suffix wildcard (matches gpt-4-preview, o1-preview, etc.)
-        - "*-preview*" - contains wildcard (matches anything with -preview)
-        - "*" - match all
-        """
-        model_provider = model_id.split("/")[0]
-        if model_provider not in self.whitelist_models:
-            return False
-
-        whitelist = self.whitelist_models[model_provider]
-
-        try:
-            # This is the model name as the provider sees it (e.g., "gpt-4" or "google/gemma-7b")
-            provider_model_name = model_id.split("/", 1)[1]
-        except IndexError:
-            provider_model_name = model_id
-
-        for whitelisted_pattern in whitelist:
-            # Use fnmatch for full glob pattern support
-            if fnmatch.fnmatch(
-                provider_model_name, whitelisted_pattern
-            ) or fnmatch.fnmatch(model_id, whitelisted_pattern):
-                return True
-        return False
-
     def _sanitize_litellm_log(self, log_data: dict) -> dict:
         """
         Recursively removes large data fields and sensitive information from litellm log
@@ -737,110 +632,3 @@ class HelpersMixin:
     def get_oauth_credentials(self) -> Dict[str, List[str]]:
         return self.oauth_credentials
 
-    def _is_custom_openai_compatible_provider(self, provider_name: str) -> bool:
-        """
-        Checks if a provider is a custom OpenAI-compatible provider.
-
-        Custom providers are identified by:
-        1. Having a _API_BASE environment variable set, AND
-        2. NOT being in the list of known LiteLLM providers
-        """
-        return self.provider_config.is_custom_provider(provider_name)
-
-    def _build_credential_to_provider_map(self) -> Dict[str, str]:
-        """Build a reverse mapping from credential identifier to provider name."""
-        mapping: Dict[str, str] = {}
-        for provider, creds in self.all_credentials.items():
-            for cred in creds:
-                mapping[cred] = provider
-        return mapping
-
-    def _get_provider_instance(self, provider_name: str):
-        """
-        Lazily initializes and returns a provider instance.
-        Only initializes providers that have configured credentials.
-
-        Args:
-            provider_name: The name of the provider to get an instance for.
-                          For OAuth providers, this may include "_oauth" suffix
-                          (e.g., "antigravity_oauth"), but credentials are stored
-                          under the base name (e.g., "antigravity").
-
-        Returns:
-            Provider instance if credentials exist, None otherwise.
-        """
-        # For OAuth providers, credentials are stored under base name (without _oauth suffix)
-        # e.g., "antigravity_oauth" plugin -> credentials under "antigravity"
-        credential_key = provider_name
-        if provider_name.endswith("_oauth"):
-            base_name = provider_name[:-6]  # Remove "_oauth"
-            if base_name in self.oauth_providers:
-                credential_key = base_name
-
-        # Only initialize providers for which we have credentials
-        if credential_key not in self.all_credentials:
-            lib_logger.debug(
-                f"Skipping provider '{provider_name}' initialization: no credentials configured"
-            )
-            return None
-
-        # Try shared lazy-load path first
-        result = get_or_create_provider_instance(
-            provider_name, self._provider_plugins, self._provider_instances
-        )
-        if result is not None:
-            return result
-
-        # Client-specific fallback: custom OpenAI-compatible providers
-        if self._is_custom_openai_compatible_provider(provider_name):
-            try:
-                instance = OpenAICompatibleProvider(provider_name)
-                self._provider_instances.register(provider_name, instance)
-                return instance
-            except ValueError:
-                return None
-        else:
-            # Check if already registered (e.g. by usage_manager)
-            return self._provider_instances.get(provider_name)
-
-    def _resolve_model_id(self, model: str, provider: str) -> str:
-        """
-        Resolves the actual model ID to send to the provider.
-
-        For custom models with name/ID mappings, returns the ID.
-        Otherwise, returns the model name unchanged.
-
-        Results are cached with TTL to avoid repeated provider lookups.
-        Cache is invalidated when providers are refreshed.
-
-        Args:
-            model: Full model string with provider (e.g., "iflow/DS-v3.2")
-            provider: Provider name (e.g., "iflow")
-
-        Returns:
-            Full model string with ID (e.g., "iflow/deepseek-v3.2")
-        """
-        cache_key = (model, provider)
-        cached = self._resolve_model_id_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # Extract model name from "provider/model_name" format
-        model_name = model.split("/")[-1] if "/" in model else model
-
-        # Try to get provider instance to check for model definitions
-        provider_plugin = self._get_provider_instance(provider)
-
-        # Check if provider has model definitions
-        if provider_plugin and hasattr(provider_plugin, "model_definitions"):
-            model_id = provider_plugin.model_definitions.get_model_id(
-                provider, model_name
-            )
-            if model_id and model_id != model_name:
-                result = f"{provider}/{model_id}"
-                self._resolve_model_id_cache[cache_key] = result
-                return result
-
-        # No conversion needed, return original
-        self._resolve_model_id_cache[cache_key] = model
-        return model

@@ -108,7 +108,8 @@ if _env_files_found:
 # Get proxy API key for display
 _early_proxy_api_key = os.getenv("PROXY_API_KEY")
 if _early_proxy_api_key:
-    key_display = f"✓ {_early_proxy_api_key}"
+    _masked = _early_proxy_api_key[:4] + "..." + _early_proxy_api_key[-4:] if len(_early_proxy_api_key) > 8 else "***"
+    key_display = f"✓ {_masked}"
 else:
     key_display = "✗ Not Set (INSECURE - anyone can access!)"
 
@@ -134,7 +135,6 @@ with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
 
 print("  → Loading core dependencies...")
 with _console.status("[dim]Loading core dependencies...", spinner="dots"):
-    from dotenv import load_dotenv
     import colorlog
     import json
     import orjson
@@ -181,7 +181,7 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from proxy_app.batch_manager import EmbeddingBatcher
 
 # Import extracted modules
-from proxy_app.middleware import _NoGzipForSSE
+from proxy_app.middleware import _NoGzipForSSE, SecurityHeadersMiddleware
 from proxy_app.logging_config import RotatorDebugFilter, NoLiteLLMLogFilter
 from proxy_app.dependencies import _streams_lock
 
@@ -301,30 +301,8 @@ PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 # Pre-build Bearer string once to avoid f-string on every request
 _BEARER_PROXY_API_KEY = f"Bearer {PROXY_API_KEY}" if PROXY_API_KEY else None
 
-# Inject API key config into dependencies module so route handlers can use it
-from proxy_app import dependencies as _deps
-
-_deps.PROXY_API_KEY = PROXY_API_KEY
-_deps._BEARER_PROXY_API_KEY = _BEARER_PROXY_API_KEY
-
-# Cache OVERRIDE_TEMPERATURE_ZERO at module load time (called on every request otherwise)
+# Cache OVERRIDE_TEMPERATURE_ZERO at module load time (stored on app.state during lifespan)
 OVERRIDE_TEMP_ZERO = os.getenv("OVERRIDE_TEMPERATURE_ZERO", "false").lower()
-
-# Inject into chat route module
-from proxy_app.routes import chat as _chat_mod
-
-_chat_mod.OVERRIDE_TEMP_ZERO = OVERRIDE_TEMP_ZERO
-_chat_mod.ENABLE_RAW_LOGGING = ENABLE_RAW_LOGGING
-
-# Inject into embeddings route module
-from proxy_app.routes import embeddings as _emb_mod
-
-_emb_mod.USE_EMBEDDING_BATCHER = USE_EMBEDDING_BATCHER
-
-# Inject into anthropic route module
-from proxy_app.routes import anthropic as _anthro_mod
-
-_anthro_mod.ENABLE_RAW_LOGGING = ENABLE_RAW_LOGGING
 
 # Discover API keys from environment variables
 api_keys = {}
@@ -400,6 +378,14 @@ for key, value in os.environ.items():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the RotatingClient's lifecycle with the app's lifespan."""
+    # Startup guard: warn if PROXY_API_KEY is missing and auth not explicitly disabled
+    if not os.getenv("PROXY_API_KEY") and os.getenv("ALLOW_NO_AUTH", "").lower() != "true":
+        logging.warning("=" * 70)
+        logging.warning("SECURITY: PROXY_API_KEY is not set and ALLOW_NO_AUTH is not enabled!")
+        logging.warning("Your proxy is running WITHOUT authentication — anyone can access it.")
+        logging.warning("Set PROXY_API_KEY in .env or set ALLOW_NO_AUTH=true to suppress this warning.")
+        logging.warning("=" * 70)
+
     # Suppress noisy ConnectionResetError from Windows ProactorEventLoop
     # High-TPS providers (fireworks, friendli) forcefully close connections
     # after streaming, causing socket.shutdown() to throw in cleanup callbacks.
@@ -610,9 +596,8 @@ async def lifespan(app: FastAPI):
     # This reduces startup time by ~200-500ms compared to sequential execution
     async def init_http_pool():
         """Initialize HTTP pool with pre-warmed connections."""
-        endpoints = client._get_provider_endpoints()
         await client._ensure_http_pool()
-        return len(endpoints)
+        return len(client._provider_endpoints)
 
     async def init_model_info():
         """Initialize model info service."""
@@ -639,6 +624,11 @@ async def lifespan(app: FastAPI):
     client.background_refresher.start()  # Start the background task
     app.state.rotating_client = client
     app.state.active_streams = 0
+    app.state.proxy_api_key = PROXY_API_KEY
+    app.state.bearer_proxy_api_key = _BEARER_PROXY_API_KEY
+    app.state.override_temp_zero = OVERRIDE_TEMP_ZERO
+    app.state.enable_raw_logging = ENABLE_RAW_LOGGING
+    app.state.use_embedding_batcher = USE_EMBEDDING_BATCHER
 
     # Warn if no provider credentials are configured
     if not client.all_credentials:
@@ -742,11 +732,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Add CORS middleware to allow all origins, methods, and headers
+# Add CORS middleware with env-configured origins
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if _cors_origins_env.strip():
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+else:
+    logging.warning("CORS_ALLOWED_ORIGINS not set — allowing all origins (set CORS_ALLOWED_ORIGINS to restrict)")
+    _cors_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=False,  # Must be False when allow_origins=["*"] per CORS spec
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
     expose_headers=[
@@ -761,6 +757,9 @@ app.add_middleware(
 
 # SSE-aware gzip: compresses non-streaming responses >= minimum_size, passes SSE through raw
 app.add_middleware(_NoGzipForSSE, minimum_size=1000)
+
+# Security headers: X-Content-Type-Options, X-Frame-Options, Referrer-Policy
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # --- Register route modules ---

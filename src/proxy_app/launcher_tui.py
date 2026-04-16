@@ -433,7 +433,8 @@ class LauncherTUI:
         # Show actual API key value
         proxy_key = _get_proxy_api_key()
         if proxy_key:
-            self.console.print(f"   Proxy API Key:       {proxy_key}")
+            _masked = proxy_key[:4] + "..." + proxy_key[-4:] if len(proxy_key) > 8 else "***"
+            self.console.print(f"   Proxy API Key:       {_masked}")
         else:
             self.console.print("   Proxy API Key:       [red]Not Set (INSECURE!)[/red]")
 
@@ -753,7 +754,8 @@ class LauncherTUI:
                 self.console.print(f"   Port:               {default_port}")
                 self.console.print("   Transaction Logging: Disabled")
                 self.console.print("   Raw I/O Logging:    Disabled")
-                self.console.print(f"   Proxy API Key:      {default_api_key}")
+                _default_masked = default_api_key[:4] + "..." + default_api_key[-4:] if len(default_api_key) > 8 else "***"
+                self.console.print(f"   Proxy API Key:      {_default_masked}")
             elif choice == "7":
                 break
 

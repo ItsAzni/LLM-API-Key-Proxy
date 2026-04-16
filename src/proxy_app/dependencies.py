@@ -17,12 +17,6 @@ from proxy_app.batch_manager import EmbeddingBatcher
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 anthropic_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
-# These are set once by main.py after environment loading, before any requests are served.
-# They are read-only during request handling, so no race condition exists in the
-# single-threaded asyncio event loop. Moving to app.state would be cleaner but
-# requires refactoring all route imports that reference these module-level names.
-PROXY_API_KEY: str = None
-_BEARER_PROXY_API_KEY: str = None
 
 _streams_lock = asyncio.Lock()
 
@@ -93,17 +87,20 @@ async def track_stream(request: Request, stream: AsyncGenerator[Any, None]) -> A
             logger.debug("track_stream: request lacks stream counter attribute on decrement")
 
 
-async def verify_api_key(auth: str = Depends(api_key_header)):
+async def verify_api_key(request: Request, auth: str = Depends(api_key_header)):
     """Dependency to verify the proxy API key."""
+    proxy_api_key = getattr(request.app.state, "proxy_api_key", None)
+    bearer_key = getattr(request.app.state, "bearer_proxy_api_key", None)
     # If PROXY_API_KEY is not set or empty, skip verification (open access)
-    if not PROXY_API_KEY:
+    if not proxy_api_key:
         return auth
-    if not auth or not hmac.compare_digest(auth, _BEARER_PROXY_API_KEY):
+    if not auth or not bearer_key or not hmac.compare_digest(auth, bearer_key):
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     return auth
 
 
 async def verify_anthropic_api_key(
+    request: Request,
     x_api_key: str = Depends(anthropic_api_key_header),
     auth: str = Depends(api_key_header),
 ):
@@ -111,13 +108,15 @@ async def verify_anthropic_api_key(
     Dependency to verify API key for Anthropic endpoints.
     Accepts either x-api-key header (Anthropic style) or Authorization Bearer (OpenAI style).
     """
+    proxy_api_key = getattr(request.app.state, "proxy_api_key", None)
+    bearer_key = getattr(request.app.state, "bearer_proxy_api_key", None)
     # If PROXY_API_KEY is not set or empty, skip verification (open access)
-    if not PROXY_API_KEY:
+    if not proxy_api_key:
         return x_api_key or auth
     # Check x-api-key first (Anthropic style)
-    if x_api_key and hmac.compare_digest(x_api_key, PROXY_API_KEY):
+    if x_api_key and hmac.compare_digest(x_api_key, proxy_api_key):
         return x_api_key
     # Fall back to Bearer token (OpenAI style)
-    if auth and hmac.compare_digest(auth, _BEARER_PROXY_API_KEY):
+    if auth and bearer_key and hmac.compare_digest(auth, bearer_key):
         return auth
     raise HTTPException(status_code=401, detail="Invalid or missing API Key")

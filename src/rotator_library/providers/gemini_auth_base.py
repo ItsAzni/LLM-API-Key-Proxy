@@ -4,6 +4,7 @@
 # src/rotator_library/providers/gemini_auth_base.py
 
 import logging
+import os
 
 from ..utils.ttl_dict import TTLDict
 from .google_oauth_base import GoogleOAuthBase
@@ -11,6 +12,10 @@ from .utilities.gemini_shared_utils import CODE_ASSIST_ENDPOINT
 from .utilities.google_project_discovery import GoogleProjectDiscoveryMixin
 
 lib_logger = logging.getLogger("rotator_library")
+
+_GEMINI_CLIENT_SECRET: str = os.environ.get("GEMINI_CLIENT_SECRET", "")
+if not _GEMINI_CLIENT_SECRET:
+    logging.getLogger(__name__).warning("GEMINI_CLIENT_SECRET not set — OAuth will fail")
 
 # Headers for Gemini CLI auth/discovery calls (loadCodeAssist, onboardUser, etc.)
 #
@@ -45,7 +50,7 @@ class GeminiAuthBase(GoogleProjectDiscoveryMixin, GoogleOAuthBase):
     CLIENT_ID = (
         "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
     )
-    CLIENT_SECRET = "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"
+    CLIENT_SECRET = _GEMINI_CLIENT_SECRET
     OAUTH_SCOPES = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",

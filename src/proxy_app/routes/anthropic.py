@@ -20,8 +20,6 @@ from proxy_app.routes.error_handler import handle_route_errors
 
 router = APIRouter(tags=["anthropic"])
 
-# Set by main.py after config loading
-ENABLE_RAW_LOGGING: bool = False
 
 
 @router.post("/v1/messages")
@@ -40,7 +38,8 @@ async def anthropic_messages(
     This endpoint is compatible with Claude Code and other Anthropic API clients.
     """
     # Initialize raw I/O logger if enabled (for debugging proxy boundary)
-    logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
+    enable_raw_logging = getattr(request.app.state, "enable_raw_logging", False)
+    logger = RawIOLogger() if enable_raw_logging else None
 
     # Parse raw body once with orjson — avoid double Pydantic validate-then-dump round-trip
     body_data = orjson.loads(await request.body())

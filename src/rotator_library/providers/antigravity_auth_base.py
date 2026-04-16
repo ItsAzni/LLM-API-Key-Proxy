@@ -4,6 +4,7 @@
 # src/rotator_library/providers/antigravity_auth_base.py
 
 import logging
+import os
 
 from ..utils.ttl_dict import TTLDict
 from .google_oauth_base import GoogleOAuthBase
@@ -14,6 +15,10 @@ from .utilities.gemini_shared_utils import (
 from .utilities.google_project_discovery import GoogleProjectDiscoveryMixin
 
 lib_logger = logging.getLogger("rotator_library")
+
+_ANTIGRAVITY_CLIENT_SECRET: str = os.environ.get("ANTIGRAVITY_CLIENT_SECRET", "")
+if not _ANTIGRAVITY_CLIENT_SECRET:
+    logging.getLogger(__name__).warning("ANTIGRAVITY_CLIENT_SECRET not set — OAuth will fail")
 
 # Headers for Antigravity auth/discovery calls (loadCodeAssist, onboardUser)
 # CRITICAL: User-Agent MUST be google-api-nodejs-client/* for standard-tier detection.
@@ -40,7 +45,7 @@ class AntigravityAuthBase(GoogleProjectDiscoveryMixin, GoogleOAuthBase):
     CLIENT_ID = (
         "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
     )
-    CLIENT_SECRET = "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"
+    CLIENT_SECRET = _ANTIGRAVITY_CLIENT_SECRET
     OAUTH_SCOPES = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",

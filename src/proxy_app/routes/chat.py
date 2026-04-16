@@ -16,9 +16,6 @@ from proxy_app.routes.error_handler import handle_route_errors
 
 router = APIRouter(tags=["chat"])
 
-# Set by main.py after config loading
-ENABLE_RAW_LOGGING: bool = False
-OVERRIDE_TEMP_ZERO: str = "false"
 ENABLE_REQUEST_LOGGING: bool = False
 
 
@@ -34,7 +31,8 @@ async def chat_completions(
     Handles both streaming and non-streaming responses and logs them.
     """
     # Raw I/O logger captures unmodified HTTP data at proxy boundary (disabled by default)
-    raw_logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
+    enable_raw_logging = getattr(request.app.state, "enable_raw_logging", False)
+    raw_logger = RawIOLogger() if enable_raw_logging else None
     request_data: dict = {}
     try:
         # Read and parse the request body only once at the beginning.
@@ -44,7 +42,7 @@ async def chat_completions(
         # Low temperature makes models deterministic and prone to following training data
         # instead of actual schemas, which can cause tool hallucination
         # Modes: "remove" = delete temperature key, "set" = change to 1.0, "false" = disabled
-        override_temp_zero = OVERRIDE_TEMP_ZERO
+        override_temp_zero = getattr(request.app.state, "override_temp_zero", "false")
 
         if (
             override_temp_zero in ("remove", "set", "true", "1", "yes")

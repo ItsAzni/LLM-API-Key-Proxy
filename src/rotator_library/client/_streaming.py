@@ -15,6 +15,8 @@ from ..utils.json_utils import STREAM_DONE
 
 lib_logger = logging.getLogger("rotator_library")
 
+_MAX_LOGGED_CHUNKS = 10000
+
 
 class _StreamedException(Exception):
     """Internal exception to break out of the streaming while-loop on error."""
@@ -255,6 +257,7 @@ class StreamingMixin:
         """
         from ..transaction_logger import TransactionLogger
 
+        MAX_LOGGED_CHUNKS = _MAX_LOGGED_CHUNKS
         chunks = []
         try:
             async for chunk in stream:
@@ -265,7 +268,8 @@ class StreamingMixin:
                     transaction_logger
                     and isinstance(chunk, dict)
                 ):
-                    chunks.append(chunk)
+                    if len(chunks) < MAX_LOGGED_CHUNKS:
+                        chunks.append(chunk)
                     await transaction_logger.log_stream_chunk(chunk)
         finally:
             # Assemble and log final response after stream ends

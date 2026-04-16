@@ -1,6 +1,40 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ShmidtS
 
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
+
+
+class SecurityHeadersMiddleware:
+    """Starlette middleware that adds security headers to every HTTP response."""
+
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                existing = {
+                    (h[0].decode("latin-1") if isinstance(h[0], bytes) else h[0]).lower()
+                    for h in headers
+                }
+                for name, value in SECURITY_HEADERS.items():
+                    if name.lower() not in existing:
+                        headers.append((name.encode(), value.encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, _send)
+
+
 class _NoGzipForSSE:
     """GZip middleware that skips compression for streaming responses.
 

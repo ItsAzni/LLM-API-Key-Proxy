@@ -72,7 +72,7 @@ def handle_route_errors(
                 elif error_format == "openai":
                     raise HTTPException(
                         status_code=500,
-                        detail=make_error_response(str(e), "api_error"),
+                        detail=make_error_response("Internal server error", "api_error"),
                     )
                 else:
                     raise HTTPException(

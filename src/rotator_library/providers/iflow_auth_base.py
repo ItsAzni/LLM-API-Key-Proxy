@@ -38,7 +38,9 @@ IFLOW_ERROR_REDIRECT_URL = "https://iflow.cn/oauth/error"
 
 # Client credentials provided by iFlow
 IFLOW_CLIENT_ID = "10009311001"
-IFLOW_CLIENT_SECRET = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
+IFLOW_CLIENT_SECRET: str = os.environ.get("IFLOW_CLIENT_SECRET", "")
+if not IFLOW_CLIENT_SECRET:
+    logging.getLogger(__name__).warning("IFLOW_CLIENT_SECRET not set — OAuth will fail")
 
 # Local callback server port
 CALLBACK_PORT = 11451
@@ -304,8 +306,11 @@ class IFlowAuthBase(GoogleOAuthBase):
         if not access_token or not access_token.strip():
             raise ValueError("Access token is empty")
 
-        url = f"{IFLOW_USER_INFO_ENDPOINT}?accessToken={access_token}"
-        headers = {"Accept": "application/json"}
+        url = IFLOW_USER_INFO_ENDPOINT
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        }
 
         pool = await get_http_pool()
         client = await pool.get_client_async()

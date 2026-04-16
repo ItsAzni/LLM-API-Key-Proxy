@@ -16,8 +16,6 @@ from proxy_app.request_logger import log_request_to_console
 
 router = APIRouter(tags=["embeddings"])
 
-# Set by main.py after config loading
-USE_EMBEDDING_BATCHER: bool = False
 
 
 @router.post("/v1/embeddings")
@@ -43,7 +41,7 @@ async def embeddings(
             client_info=(request.client.host, request.client.port),
             request_data=request_data,
         )
-        if USE_EMBEDDING_BATCHER and batcher:
+        if getattr(request.app.state, "use_embedding_batcher", False) and batcher:
             # --- Server-Side Batching Logic ---
             inputs = request_data.get("input", [])
             if isinstance(inputs, str):
