@@ -18,33 +18,26 @@ api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 anthropic_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
 
-_streams_lock = asyncio.Lock()
-
-
 async def _inc_streams(request):
-    async with _streams_lock:
-        request.app.state.active_streams += 1
+    request.app.state.active_streams += 1
 
 
 async def _dec_streams(request):
-    async with _streams_lock:
-        request.app.state.active_streams -= 1
+    request.app.state.active_streams -= 1
 
 
 async def _register_stream_gen(request, gen):
     """Register a stream generator for graceful shutdown cancellation."""
-    async with _streams_lock:
-        if not hasattr(request.app.state, "active_stream_gens"):
-            request.app.state.active_stream_gens = []
-        request.app.state.active_stream_gens.append(gen)
+    if not hasattr(request.app.state, "active_stream_gens"):
+        request.app.state.active_stream_gens = set()
+    request.app.state.active_stream_gens.add(gen)
 
 
 async def _unregister_stream_gen(request, gen):
     """Unregister a stream generator after completion."""
-    async with _streams_lock:
-        gens = getattr(request.app.state, "active_stream_gens", None)
-        if gens and gen in gens:
-            gens.remove(gen)
+    gens = getattr(request.app.state, "active_stream_gens", None)
+    if gens:
+        gens.discard(gen)
 
 
 def get_rotating_client(request: Request) -> RotatingClient:

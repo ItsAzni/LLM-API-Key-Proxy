@@ -349,8 +349,8 @@ async def anthropic_streaming_wrapper_fast(
 
                 try:
                     chunk = json_loads(data_content)
-                except Exception:
-                    logger.debug("Failed to parse SSE data chunk: %s", data_content, exc_info=True)
+                except Exception as e:
+                    logger.debug("Failed to parse SSE data chunk: %s: %s", data_content, e, exc_info=True)
                     continue
             else:
                 continue

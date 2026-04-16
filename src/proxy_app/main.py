@@ -188,7 +188,7 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
 # Import extracted modules
 from proxy_app.middleware import _NoGzipForSSE, SecurityHeadersMiddleware
 from proxy_app.logging_config import RotatorDebugFilter, NoLiteLLMLogFilter
-from proxy_app.dependencies import _streams_lock
+from proxy_app.dependencies import _inc_streams, _dec_streams
 
 # Anthropic API Models (imported from library)
 logger.info("Discovering provider plugins...")
@@ -442,8 +442,11 @@ async def lifespan(app: FastAPI):
                     continue
 
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    def _read_json(p):
+                        with open(p, "r", encoding="utf-8") as f:
+                            return json.load(f)
+
+                    data = await asyncio.get_event_loop().run_in_executor(None, _read_json, path)
                     metadata = data.get("_proxy_metadata", {})
                     email = metadata.get("email")
 
@@ -559,16 +562,21 @@ async def lifespan(app: FastAPI):
 
                 # Update metadata (skip for env-based credentials - they don't have files)
                 if not path.startswith("env://"):
-                    try:
-                        with open(path, "r+", encoding="utf-8") as f:
+                    def _update_metadata(p, eml, ts):
+                        with open(p, "r+", encoding="utf-8") as f:
                             data = json.load(f)
                             metadata = data.get("_proxy_metadata", {})
-                            metadata["email"] = email
-                            metadata["last_check_timestamp"] = time.time()
+                            metadata["email"] = eml
+                            metadata["last_check_timestamp"] = ts
                             data["_proxy_metadata"] = metadata
                             f.seek(0)
                             json.dump(data, f, indent=2)
                             f.truncate()
+
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, _update_metadata, path, email, time.time()
+                        )
                     except Exception as e:
                         logger.error(f"Failed to update metadata for '{path}': {e}")
 
@@ -677,12 +685,10 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Shutdown requested, waiting up to 5s for active streams...")
         for _ in range(50):
-            async with _streams_lock:
-                if not getattr(app.state, "active_streams", 0):
-                    break
+            if not getattr(app.state, "active_streams", 0):
+                break
             await asyncio.sleep(0.1)
-        async with _streams_lock:
-            remaining = getattr(app.state, "active_streams", 0)
+        remaining = getattr(app.state, "active_streams", 0)
         if remaining:
             logger.warning("Cancelling %d remaining active streams", remaining)
             # Cancel remaining in-flight stream generators

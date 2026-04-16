@@ -8,6 +8,7 @@ from typing import AsyncGenerator, Any, Optional
 from fastapi import HTTPException, Request
 from rotator_library import STREAM_DONE
 from rotator_library.utils.json_utils import sse_data_event
+from rotator_library.utils.chunk_aggregator import ChunkAggregator
 from proxy_app.dependencies import _inc_streams, _dec_streams
 from proxy_app.detailed_logger import RawIOLogger
 
@@ -30,15 +31,9 @@ async def streaming_response_wrapper(
     serializes to SSE only at the HTTP yield boundary (single serialize).
     """
     # --- Aggregation state: only needed when logger is active ---
-    final_message = None
-    _content_parts: list = []
-    _generic_str_parts: dict = {}
-    aggregated_tool_calls = {}
-    usage_data = None
-    finish_reason = None
-    first_chunk_meta = None
+    aggregator = None
     if logger is not None:
-        final_message = {"role": "assistant"}
+        aggregator = ChunkAggregator()
 
     # Track active streaming connections for graceful shutdown
     try:
@@ -66,84 +61,7 @@ async def streaming_response_wrapper(
                 if asyncio.iscoroutine(result):
                     await result
 
-                # --- Inline aggregation (single pass, no second iteration) ---
-                # Capture metadata from first chunk
-                if first_chunk_meta is None:
-                    first_chunk_meta = {
-                        "id": chunk.get("id"),
-                        "created": chunk.get("created"),
-                        "model": chunk.get("model"),
-                    }
-
-                if "choices" in chunk and chunk["choices"]:
-                    choice = chunk["choices"][0]
-                    delta = choice.get("delta", {})
-
-                    for key, value in delta.items():
-                        if value is None:
-                            continue
-
-                        if key == "content":
-                            if value:
-                                _content_parts.append(value)
-
-                        elif key == "tool_calls":
-                            for tc_chunk in value:
-                                try:
-                                    index = tc_chunk["index"]
-                                except KeyError:
-                                    logger.warning("tool_calls chunk missing 'index' key, skipping: %s", tc_chunk)
-                                    continue
-                                if index not in aggregated_tool_calls:
-                                    aggregated_tool_calls[index] = {
-                                        "type": "function",
-                                        "function": {
-                                            "name_parts": [],
-                                            "args_parts": [],
-                                        },
-                                    }
-                                tc = aggregated_tool_calls[index]
-                                if tc_chunk.get("id"):
-                                    tc["id"] = tc_chunk["id"]
-                                if "function" in tc_chunk:
-                                    fn = tc_chunk["function"]
-                                    if fn.get("name") is not None:
-                                        tc["function"]["name_parts"].append(fn["name"])
-                                    if fn.get("arguments") is not None:
-                                        tc["function"]["args_parts"].append(
-                                            fn["arguments"]
-                                        )
-
-                        elif key == "function_call":
-                            if "function_call" not in final_message:
-                                final_message["function_call"] = {
-                                    "_name_parts": [],
-                                    "_args_parts": [],
-                                }
-                            if value.get("name") is not None:
-                                final_message["function_call"]["_name_parts"].append(
-                                    value["name"]
-                                )
-                            if value.get("arguments") is not None:
-                                final_message["function_call"]["_args_parts"].append(
-                                    value["arguments"]
-                                )
-
-                        else:  # Generic key handling for other data like 'reasoning'
-                            if key == "role":
-                                final_message[key] = value
-                            elif isinstance(value, str):
-                                if key not in _generic_str_parts:
-                                    _generic_str_parts[key] = []
-                                _generic_str_parts[key].append(value)
-                            else:
-                                final_message[key] = value
-
-                    if "finish_reason" in choice and choice["finish_reason"]:
-                        finish_reason = choice["finish_reason"]
-
-                if "usage" in chunk and chunk["usage"]:
-                    usage_data = chunk["usage"]
+                aggregator.add_chunk(chunk)
     except (GeneratorExit, asyncio.CancelledError):
         if hasattr(response_stream, "aclose"):
             await response_stream.aclose()
@@ -173,70 +91,14 @@ async def streaming_response_wrapper(
             logging.debug("stream_response: request lacks stream counter attribute on decrement")
         if logger:
             try:
-                if first_chunk_meta is not None:
-                    # --- Join accumulated string parts ---
-                    if _content_parts:
-                        final_message["content"] = "".join(_content_parts)
-
-                    for key, parts in _generic_str_parts.items():
-                        final_message[key] = "".join(parts)
-
-                    # Flatten tool_calls: convert name_parts/args_parts to strings
-                    if aggregated_tool_calls:
-                        tool_calls_list = []
-                        for tc in aggregated_tool_calls.values():
-                            fn = tc["function"]
-                            tool_calls_list.append(
-                                {
-                                    "id": tc.get("id"),
-                                    "type": tc["type"],
-                                    "function": {
-                                        "name": "".join(fn["name_parts"]),
-                                        "arguments": "".join(fn["args_parts"]),
-                                    },
-                                }
-                            )
-                        final_message["tool_calls"] = tool_calls_list
-                        # CRITICAL FIX: Override finish_reason when tool_calls exist
-                        # This ensures OpenCode and other agentic systems continue the conversation loop
-                        finish_reason = "tool_calls"
-
-                    if "function_call" in final_message:
-                        fc = final_message["function_call"]
-                        final_message["function_call"] = {
-                            "name": "".join(fc["_name_parts"]),
-                            "arguments": "".join(fc["_args_parts"]),
-                        }
-
-                    # Ensure standard fields are present for consistent logging
-                    for field in ["content", "tool_calls", "function_call"]:
-                        if field not in final_message:
-                            final_message[field] = None
-
-                    final_choice = {
-                        "index": 0,
-                        "message": final_message,
-                        "finish_reason": finish_reason,
-                    }
-
-                    full_response = {
-                        "id": first_chunk_meta.get("id"),
-                        "object": "chat.completion",
-                        "created": first_chunk_meta.get("created"),
-                        "model": first_chunk_meta.get("model"),
-                        "choices": [final_choice],
-                        "usage": usage_data,
-                    }
-                else:
-                    full_response = {}
-
+                full_response = aggregator.build_response_dict() if aggregator else {}
                 logger.log_final_response(
                     status_code=200,
-                    headers=None,  # Headers are not available at this stage
+                    headers=None,
                     body=full_response,
                 )
-            except Exception:
-                logging.exception("Error during stream finalization logging")
+            except Exception as e:
+                logging.exception("Error during stream finalization logging: %s", e)
 
 
 LITELLM_ERROR_MAP = [

@@ -191,6 +191,15 @@ class ProviderInterface(ABC):
         """Called at startup to initialize provider with all available credentials."""
         pass
 
+    async def run_background_job(self, usage_manager: Any = None, credentials: List[str] = None) -> None:
+        """Periodic background refresh job (quota checks, token refresh, etc.).
+
+        Called by BackgroundRefresher with usage_manager and credentials.
+        Default implementation is a no-op; providers that need background
+        work should override this method.
+        """
+        pass
+
     # --- Sequential Rotation Support ---
 
     @classmethod

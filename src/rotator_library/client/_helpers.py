@@ -455,12 +455,13 @@ class HelpersMixin:
         if log_event_type in ["pre_api_call", "post_api_call"]:
             return  # Skip these verbose logs entirely
 
-        # For successful calls or pre-call logs, a simple debug message is enough.
+        # For successful calls or pre-call logs, log minimal fields without deep copy.
         if not log_data.get("exception"):
-            sanitized_log = self._sanitize_litellm_log(log_data)
-            # We log it at the DEBUG level to ensure it goes to the debug file
-            # and not the console, based on the main.py configuration.
-            lib_logger.debug(f"LiteLLM Log: {sanitized_log}")
+            lib_logger.debug(
+                "LiteLLM Log: event=%s model=%s",
+                log_data.get("log_event_type"),
+                log_data.get("model", "N/A"),
+            )
             return
 
         # For failures, extract key info to make debug logs more readable.

@@ -14,8 +14,6 @@ All singletons now share a single pattern with consistent thread-safety
 and ``reset()`` support for config reload scenarios.
 """
 
-from __future__ import annotations
-
 import threading
 from typing import Any, Dict, Optional, Type, TypeVar
 

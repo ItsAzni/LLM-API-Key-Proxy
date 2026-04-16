@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator, Optional
 import httpx
 
 from ..config.defaults import TRACE
+from ..utils.chunk_aggregator import ChunkAggregator
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -608,12 +609,7 @@ class RetryMixin:
                     else:  # API Key
                         litellm_kwargs["api_key"] = current_cred
 
-                    # [FIX] Remove problematic headers and add correct provider headers
-                    # This ensures that authorization/x-api-key from client requests
-                    # are replaced with the correct values from configuration
-                    await self._apply_provider_headers(
-                        litellm_kwargs, provider, current_cred
-                    )
+                    # _prepare_request_kwargs already called _apply_provider_headers above
 
                     if provider_plugin:
                         # Ensure default Gemini safety settings are present (without overriding request)
@@ -2109,15 +2105,7 @@ class RetryMixin:
         )
 
         # Collect dict chunks and assemble into a non-streaming response
-        # This mirrors the aggregation logic in main.py's streaming_response_wrapper
-        _content_parts: list = []
-        aggregated_tool_calls: dict = {}
-        final_message: dict = {"role": "assistant"}
-        usage_data = None
-        finish_reason = None
-        model_id = None
-        created_ts = None
-        response_id = None
+        aggregator = ChunkAggregator()
 
         async for chunk in stream_generator:
             # STREAM_DONE sentinel: stream is complete
@@ -2127,137 +2115,17 @@ class RetryMixin:
             if not isinstance(chunk, dict):
                 continue
 
-            # Detect error payloads from the streaming retry layer
-            if "error" in chunk and "choices" not in chunk:
-                error_info = chunk["error"]
-                error_msg = (
-                    error_info.get("message", str(error_info))
-                    if isinstance(error_info, dict)
-                    else str(error_info)
-                )
-                raise litellm.InternalServerError(error_msg)
+            aggregator.check_error_payload(chunk)
+            aggregator.add_chunk(chunk)
 
-            # Capture metadata from first chunk
-            if response_id is None and chunk.get("id"):
-                response_id = chunk["id"]
-            if created_ts is None and chunk.get("created"):
-                created_ts = chunk["created"]
-            if model_id is None and chunk.get("model"):
-                model_id = chunk["model"]
-
-            # Aggregate choices
-            if "choices" in chunk and chunk["choices"]:
-                choice = chunk["choices"][0]
-                delta = choice.get("delta", {})
-
-                for key, value in delta.items():
-                    if value is None:
-                        continue
-                    if key == "content":
-                        if value:
-                            _content_parts.append(value)
-                    elif key == "tool_calls":
-                        for tc_chunk in value:
-                            index = tc_chunk["index"]
-                            if index not in aggregated_tool_calls:
-                                aggregated_tool_calls[index] = {
-                                    "type": "function",
-                                    "function": {
-                                        "name_parts": [],
-                                        "args_parts": [],
-                                    },
-                                }
-                            tc = aggregated_tool_calls[index]
-                            if tc_chunk.get("id"):
-                                tc["id"] = tc_chunk["id"]
-                            if "function" in tc_chunk:
-                                fn = tc_chunk["function"]
-                                if fn.get("name") is not None:
-                                    tc["function"]["name_parts"].append(fn["name"])
-                                if fn.get("arguments") is not None:
-                                    tc["function"]["args_parts"].append(fn["arguments"])
-                    elif key == "function_call":
-                        if "function_call" not in final_message:
-                            final_message["function_call"] = {
-                                "_name_parts": [],
-                                "_args_parts": [],
-                            }
-                        if value.get("name") is not None:
-                            final_message["function_call"]["_name_parts"].append(
-                                value["name"]
-                            )
-                        if value.get("arguments") is not None:
-                            final_message["function_call"]["_args_parts"].append(
-                                value["arguments"]
-                            )
-
-                # Capture finish_reason
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-
-            # Capture usage data
-            if "usage" in chunk and isinstance(chunk["usage"], dict):
-                usage_data = chunk["usage"]
-
-        # Assemble the final ModelResponse
-        content = "".join(_content_parts) if _content_parts else None
-
-        # Assemble tool calls
-        tool_calls_list = None
-        if aggregated_tool_calls:
-            tool_calls_list = []
-            for index in sorted(aggregated_tool_calls.keys()):
-                tc = aggregated_tool_calls[index]
-                tc_entry = {
-                    "index": index,
-                    "type": tc.get("type", "function"),
-                    "id": tc.get("id", f"call_{index}"),
-                    "function": {
-                        "name": "".join(tc["function"]["name_parts"]),
-                        "arguments": "".join(tc["function"]["args_parts"]),
-                    },
-                }
-                tool_calls_list.append(tc_entry)
-
-        # Assemble function_call (legacy)
-        if "function_call" in final_message:
-            fc = final_message["function_call"]
-            final_message["function_call"] = {
-                "name": "".join(fc.get("_name_parts", [])),
-                "arguments": "".join(fc.get("_args_parts", [])),
-            }
-
-        # Build final message
-        if content is not None:
-            final_message["content"] = content
-        if tool_calls_list:
-            final_message["tool_calls"] = tool_calls_list
-        if finish_reason:
-            final_message["finish_reason"] = finish_reason
-        elif tool_calls_list:
-            final_message["finish_reason"] = "tool_calls"
-        elif content:
-            final_message["finish_reason"] = "stop"
-
-        # Build ModelResponse object
-        model_response = litellm.ModelResponse(
-            id=response_id or f"chatcmpl-{id(chunk)}",
-            created=created_ts or int(time.time()),
-            model=model_id or model,
-            choices=[
-                {
-                    "index": 0,
-                    "message": final_message,
-                    "finish_reason": final_message.get("finish_reason", "stop"),
-                }
-            ],
-            usage=usage_data
-            or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        )
+        model_response = aggregator.build_model_response(model=model)
 
         lib_logger.debug(
-            f"Forced streaming completion assembled: model={model_id}, "
-            f"finish_reason={finish_reason}, usage={usage_data}"
+            "Forced streaming completion assembled: model=%s, "
+            "finish_reason=%s, usage=%s",
+            aggregator.first_chunk_meta.get("model") if aggregator.first_chunk_meta else None,
+            aggregator.finish_reason,
+            aggregator.usage_data,
         )
 
         return model_response
