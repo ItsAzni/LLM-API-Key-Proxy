@@ -24,8 +24,11 @@ class ChunkAggregator:
     get the assembled output.
     """
 
+    _MAX_CONTENT_PARTS = 50000
+
     def __init__(self) -> None:
         self._content_parts: list[str] = []
+        self._flushed_content: str = ""
         self._generic_str_parts: dict[str, list[str]] = {}
         self._aggregated_tool_calls: dict[int, dict] = {}
         self._final_message: dict[str, Any] = {"role": "assistant"}
@@ -58,6 +61,9 @@ class ChunkAggregator:
                 if key == "content":
                     if value:
                         self._content_parts.append(value)
+                        if len(self._content_parts) >= self._MAX_CONTENT_PARTS:
+                            self._flushed_content += "".join(self._content_parts)
+                            self._content_parts.clear()
                 elif key == "tool_calls":
                     self._accumulate_tool_calls(value)
                 elif key == "function_call":
@@ -110,8 +116,8 @@ class ChunkAggregator:
         """Return the assembled ``final_message`` dict for logging."""
         msg = dict(self._final_message)
 
-        if self._content_parts:
-            msg["content"] = "".join(self._content_parts)
+        if self._flushed_content or self._content_parts:
+            msg["content"] = self._flushed_content + "".join(self._content_parts)
 
         for key, parts in self._generic_str_parts.items():
             msg[key] = "".join(parts)
@@ -187,7 +193,7 @@ class ChunkAggregator:
         absent).  *stream_id* is used as part of the response id fallback.
         """
         meta = self._first_chunk_meta or {}
-        content = "".join(self._content_parts) if self._content_parts else None
+        content = (self._flushed_content + "".join(self._content_parts)) if (self._flushed_content or self._content_parts) else None
 
         tool_calls_list = None
         if self._aggregated_tool_calls:

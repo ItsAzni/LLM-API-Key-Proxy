@@ -78,7 +78,7 @@ async def web_search(
 
         response_generator = client.acompletion(request=request, **completion_kwargs)
         return StreamingResponse(
-            streaming_response_wrapper(request, completion_kwargs, response_generator),
+            streaming_response_wrapper(request, response_generator),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

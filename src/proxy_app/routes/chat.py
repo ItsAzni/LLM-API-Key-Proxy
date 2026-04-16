@@ -94,7 +94,7 @@ async def chat_completions(
             response_generator = client.acompletion(request=request, **request_data)
             return StreamingResponse(
                 streaming_response_wrapper(
-                    request, request_data, response_generator, raw_logger
+                    request, response_generator, raw_logger
                 ),
                 media_type="text/event-stream",
                 headers={

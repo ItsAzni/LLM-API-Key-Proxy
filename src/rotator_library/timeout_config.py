@@ -6,6 +6,8 @@
 Centralized timeout configuration for HTTP requests.
 
 All values can be overridden via environment variables:
+    TIMEOUT_DNS_QUERY - DNS resolution timeout (default: 10s)
+    TIMEOUT_DNS_SOCKET - DNS socket-level timeout (default: 5s)
     TIMEOUT_CONNECT - Connection establishment timeout (default: 15s)
     TIMEOUT_WRITE - Request body send timeout (default: 30s)
     TIMEOUT_POOL - Connection pool acquisition timeout (default: 15s)
@@ -39,6 +41,10 @@ class TimeoutConfig:
     _POOL = 15.0  # Reduced from 60s for faster failure detection
     _READ_STREAMING = 300.0  # 5 minutes between chunks
     _READ_NON_STREAMING = 300.0  # 5 minutes for full response (was 600s)
+
+    # DNS timeouts
+    _DNS_QUERY = 10.0  # DNS resolution timeout
+    _DNS_SOCKET = 5.0  # DNS socket-level timeout
 
     # UI tool timeouts (quota viewer, model filter GUI)
     _QUOTA_VIEWER_CONNECT = 3.0  # Quick liveness check
@@ -82,6 +88,16 @@ class TimeoutConfig:
     def model_filter_fetch(cls) -> float:
         """Model list fetch timeout for model filter GUI."""
         return cls._get_env_float("TIMEOUT_MODEL_FILTER_FETCH", cls._MODEL_FILTER_FETCH)
+
+    @classmethod
+    def dns_query(cls) -> float:
+        """DNS resolution timeout."""
+        return cls._get_env_float("TIMEOUT_DNS_QUERY", cls._DNS_QUERY)
+
+    @classmethod
+    def dns_socket(cls) -> float:
+        """DNS socket-level timeout."""
+        return cls._get_env_float("TIMEOUT_DNS_SOCKET", cls._DNS_SOCKET)
 
     @classmethod
     def connect(cls) -> float:

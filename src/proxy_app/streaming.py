@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 async def streaming_response_wrapper(
     request: Request,
-    request_data: dict,
     response_stream: AsyncGenerator[Any, None],
     logger: Optional[RawIOLogger] = None,
 ) -> AsyncGenerator[str, None]:

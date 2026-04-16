@@ -244,7 +244,7 @@ def _dns_query(host: str, dns_host: str, dns_port: int = 53) -> Optional[str]:
 
         # Send DNS query via UDP
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
+        sock.settimeout(get_dns_query_timeout())
         sock.sendto(query, (dns_host, dns_port))
 
         # Receive response
@@ -386,19 +386,21 @@ def _custom_getaddrinfo(
     with _dns_executor_lock:
         if _dns_executor is None:
             _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
+        executor = _dns_executor
     try:
-        future = _dns_executor.submit(
+        future = executor.submit(
             _custom_getaddrinfo_sync, host, port, family, type, proto, flags
         )
-        return future.result(timeout=10)
+        return future.result(timeout=get_dns_query_timeout())
     except RuntimeError:
         with _dns_executor_lock:
             if _dns_executor is None:
                 _dns_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="dns-resolver")
-        future = _dns_executor.submit(
+            executor = _dns_executor
+        future = executor.submit(
             _custom_getaddrinfo_sync, host, port, family, type, proto, flags
         )
-        return future.result(timeout=10)
+        return future.result(timeout=get_dns_query_timeout())
 
 
 def apply_dns_fix():

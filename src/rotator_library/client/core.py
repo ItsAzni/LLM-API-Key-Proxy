@@ -58,7 +58,7 @@ lib_logger = logging.getLogger("rotator_library")
 # log levels and handlers centrally.
 lib_logger.propagate = False
 
-DEFAULT_API_KEY_MAX_CONCURRENT_REQUESTS = 40
+DEFAULT_API_KEY_MAX_CONCURRENT_REQUESTS = int(os.environ.get("API_KEY_MAX_CONCURRENT_REQUESTS", 40))
 
 # Providers that require stream=true when max_tokens exceeds a threshold.
 # {provider_prefix: max_tokens_threshold}
@@ -317,7 +317,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
         # Global backpressure semaphore — limits total concurrent outbound
         # API requests across all providers/keys. Prevents resource exhaustion.
         self._global_semaphore = asyncio.Semaphore(
-            int(os.getenv("MAX_CONCURRENT_REQUESTS", "200"))
+            int(os.getenv("MAX_CONCURRENT_REQUESTS", "1000"))
         )
 
     # --- Core methods that remain in this module ---

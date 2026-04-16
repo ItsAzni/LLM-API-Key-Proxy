@@ -40,7 +40,11 @@ def _build_env_cache() -> Dict[str, str]:
 
 
 def get_provider_env_cache() -> Dict[str, str]:
-    """Return the provider env cache, building it on first call or after invalidation."""
+    """Return the provider env cache, building it on first call or after invalidation.
+
+    Thread-safe: callers never see None, even if another thread has just
+    invalidated the cache.
+    """
     global _provider_env_cache
     with _env_cache_lock:
         if _provider_env_cache is None:

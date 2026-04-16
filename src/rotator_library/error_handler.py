@@ -24,7 +24,6 @@ from .ip_throttle_detector import (
     IPThrottleDetector,
 )
 if TYPE_CHECKING:
-    from .ip_throttle_detector import IPThrottleDetector
     from .circuit_breaker import ProviderCircuitBreaker
     from .cooldown_manager import CooldownManager
 import orjson
@@ -99,7 +98,7 @@ KEY_SPECIFIC_PATTERNS = frozenset(
 
 # Providers that route through multiple backends - IP throttle detection is unreliable
 # These providers aggregate multiple upstream APIs, so rate limits may vary per backend
-PROXY_PROVIDERS = frozenset(
+_PROXY_PROVIDERS_DEFAULT = frozenset(
     {
         "kilocode",  # Routes to multiple providers (minimax, moonshot, z-ai, etc.)
         "openrouter",  # Routes to 100+ providers
@@ -111,6 +110,12 @@ PROXY_PROVIDERS = frozenset(
         "friendli",  # FriendliAI serverless backend; 429 should trigger key rotation, not IP-level circuit breaker
     }
 )
+
+_env_providers = os.environ.get("PROXY_PROVIDERS")
+if _env_providers is not None:
+    PROXY_PROVIDERS = frozenset(p.strip() for p in _env_providers.split(",") if p.strip())
+else:
+    PROXY_PROVIDERS = _PROXY_PROVIDERS_DEFAULT
 
 
 def _detect_ip_throttle(
@@ -443,7 +448,7 @@ def is_provider_abort(raw_response: Optional[Dict]) -> bool:
             delta = choice.get("delta", {})
             # Empty content with error indication
             if not message.get("content") and not delta.get("content"):
-                if choice.get("finish_reason") == "error":
+                if choice.get("native_finish_reason") == "abort":
                     return True
 
     return False
@@ -811,7 +816,7 @@ async def handle_429_error(
                 await cooldown_manager.start_cooldown(affected_cred, action.cooldown_seconds)
         return action
 
-    # Step 4: Single credential throttle
+    # Step 5: Single credential throttle
     lib_logger.debug(
         f"Credential-level throttle for {mask_credential(credential)} "
         f"on provider '{provider}'. Cooldown: {cooldown}s."
@@ -828,6 +833,75 @@ async def handle_429_error(
     if cooldown_manager is not None:
         await cooldown_manager.start_cooldown(credential, action.cooldown_seconds)
     return action
+
+
+def _try_parse_provider_quota_error(
+    e: Exception, provider: Optional[str], status_code: Optional[int] = None
+) -> Optional["ClassifiedError"]:
+    """Try provider-specific quota error parsing.
+
+    Extracts error body from the exception, delegates to the provider's
+    parse_quota_error method, and returns a ClassifiedError if a quota
+    error is detected.
+
+    Args:
+        e: The exception to parse
+        provider: Provider name for provider-specific parsing
+        status_code: HTTP status code to use in the returned ClassifiedError
+
+    Returns:
+        ClassifiedError with quota_exceeded type, or None if no quota error found
+    """
+    if not provider:
+        return None
+    try:
+        from .providers import get_provider
+
+        provider_class = get_provider(provider)
+        if not provider_class or not hasattr(provider_class, "parse_quota_error"):
+            return None
+
+        # Get error body if available
+        error_body = None
+        if hasattr(e, "response") and hasattr(e.response, "text"):
+            try:
+                error_body = e.response.text
+            except (AttributeError, OSError):
+                lib_logger.debug("Could not read error response text", exc_info=True)
+        elif hasattr(e, "body"):
+            error_body = str(e.body)
+        # Fallback to full exception string
+        if not error_body:
+            error_body = str(e)
+
+        quota_info = provider_class.parse_quota_error(e, error_body)
+        if quota_info and quota_info.get("retry_after"):
+            retry_after = quota_info["retry_after"]
+            reason = quota_info.get("reason", "QUOTA_EXHAUSTED")
+            reset_ts = quota_info.get("reset_timestamp")
+            quota_reset_timestamp = quota_info.get("quota_reset_timestamp")
+
+            # Log the parsed result with human-readable duration
+            hours = retry_after / 3600
+            lib_logger.info(
+                f"Provider '{provider}' parsed quota error: "
+                f"retry_after={retry_after}s ({hours:.1f}h), reason={reason}"
+                + (f", resets at {reset_ts}" if reset_ts else "")
+            )
+
+            return ClassifiedError(
+                error_type="quota_exceeded",
+                original_exception=e,
+                status_code=status_code if status_code is not None else 429,
+                retry_after=retry_after,
+                quota_reset_timestamp=quota_reset_timestamp,
+                reason=reason,
+            )
+    except Exception as parse_error:
+        lib_logger.debug(
+            f"Provider-specific error parsing failed for '{provider}': {parse_error}"
+        )
+    return None
 
 
 def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedError:
@@ -858,52 +932,9 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
         ClassifiedError with error_type, status_code, retry_after, etc.
     """
     # Try provider-specific parsing first for 429/rate limit errors
-    if provider:
-        try:
-            from .providers import get_provider
-
-            provider_class = get_provider(provider)
-
-            if provider_class and hasattr(provider_class, "parse_quota_error"):
-                # Get error body if available
-                error_body = None
-                if hasattr(e, "response") and hasattr(e.response, "text"):
-                    try:
-                        error_body = e.response.text
-                    except (AttributeError, OSError):
-                        lib_logger.debug("Could not read error response text", exc_info=True)
-                elif hasattr(e, "body"):
-                    error_body = str(e.body)
-
-                quota_info = provider_class.parse_quota_error(e, error_body)
-
-                if quota_info and quota_info.get("retry_after"):
-                    retry_after = quota_info["retry_after"]
-                    reason = quota_info.get("reason", "QUOTA_EXHAUSTED")
-                    reset_ts = quota_info.get("reset_timestamp")
-                    quota_reset_timestamp = quota_info.get("quota_reset_timestamp")
-
-                    # Log the parsed result with human-readable duration
-                    hours = retry_after / 3600
-                    lib_logger.info(
-                        f"Provider '{provider}' parsed quota error: "
-                        f"retry_after={retry_after}s ({hours:.1f}h), reason={reason}"
-                        + (f", resets at {reset_ts}" if reset_ts else "")
-                    )
-
-                    return ClassifiedError(
-                        error_type="quota_exceeded",
-                        original_exception=e,
-                        status_code=429,
-                        retry_after=retry_after,
-                        quota_reset_timestamp=quota_reset_timestamp,
-                        reason=reason,
-                    )
-        except Exception as parse_error:
-            lib_logger.debug(
-                f"Provider-specific error parsing failed for '{provider}': {parse_error}"
-            )
-            # Fall through to generic classification
+    result = _try_parse_provider_quota_error(e, provider, status_code=429)
+    if result is not None:
+        return result
 
     # Check for provider abort from streaming (finish_reason='error' or native_finish_reason='abort')
     # This handles StreamedAPIError.data which is a dict

@@ -51,14 +51,14 @@ lib_logger = logging.getLogger("rotator_library")
 
 # Delay before fetching quota after a request (API needs time to update)
 # Used for manual cost discovery
-QUOTA_DISCOVERY_DELAY_SECONDS: float = 3.0
+QUOTA_DISCOVERY_DELAY_SECONDS: float = float(os.environ.get("QUOTA_DISCOVERY_DELAY_SECONDS", 3.0))
 
 # Maximum concurrent quota fetch requests (prevents overwhelming API)
-QUOTA_FETCH_CONCURRENCY: int = 5
+QUOTA_FETCH_CONCURRENCY: int = int(os.environ.get("QUOTA_FETCH_CONCURRENCY", 5))
 
 # Upper limit for environment variable credential discovery
 # Checks for {PREFIX}_1_ACCESS_TOKEN through {PREFIX}_N_ACCESS_TOKEN
-ENV_CREDENTIAL_DISCOVERY_LIMIT: int = 100
+ENV_CREDENTIAL_DISCOVERY_LIMIT: int = int(os.environ.get("ENV_CREDENTIAL_DISCOVERY_LIMIT", 100))
 
 
 class BaseQuotaTracker:

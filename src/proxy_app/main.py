@@ -444,7 +444,7 @@ async def lifespan(app: FastAPI):
                 try:
                     def _read_json(p):
                         with open(p, "r", encoding="utf-8") as f:
-                            return json.load(f)
+                            return orjson.loads(f.read())
 
                     data = await asyncio.get_event_loop().run_in_executor(None, _read_json, path)
                     metadata = data.get("_proxy_metadata", {})
