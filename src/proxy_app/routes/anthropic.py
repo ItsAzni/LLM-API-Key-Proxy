@@ -63,7 +63,6 @@ async def anthropic_messages(
 
     log_request_to_console(
         url=str(request.url),
-        headers=request.headers,
         client_info=(
             request.client.host if request.client else "unknown",
             request.client.port if request.client else 0,
