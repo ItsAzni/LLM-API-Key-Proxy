@@ -50,10 +50,6 @@ class StreamingMixin:
         accumulated_finish_reason = None  # Track strongest finish_reason across chunks
         has_tool_calls = False  # Track if ANY tool calls were seen in stream
         chunk_index = 0  # Track chunk count for better error logging
-
-        # Fallback token estimation for providers that don't return usage data
-        # We accumulate content length and estimate tokens (rough: 1 token ≈ 4 chars)
-        accumulated_content_length = 0
         has_usage_data = False  # Track if we ever saw usage data
 
         try:
@@ -95,10 +91,6 @@ class StreamingMixin:
                         delta = choice.get("delta", {})
                         usage = chunk_dict.get("usage", {})
 
-                        # Track content length for fallback token estimation
-                        if delta.get("content"):
-                            accumulated_content_length += len(delta.get("content", ""))
-
                         # Check if we have usage data
                         if (
                             usage
@@ -122,8 +114,7 @@ class StreamingMixin:
                         ):
                             lib_logger.warning(
                                 f"Stream abort detected for model {model} at chunk {chunk_index}. "
-                                f"finish_reason={raw_finish_reason}, native_finish_reason={native_finish_reason}, "
-                                f"partial content: {accumulated_content_length} chars"
+                                f"finish_reason={raw_finish_reason}, native_finish_reason={native_finish_reason}"
                             )
                             raise _StreamedException(
                                 "Provider aborted stream mid-generation"
@@ -238,8 +229,8 @@ class StreamingMixin:
                     not request or not await request.is_disconnected()
                 ):
                     yield STREAM_DONE
-            except Exception:
-                lib_logger.exception("Error during stream cleanup")
+            except Exception as e:
+                lib_logger.exception("Error during stream cleanup: %s", e)
 
     async def _transaction_logging_stream_wrapper(
         self,

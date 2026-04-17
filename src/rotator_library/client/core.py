@@ -473,7 +473,7 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
             # Check if already registered (e.g. by usage_manager)
             return self._provider_instances.get(provider_name)
 
-    def _resolve_model_id(self, model: str, provider: str) -> str:
+    async def _resolve_model_id(self, model: str, provider: str) -> str:
         """
         Resolves the actual model ID to send to the provider.
 
@@ -491,36 +491,38 @@ class RotatingClient(HelpersMixin, StreamingMixin, RetryMixin):
             Full model string with ID (e.g., "iflow/deepseek-v3.2")
         """
         cache_key = (model, provider)
-        cached = self._resolve_model_id_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        lock = await self._lock_manager.get_lock(provider)
+        async with lock:
+            cached = self._resolve_model_id_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
-        # Extract model name from "provider/model_name" format
-        model_name = model.split("/")[-1] if "/" in model else model
+            # Extract model name from "provider/model_name" format
+            model_name = model.split("/")[-1] if "/" in model else model
 
-        # Try to get provider instance to check for model definitions
-        provider_plugin = self._get_provider_instance(provider)
+            # Try to get provider instance to check for model definitions
+            provider_plugin = self._get_provider_instance(provider)
 
-        # Check if provider has model definitions
-        if provider_plugin and hasattr(provider_plugin, "model_definitions"):
-            model_id = provider_plugin.model_definitions.get_model_id(
-                provider, model_name
-            )
+            # Check if provider has model definitions
+            if provider_plugin and hasattr(provider_plugin, "model_definitions"):
+                model_id = provider_plugin.model_definitions.get_model_id(
+                    provider, model_name
+                )
+                if model_id and model_id != model_name:
+                    result = f"{provider}/{model_id}"
+                    self._resolve_model_id_cache[cache_key] = result
+                    return result
+
+            # Fallback: use client's own model definitions
+            model_id = self.model_definitions.get_model_id(provider, model_name)
             if model_id and model_id != model_name:
                 result = f"{provider}/{model_id}"
                 self._resolve_model_id_cache[cache_key] = result
                 return result
 
-        # Fallback: use client's own model definitions
-        model_id = self.model_definitions.get_model_id(provider, model_name)
-        if model_id and model_id != model_name:
-            result = f"{provider}/{model_id}"
-            self._resolve_model_id_cache[cache_key] = result
-            return result
-
-        # No conversion needed, return original
-        self._resolve_model_id_cache[cache_key] = model
-        return model
+            # No conversion needed, return original
+            self._resolve_model_id_cache[cache_key] = model
+            return model
 
     async def __aenter__(self):
         return self

@@ -75,6 +75,13 @@ class AdaptiveRateLimiter:
         self._lock_manager = ProviderLockManager()
 
     def _get_state(self, provider: str) -> _ProviderRateState:
+        # Double-check under lock to prevent concurrent creation for same provider
+        if provider not in self._states:
+            raise KeyError(provider)
+        return self._states[provider]
+
+    async def _ensure_state(self, provider: str) -> _ProviderRateState:
+        """Get or create per-provider state. Caller MUST hold the per-provider lock."""
         if provider not in self._states:
             self._states[provider] = _ProviderRateState(current_rps=self.initial_rps)
             self._states[provider].tokens = self.initial_rps
@@ -87,7 +94,7 @@ class AdaptiveRateLimiter:
 
         lock = await self._lock_manager.get_lock(provider)
         async with lock:
-            state = self._get_state(provider)
+            state = await self._ensure_state(provider)
             now = time.monotonic()
 
             elapsed = now - state.last_refill
@@ -115,7 +122,7 @@ class AdaptiveRateLimiter:
 
         lock = await self._lock_manager.get_lock(provider)
         async with lock:
-            state = self._get_state(provider)
+            state = await self._ensure_state(provider)
             now = time.monotonic()
 
             if state.last_429 is not None and (now - state.last_429) < self.increase_interval:
@@ -157,7 +164,7 @@ class AdaptiveRateLimiter:
 
         lock = await self._lock_manager.get_lock(provider)
         async with lock:
-            state = self._get_state(provider)
+            state = await self._ensure_state(provider)
             now = time.monotonic()
 
             state.ceiling_rps = state.current_rps
@@ -179,9 +186,10 @@ class AdaptiveRateLimiter:
         return self.enabled
 
     def get_provider_info(self, provider: str) -> Dict[str, Any]:
-        if provider not in self._states:
+        try:
+            state = self._get_state(provider)
+        except KeyError:
             return {"provider": provider, "tracked": False}
-        state = self._states[provider]
         return {
             "provider": provider,
             "tracked": True,

@@ -135,7 +135,7 @@ class RetryMixin:
         """
         # Resolve model ID early, before any credential operations
         # This ensures consistent model ID usage for acquisition, release, and tracking
-        resolved_model = self._resolve_model_id(model, provider)
+        resolved_model = await self._resolve_model_id(model, provider)
         if resolved_model != model:
             lib_logger.info(f"Resolved model '{model}' to '{resolved_model}'")
             model = resolved_model
@@ -199,7 +199,7 @@ class RetryMixin:
 
         # Build priority map and tier names map for usage_manager (using cache)
         credential_priorities, credential_tier_names = (
-            self._build_credential_priority_cache(provider, credentials_for_provider)
+            await self._build_credential_priority_cache(provider, credentials_for_provider)
         )
 
         if credential_priorities:
@@ -1063,6 +1063,9 @@ class RetryMixin:
         credential_tier_names = rc.credential_tier_names
         error_accumulator = rc.error_accumulator
 
+        # Cache request headers once to avoid repeated dict() conversion in error handlers
+        _cached_request_headers = dict(request.headers) if request else {}
+
         consecutive_quota_failures = 0
         total_api_attempts = 0
 
@@ -1295,7 +1298,7 @@ class RetryMixin:
                                     attempt=attempt + 1,
                                     error=e,
                                     request_headers=(
-                                        dict(request.headers) if request else {}
+                                        _cached_request_headers
                                     ),
                                 )
 
@@ -1357,7 +1360,7 @@ class RetryMixin:
                                     attempt=attempt + 1,
                                     error=e,
                                     request_headers=(
-                                        dict(request.headers) if request else {}
+                                        _cached_request_headers
                                     ),
                                 )
                                 classified_error = classify_error(e, provider=provider)
@@ -1423,7 +1426,7 @@ class RetryMixin:
                                     attempt=attempt + 1,
                                     error=e,
                                     request_headers=(
-                                        dict(request.headers) if request else {}
+                                        _cached_request_headers
                                     ),
                                 )
                                 classified_error = classify_error(e, provider=provider)
@@ -1487,7 +1490,7 @@ class RetryMixin:
                                     attempt=attempt + 1,
                                     error=e,
                                     request_headers=(
-                                        dict(request.headers) if request else {}
+                                        _cached_request_headers
                                     ),
                                 )
                                 classified_error = classify_error(e, provider=provider)

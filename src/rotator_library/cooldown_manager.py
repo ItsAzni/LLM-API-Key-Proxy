@@ -43,13 +43,16 @@ class CooldownManager:
 
     async def _cleanup_expired(self) -> None:
         now = time.monotonic()
+        # Delete expired entries one-by-one instead of full dict rebuild
+        # to avoid replacing the dict object that concurrent callers may reference
         expired = [k for k, v in self._cooldowns.items() if now >= v]
-        if expired:
-            for k in expired:
-                del self._cooldowns[k]
+        for k in expired:
+            del self._cooldowns[k]
+        # Trim to max size by removing entries closest to expiry
         if len(self._cooldowns) > self._MAX_COOLDOWNS:
-            sorted_items = sorted(self._cooldowns.items(), key=lambda x: x[1], reverse=True)
-            self._cooldowns = dict(sorted_items[:self._MAX_COOLDOWNS])
+            sorted_keys = sorted(self._cooldowns, key=self._cooldowns.get)
+            for k in sorted_keys[:len(self._cooldowns) - self._MAX_COOLDOWNS]:
+                del self._cooldowns[k]
 
     async def is_cooling_down(self, credential: str) -> bool:
         """Checks if a credential is currently in a cooldown period."""

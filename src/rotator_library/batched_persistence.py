@@ -197,20 +197,29 @@ class BatchedPersistence:
                 self._stats["write_errors"] += 1
                 return False
 
-    def update(self, state: Any) -> None:
-        """
-        Update state (in-memory, marks dirty).
-
-        This is a fast in-memory operation. Disk write happens
-        in background.
-
-        Args:
-            state: New state value
-        """
+    def _apply_update(self, state: Any) -> None:
+        """Internal mutation logic for state updates."""
         self._state = state
         self._dirty = True
         self._last_change = time.monotonic()
         self._stats["updates"] += 1
+
+    def update(self, state: Any) -> None:
+        """
+        Update state (in-memory, marks dirty).
+
+        When an event loop is running, schedules update_async() to ensure
+        the shared lock is acquired, preventing races with _write_to_disk().
+        When no loop is running, mutates directly (safe — no concurrent writer).
+
+        Args:
+            state: New state value
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.update_async(state))
+        except RuntimeError:
+            self._apply_update(state)
 
     async def update_async(self, state: Any) -> None:
         """
@@ -220,7 +229,7 @@ class BatchedPersistence:
             state: New state value
         """
         async with self._lock:
-            self.update(state)
+            self._apply_update(state)
 
     def get_state(self) -> Any:
         """Get current state (from memory)."""

@@ -168,7 +168,7 @@ class HelpersMixin:
             return False
         return True
 
-    def _build_credential_priority_cache(
+    async def _build_credential_priority_cache(
         self, provider: str, credentials: List[str]
     ) -> Tuple[Dict[str, int], Dict[str, str]]:
         """
@@ -178,6 +178,8 @@ class HelpersMixin:
         The result (priorities, tier_names) tuple is cached directly
         for O(1) return on cache hits.
 
+        Protected by per-provider lock to prevent concurrent cache corruption.
+
         Args:
             provider: Provider name
             credentials: List of credentials to cache priorities for
@@ -185,58 +187,63 @@ class HelpersMixin:
         Returns:
             Tuple of (credential_priorities, credential_tier_names)
         """
-        # Fast path: return cached result tuple directly
-        cached_result = self._credential_priority_cache.get(provider + ":result")
-        if cached_result is not None:
-            return cached_result
+        lock = await self._lock_manager.get_lock(provider)
+        async with lock:
+            # Fast path: return cached result tuple directly
+            cached_result = self._credential_priority_cache.get(provider + ":result")
+            if cached_result is not None:
+                return cached_result
 
-        # Need to rebuild cache
-        provider_plugin = self._get_provider_instance(provider)
-        priorities = {}
-        tier_names = {}
-        cache_entry = {}
+            # Need to rebuild cache
+            provider_plugin = self._get_provider_instance(provider)
+            priorities = {}
+            tier_names = {}
+            cache_entry = {}
 
-        if provider_plugin:
-            has_priority = hasattr(provider_plugin, "get_credential_priority")
-            has_tier_name = hasattr(provider_plugin, "get_credential_tier_name")
+            if provider_plugin:
+                has_priority = hasattr(provider_plugin, "get_credential_priority")
+                has_tier_name = hasattr(provider_plugin, "get_credential_tier_name")
 
-            for cred in credentials:
-                cred_cache = {}
+                for cred in credentials:
+                    cred_cache = {}
 
-                if has_priority:
-                    priority = provider_plugin.get_credential_priority(cred)
-                    if priority is not None:
-                        priorities[cred] = priority
-                        cred_cache["priority"] = priority
+                    if has_priority:
+                        priority = provider_plugin.get_credential_priority(cred)
+                        if priority is not None:
+                            priorities[cred] = priority
+                            cred_cache["priority"] = priority
 
-                if has_tier_name:
-                    tier_name = provider_plugin.get_credential_tier_name(cred)
-                    if tier_name:
-                        tier_names[cred] = tier_name
-                        cred_cache["tier_name"] = tier_name
+                    if has_tier_name:
+                        tier_name = provider_plugin.get_credential_tier_name(cred)
+                        if tier_name:
+                            tier_names[cred] = tier_name
+                            cred_cache["tier_name"] = tier_name
 
-                if cred_cache:
-                    cache_entry[cred] = cred_cache
+                    if cred_cache:
+                        cache_entry[cred] = cred_cache
 
-        result = (priorities, tier_names)
-        self._credential_priority_cache[provider] = cache_entry
-        self._credential_priority_cache[provider + ":result"] = result
+            result = (priorities, tier_names)
+            self._credential_priority_cache[provider] = cache_entry
+            self._credential_priority_cache[provider + ":result"] = result
 
-        return result
+            return result
 
-    def _invalidate_priority_cache(self, provider: str) -> None:
+    async def _invalidate_priority_cache(self, provider: str) -> None:
         """
         Invalidate the priority cache for a provider.
 
         Call this when credentials are added or removed.
+        Protected by per-provider lock to prevent concurrent cache corruption.
         """
-        self._credential_priority_cache.pop(provider, None)
-        self._credential_priority_cache.pop(provider + ":result", None)
+        lock = await self._lock_manager.get_lock(provider)
+        async with lock:
+            self._credential_priority_cache.pop(provider, None)
+            self._credential_priority_cache.pop(provider + ":result", None)
 
-        # Also invalidate model ID cache entries for this provider
-        keys_to_remove = [k for k in self._resolve_model_id_cache if k[1] == provider]
-        for k in keys_to_remove:
-            del self._resolve_model_id_cache[k]
+            # Also invalidate model ID cache entries for this provider
+            keys_to_remove = [k for k in self._resolve_model_id_cache if k[1] == provider]
+            for k in keys_to_remove:
+                del self._resolve_model_id_cache[k]
 
     def _reset_litellm_client_cache(self) -> None:
         """

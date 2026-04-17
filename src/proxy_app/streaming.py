@@ -57,9 +57,7 @@ async def streaming_response_wrapper(
                 continue
 
             if logger is not None:
-                result = logger.log_stream_chunk(chunk)
-                if asyncio.iscoroutine(result):
-                    await result
+                logger.log_stream_chunk(chunk)
 
                 aggregator.add_chunk(chunk)
     except (GeneratorExit, asyncio.CancelledError):

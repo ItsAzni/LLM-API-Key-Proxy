@@ -44,7 +44,7 @@ def _patch_aiohttp_connector():
             if hasattr(_ssl_module, "_create_default_context"):
                 _ssl_module._create_default_context = _patched_create_default
 
-            print(
+            logging.info(
                 "[SSL-FIX] Global ssl.create_default_context patched to return unverified TLS 1.2 context"
             )
 
@@ -64,23 +64,16 @@ def _patch_aiohttp_connector():
             _original_init(self, *args, **kwargs)
 
         _OriginalTCPConnector.__init__ = _patched_init
-        print(f"[SSL-FIX] Patched aiohttp.TCPConnector: SSL_VERIFY={_ssl_verify}")
+        logging.info(f"[SSL-FIX] Patched aiohttp.TCPConnector: SSL_VERIFY={_ssl_verify}")
 
-        # Patch aiohttp.ClientSession to disable SSL verification
-        try:
-            _original_request = aiohttp.ClientSession._request
-
-            async def _patched_request(self, *args, **kwargs):
-                # Force ssl=False to disable SSL verification
-                kwargs["ssl"] = False
-                return await _original_request(self, *args, **kwargs)
-
-            aiohttp.ClientSession._request = _patched_request
-            print("[SSL-FIX] Patched aiohttp.ClientSession._request to use ssl=False")
-        except Exception as e:
-            print(f"[SSL-FIX] Failed to patch ClientSession: {e}")
+        # NOTE: ClientSession._request monkey-patch removed — it unconditionally
+        # forced ssl=False on every request, overriding per-host skip logic in
+        # http_client_pool.py.  The TCPConnector + ssl.create_default_context
+        # patches above are sufficient for the aiohttp code path when SSL is
+        # disabled globally.  The httpx clients used by the rotator already have
+        # fine-grained per-host verify=False via HTTP_SSL_VERIFY_HOSTS.
 
     except ImportError:
         pass
     except Exception as e:
-        print(f"[SSL-FIX] Failed to patch: {e}")
+        logging.error(f"[SSL-FIX] Failed to patch: {e}")

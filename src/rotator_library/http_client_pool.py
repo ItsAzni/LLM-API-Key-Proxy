@@ -30,9 +30,6 @@ from .config import env_bool as _env_bool, env_float as _env_float, env_int as _
 lib_logger = logging.getLogger("rotator_library")
 
 
-
-
-
 # Platform-aware connection pool limits
 # Windows SelectorEventLoop has much lower file descriptor limits than Linux
 _IS_WIN = os.name == "nt"
@@ -40,8 +37,13 @@ DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20 if _IS_WIN else 100
 DEFAULT_MAX_CONNECTIONS = 100 if _IS_WIN else 500
 DEFAULT_KEEPALIVE_EXPIRY = 60.0  # Seconds to keep idle connections alive
 DEFAULT_WARMUP_CONNECTIONS = 3  # Connections to pre-warm per provider
+DEFAULT_STREAMING_MAX_CONNECTIONS = 50 if _IS_WIN else 200
+DEFAULT_STREAMING_MAX_KEEPALIVE = 20 if _IS_WIN else 50
+DEFAULT_STREAMING_KEEPALIVE_EXPIRY = 120.0  # Long-lived streams need long keepalive
 DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
-DEFAULT_HTTP2_ENABLED = not _IS_WIN  # HTTP/2 unreliable with SelectorEventLoop on Windows
+DEFAULT_HTTP2_ENABLED = (
+    not _IS_WIN
+)  # HTTP/2 unreliable with SelectorEventLoop on Windows
 
 
 from .ssl_patch import AZURE_COMPATIBLE_CIPHERS
@@ -94,6 +96,7 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
 
         return await super().handle_async_request(request)
 
+
 def _env_ssl_verify() -> Union[bool, List[str]]:
     """
     Parse SSL verification configuration from environment.
@@ -136,7 +139,6 @@ def _env_ssl_verify() -> Union[bool, List[str]]:
         return hosts
 
     return True
-
 
 
 class HttpClientPool(metaclass=SingletonMeta):
@@ -194,6 +196,17 @@ class HttpClientPool(metaclass=SingletonMeta):
             "HTTP_WARMUP_CONNECTIONS", DEFAULT_WARMUP_CONNECTIONS
         )
 
+        # Streaming-specific limits (longer keepalive, fewer concurrent connections)
+        self._streaming_max_connections = _env_int(
+            "HTTP_STREAMING_MAX_CONNECTIONS", DEFAULT_STREAMING_MAX_CONNECTIONS
+        )
+        self._streaming_max_keepalive = _env_int(
+            "HTTP_STREAMING_MAX_KEEPALIVE", DEFAULT_STREAMING_MAX_KEEPALIVE
+        )
+        self._streaming_keepalive_expiry = _env_float(
+            "HTTP_STREAMING_KEEPALIVE_EXPIRY", DEFAULT_STREAMING_KEEPALIVE_EXPIRY
+        )
+
         # SSL configuration
         self._ssl_verify = ssl_verify if ssl_verify is not None else _env_ssl_verify()
 
@@ -214,10 +227,12 @@ class HttpClientPool(metaclass=SingletonMeta):
         # HTTP/2 configuration (can be disabled for problematic providers)
         self._http2_enabled = _env_bool("HTTP2_ENABLED", DEFAULT_HTTP2_ENABLED)
         if not self._http2_enabled:
-            reason = "SelectorEventLoop incompatibility" if _IS_WIN else "HTTP2_ENABLED env var"
-            lib_logger.warning(
-                f"HTTP/2 is DISABLED ({reason}). Using HTTP/1.1 only."
+            reason = (
+                "SelectorEventLoop incompatibility"
+                if _IS_WIN
+                else "HTTP2_ENABLED env var"
             )
+            lib_logger.warning(f"HTTP/2 is DISABLED ({reason}). Using HTTP/1.1 only.")
 
         # Client instances (lazy initialization)
         self._streaming_client: Optional[httpx.AsyncClient] = None
@@ -231,7 +246,7 @@ class HttpClientPool(metaclass=SingletonMeta):
 
         # Warmup state
         self._warmed_up = False
-        self._warmup_hosts: list = [] # Hosts to pre-warm
+        self._warmup_hosts: list = []  # Hosts to pre-warm
         self._warmup_task: Optional[asyncio.Task] = None
 
         # Orphan close task tracking (prevents GC from collecting fire-and-forget tasks)
@@ -292,14 +307,14 @@ class HttpClientPool(metaclass=SingletonMeta):
         """
         if streaming:
             return httpx.Limits(
-                max_connections=50,
-                max_keepalive_connections=20,
-                keepalive_expiry=120,
+                max_connections=self._streaming_max_connections,
+                max_keepalive_connections=self._streaming_max_keepalive,
+                keepalive_expiry=self._streaming_keepalive_expiry,
             )
         return httpx.Limits(
-            max_connections=100,
-            max_keepalive_connections=50,
-            keepalive_expiry=30,
+            max_connections=self._max_connections,
+            max_keepalive_connections=self._max_keepalive,
+            keepalive_expiry=self._keepalive_expiry,
         )
 
     async def _create_client(self, streaming: bool = False) -> httpx.AsyncClient:
@@ -330,17 +345,13 @@ class HttpClientPool(metaclass=SingletonMeta):
         }
 
         # Use GzipRequestTransport for request body compression
-        if HTTP_COMPRESS_REQUESTS:
-            if self._http2_enabled:
-                lib_logger.warning(
-                    "HTTP/2 is enabled but will be silently ignored when using "
-                    "GzipRequestTransport (custom transport overrides http2 setting). "
-                    "Set HTTP2_ENABLED=false or HTTP_COMPRESS_REQUESTS=false to resolve."
-                )
+        # HTTP/2 already provides header compression (HPACK), so gzip on top
+        # is unnecessary and silently overrides the HTTP/2 transport.
+        if HTTP_COMPRESS_REQUESTS and not self._http2_enabled:
             client_kwargs["transport"] = GzipRequestTransport(
                 limits=self._create_limits(streaming=streaming),
                 verify=ssl_context,
-                http2=self._http2_enabled,
+                http2=False,
             )
 
         # Note: httpx does not support custom DNS resolver.
@@ -402,7 +413,7 @@ class HttpClientPool(metaclass=SingletonMeta):
 
         # Build list of all warmup tasks (parallel execution)
         warmup_tasks = []
-        for host in self._warmup_hosts[:5]: # Limit to 5 hosts for warmup
+        for host in self._warmup_hosts[:5]:  # Limit to 5 hosts for warmup
             for _ in range(self._warmup_count):
                 warmup_tasks.append(client.head(host, follow_redirects=True))
 
@@ -435,7 +446,9 @@ class HttpClientPool(metaclass=SingletonMeta):
                                 f"Warmup connection error for {host}: {type(result).__name__}: {result}"
                             )
                     else:
-                        lib_logger.debug(f"Warmup error for {host}: {type(result).__name__}")
+                        lib_logger.debug(
+                            f"Warmup error for {host}: {type(result).__name__}"
+                        )
                 else:
                     warmed += 1
 
@@ -532,10 +545,25 @@ class HttpClientPool(metaclass=SingletonMeta):
 
         if streaming:
             self._stats["requests_streaming"] += 1
-            return self._streaming_client or self._get_lazy_client(streaming=True)
+            client = self._streaming_client or self._get_lazy_client(streaming=True)
         else:
             self._stats["requests_non_streaming"] += 1
-            return self._non_streaming_client or self._get_lazy_client(streaming=False)
+            client = self._non_streaming_client or self._get_lazy_client(
+                streaming=False
+            )
+
+        if client.is_closed:
+            lib_logger.warning(
+                "get_client() returned a closed client — recreating lazily"
+            )
+            client = self._get_lazy_client(streaming=streaming)
+            if streaming:
+                self._streaming_client = client
+            else:
+                self._non_streaming_client = client
+            self._stats["reconnects"] += 1
+
+        return client
 
     async def get_client_async(self, streaming: bool = False) -> httpx.AsyncClient:
         """
@@ -597,17 +625,17 @@ class HttpClientPool(metaclass=SingletonMeta):
             "verify": self._ssl_context,
         }
 
-        if HTTP_COMPRESS_REQUESTS:
-            if self._http2_enabled:
-                lib_logger.warning(
-                    "HTTP/2 is enabled but will be silently ignored when using "
-                    "GzipRequestTransport (custom transport overrides http2 setting). "
-                    "Set HTTP2_ENABLED=false or HTTP_COMPRESS_REQUESTS=false to resolve."
-                )
+        if HTTP_COMPRESS_REQUESTS and not self._http2_enabled:
             client_kwargs["transport"] = GzipRequestTransport(
                 limits=self._create_limits(streaming=streaming),
                 verify=self._ssl_context,
-                http2=self._http2_enabled,
+                http2=False,
+            )
+        elif HTTP_COMPRESS_REQUESTS and self._http2_enabled:
+            lib_logger.info(
+                "HTTP/2 takes priority over gzip request compression "
+                "(HTTP/2 already provides HPACK header compression). "
+                "Set HTTP2_ENABLED=false if you need gzip compression instead."
             )
 
         client = httpx.AsyncClient(**client_kwargs)
