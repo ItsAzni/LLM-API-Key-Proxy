@@ -168,7 +168,10 @@ class AntigravityProvider(
         """
         Parse Antigravity/Google RPC quota errors.
 
-        Handles the Google Cloud API error format with ErrorInfo and RetryInfo details.
+        Overrides base class because _quota_error_patterns cannot express:
+        - Navigation of error.details[] array with @type-based dispatch
+        - _parse_duration_shared for Google protobuf duration strings (retryDelay, quotaResetDelay)
+        - quotaResetTimeStamp extraction and datetime-to-epoch conversion
         """
         import re as regex_module
 

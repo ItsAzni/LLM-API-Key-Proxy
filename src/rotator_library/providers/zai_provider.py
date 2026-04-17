@@ -106,9 +106,11 @@ class ZaiProvider(ZaiQuotaTracker, ProviderInterface):
     ) -> Optional[Dict[str, Any]]:
         """Parse ZAI 429 error to extract quota reset information.
 
-        ZAI-specific: code 1113 = insufficient balance (cooldown until next midnight UTC),
-        standard 429 = hourly quota (resets at next hour boundary).
-        Falls back to base class _quota_error_patterns for body keyword match.
+        Overrides base class because _quota_error_patterns cannot express:
+        - ZAI-specific numeric error codes (1113 = insufficient balance, 429 = hourly quota)
+        - Dynamic retry_after calculation based on wall-clock boundaries (next midnight UTC, next hour)
+        - Computed reset_timestamp and quota_reset_timestamp from datetime arithmetic
+        (Other providers parse Google RPC details; ZAI uses a flat JSON structure with numeric codes)
         """
         body = cls._extract_error_body(error, error_body) or ""
         try:

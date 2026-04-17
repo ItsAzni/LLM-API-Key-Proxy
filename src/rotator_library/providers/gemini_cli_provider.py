@@ -178,11 +178,12 @@ class GeminiCliProvider(
         """
         Parse Gemini CLI rate limit/quota errors.
 
-        Handles the Gemini CLI error format which embeds reset time in the message:
-        "You have exhausted your capacity on this model. Your quota will reset after 2s."
-
-        Unlike Antigravity which uses structured RetryInfo/quotaResetDelay metadata,
-        Gemini CLI embeds the reset time in a human-readable message.
+        Overrides base class because _quota_error_patterns cannot express:
+        - Navigation of error.details[] array with @type-based dispatch (ErrorInfo, RetryInfo)
+        - _parse_duration_shared for Google protobuf duration strings (quotaResetDelay, retryDelay)
+        - Fallback to str(error) when no body is available
+        - extract_retry_after_from_body called first so its result survives even if JSON parse fails
+        (Antigravity has similar structure but also handles quotaResetTimeStamp; Gemini CLI does not)
         """
         import re as regex_module
 

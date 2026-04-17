@@ -74,6 +74,7 @@ def make_error_response(message: str, error_type: str = "api_error", code: str |
 
 async def track_stream(request: Request, stream: AsyncGenerator[Any, None]) -> AsyncGenerator[Any, None]:
     """Wrap an async generator to track active streaming connections for graceful shutdown."""
+    request._stream_tracked = True
     try:
         await _inc_streams(request)
     except AttributeError:

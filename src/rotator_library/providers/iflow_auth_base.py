@@ -179,6 +179,7 @@ class OAuthCallbackServer:
 
 
 from .google_oauth_base import GoogleOAuthBase
+from .oauth_base import AuthQueueMixin
 
 
 class IFlowAuthBase(GoogleOAuthBase):
@@ -714,11 +715,8 @@ class IFlowAuthBase(GoogleOAuthBase):
 
     # proactively_refresh inherited from GoogleOAuthBase (with IOError handling)
 
-    def _is_invalid_grant_error(self, error_body: str, status_code: int, error_type: str = "") -> bool:
-        """iFlow uses 'invalid' in error description instead of 'invalid_grant'."""
-        if status_code == 400:
-            return "invalid" in error_body.lower() or error_type == "invalid_request"
-        return False
+    # _is_invalid_grant_error: inherited from AuthQueueMixin (bypasses GoogleOAuthBase's Google-specific override)
+    _is_invalid_grant_error = AuthQueueMixin._is_invalid_grant_error
 
     # _process_refresh_queue inherited from GoogleOAuthBase
 

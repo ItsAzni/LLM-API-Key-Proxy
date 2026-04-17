@@ -1,6 +1,21 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 ShmidtS
 
+import gzip as _gzip
+
+
+def _hdr_lower(raw):
+    return (raw.decode("latin-1") if isinstance(raw, bytes) else raw).lower()
+
+
+def _hdr_str(raw):
+    return raw.decode("latin-1") if isinstance(raw, bytes) else raw
+
+
+def _filter_content_length(headers):
+    return [(hk, hv) for hk, hv in headers if _hdr_lower(hk) != "content-length"]
+
+
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -22,10 +37,7 @@ class SecurityHeadersMiddleware:
         async def _send(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
-                existing = {
-                    (h[0].decode("latin-1") if isinstance(h[0], bytes) else h[0]).lower()
-                    for h in headers
-                }
+                existing = {_hdr_lower(h[0]) for h in headers}
                 for name, value in SECURITY_HEADERS.items():
                     if name.lower() not in existing:
                         headers.append((name.encode(), value.encode()))
@@ -65,8 +77,6 @@ class _NoGzipForSSE:
             await self._app(scope, receive, send)
             return
 
-        import gzip as _gzip
-
         initial_message = None
         compressor = None
         skip = False
@@ -79,8 +89,8 @@ class _NoGzipForSSE:
                 initial_message = message
                 headers = message.get("headers", [])
                 for h in headers:
-                    hk = (h[0].decode("latin-1") if isinstance(h[0], bytes) else h[0]).lower()
-                    hv = h[1].decode("latin-1") if isinstance(h[1], bytes) else h[1]
+                    hk = _hdr_lower(h[0])
+                    hv = _hdr_str(h[1])
                     if hk == "content-type" and "text/event-stream" in hv:
                         skip = True
                         break
@@ -101,12 +111,7 @@ class _NoGzipForSSE:
                 if skip or more:
                     skip = True
                     # Remove content-length header for streaming responses to prevent mismatch
-                    filtered_headers = [
-                        (hk, hv)
-                        for hk, hv in initial_message.get("headers", [])
-                        if (hk.decode("latin-1") if isinstance(hk, bytes) else hk).lower()
-                        != "content-length"
-                    ]
+                    filtered_headers = _filter_content_length(initial_message.get("headers", []))
                     await send({**initial_message, "headers": filtered_headers})
                     await send(message)
                     return
@@ -122,12 +127,7 @@ class _NoGzipForSSE:
                     await send(message)
                     return
 
-                headers = [
-                    (hk, hv)
-                    for hk, hv in initial_message.get("headers", [])
-                    if (hk.decode("latin-1") if isinstance(hk, bytes) else hk).lower()
-                    != "content-length"
-                ]
+                headers = _filter_content_length(initial_message.get("headers", []))
                 headers.append((b"content-encoding", b"gzip"))
                 headers.append((b"vary", b"accept-encoding"))
                 headers.append((b"content-length", str(len(out)).encode()))

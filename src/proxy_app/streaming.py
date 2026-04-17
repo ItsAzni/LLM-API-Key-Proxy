@@ -36,10 +36,15 @@ async def streaming_response_wrapper(
         aggregator = ChunkAggregator()
 
     # Track active streaming connections for graceful shutdown
-    try:
-        await _inc_streams(request)
-    except AttributeError:
-        logging.debug("stream_response: request lacks stream counter attribute on increment")
+    # NOTE: track_stream() in dependencies.py also increments the counter.
+    # When both wrappers are used, only track_stream should own the counter.
+    # Here we only increment if track_stream is NOT in the call chain.
+    _owns_counter = not getattr(request, '_stream_tracked', False)
+    if _owns_counter:
+        try:
+            await _inc_streams(request)
+        except AttributeError:
+            logging.debug("stream_response: request lacks stream counter attribute on increment")
 
     try:
         async for chunk in response_stream:
@@ -92,10 +97,11 @@ async def streaming_response_wrapper(
             )
         return  # Stop further processing
     finally:
-        try:
-            await _dec_streams(request)
-        except AttributeError:
-            logging.debug("stream_response: request lacks stream counter attribute on decrement")
+        if _owns_counter:
+            try:
+                await _dec_streams(request)
+            except AttributeError:
+                logging.debug("stream_response: request lacks stream counter attribute on decrement")
         if logger:
             try:
                 full_response = aggregator.build_response_dict() if aggregator else {}
