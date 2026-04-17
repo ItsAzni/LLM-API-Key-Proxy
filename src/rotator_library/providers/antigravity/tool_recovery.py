@@ -162,6 +162,7 @@ class ToolRecoveryMixin:
                     "[Antigravity] Fixed malformed JSON with aggressive whitespace normalization"
                 )
             except orjson.JSONDecodeError:
+                lib_logger.debug("JSON decode error in tool_recovery (whitespace fix)", exc_info=True)
                 pass
 
         # Option 5: If still failing, try fixing unquoted string values
@@ -182,6 +183,7 @@ class ToolRecoveryMixin:
                 )
             except orjson.JSONDecodeError:
                 # All fixes failed, leave as None
+                lib_logger.debug("JSON decode error in tool_recovery (unquoted fix)", exc_info=True)
                 pass
 
         return result

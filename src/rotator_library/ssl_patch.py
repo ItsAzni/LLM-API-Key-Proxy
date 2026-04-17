@@ -49,7 +49,6 @@ def _patch_aiohttp_connector():
             )
 
         # Patch aiohttp.TCPConnector
-        import aiohttp
         from aiohttp import TCPConnector as _OriginalTCPConnector
 
         _original_init = _OriginalTCPConnector.__init__

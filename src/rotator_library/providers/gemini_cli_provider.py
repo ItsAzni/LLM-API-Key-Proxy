@@ -49,8 +49,8 @@ def _get_gemini_cli_cache_dir() -> Path:
     return get_cache_dir(subdir="gemini_cli")
 
 
-def _get_gemini3_signature_cache_file() -> Path:
-    """Get the Gemini 3 signature cache file path."""
+def _get_gemini_cli_signature_cache_file() -> Path:
+    """Get the Gemini CLI signature cache file path."""
     return _get_gemini_cli_cache_dir() / "gemini3_signatures.json"
 
 
@@ -257,7 +257,7 @@ class GeminiCliProvider(
 
         # Initialize signature cache for Gemini 3 thoughtSignatures
         self._signature_cache = ProviderCache(
-            _get_gemini3_signature_cache_file(),
+            _get_gemini_cli_signature_cache_file(),
             memory_ttl,
             disk_ttl,
             env_prefix="GEMINI_CLI_SIGNATURE",

@@ -18,6 +18,8 @@ import orjson
 
 import logging
 import os
+
+lib_logger = logging.getLogger("rotator_library")
 import httpx
 import litellm
 
@@ -289,6 +291,7 @@ class ProviderInterface(ABC):
             if json_match:
                 data = orjson.loads(json_match.group(0))
         except (orjson.JSONDecodeError, ValueError):
+            lib_logger.debug("JSON parse error in provider_interface", exc_info=True)
             pass
 
         for spec in patterns:
@@ -308,6 +311,7 @@ class ProviderInterface(ABC):
                         try:
                             return {"retry_after": int(val), "reason": reason}
                         except (ValueError, TypeError):
+                            lib_logger.debug("Value/Type error in provider_interface", exc_info=True)
                             pass
 
             elif kind == "body":

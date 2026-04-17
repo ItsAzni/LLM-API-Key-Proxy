@@ -387,6 +387,7 @@ def recursively_parse_json_strings(
                         parsed, schema, parse_json_objects, log_prefix
                     )
                 except (orjson.JSONDecodeError, ValueError):
+                    lib_logger.debug("JSON parse error in gemini_shared_utils", exc_info=True)
                     pass
 
             # Handle malformed JSON: array that doesn't end with ]
@@ -406,6 +407,7 @@ def recursively_parse_json_strings(
                             parsed, schema, parse_json_objects, log_prefix
                         )
                 except (orjson.JSONDecodeError, ValueError):
+                    lib_logger.debug("JSON parse error in gemini_shared_utils (array fix)", exc_info=True)
                     pass
 
             # Handle malformed JSON: object that doesn't end with }
@@ -424,5 +426,6 @@ def recursively_parse_json_strings(
                             parsed, schema, parse_json_objects, log_prefix
                         )
                 except (orjson.JSONDecodeError, ValueError):
+                    lib_logger.debug("JSON parse error in gemini_shared_utils (object fix)", exc_info=True)
                     pass
     return obj

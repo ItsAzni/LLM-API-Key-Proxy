@@ -201,8 +201,9 @@ class CredentialManager:
                     )
                     prepared_paths.append(str(local_path.resolve()))
                 except Exception as e:
-                    lib_logger.error(
-                        f"Failed to process OAuth file from '{source_path}': {e}"
+                    lib_logger.warning(
+                        f"Credential file failed to copy from '{source_path}' to '{local_path}': {e}. "
+                        f"This credential will be skipped."
                     )
 
             if prepared_paths:

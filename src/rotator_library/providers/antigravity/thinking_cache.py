@@ -654,6 +654,7 @@ class ThinkingCacheMixin:
                         f"{len(thinking_text)} chars"
                     )
             except orjson.JSONDecodeError:
+                lib_logger.debug("JSON decode error in thinking_cache", exc_info=True)
                 pass
 
         return recovered_count

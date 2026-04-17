@@ -108,12 +108,25 @@ class _NoGzipForSSE:
 
             if not started:
                 started = True
-                if skip or more:
-                    skip = True
-                    # Remove content-length header for streaming responses to prevent mismatch
+                if skip:
+                    # SSE or too-small response — passthrough without compression
                     filtered_headers = _filter_content_length(initial_message.get("headers", []))
                     await send({**initial_message, "headers": filtered_headers})
                     await send(message)
+                    return
+
+                if more:
+                    # Chunked non-SSE response — initialize compressor for streaming gzip
+                    compressor = _gzip.compressobj(level=6)
+                    filtered_headers = _filter_content_length(initial_message.get("headers", []))
+                    filtered_headers.append((b"content-encoding", b"gzip"))
+                    filtered_headers.append((b"vary", b"accept-encoding"))
+                    await send({**initial_message, "headers": filtered_headers})
+                    if body:
+                        out = compressor.compress(body)
+                        await send({"type": "http.response.body", "body": out, "more_body": True})
+                    else:
+                        await send(message)
                     return
 
                 if len(body) < self._minimum_size:

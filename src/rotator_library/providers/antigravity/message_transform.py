@@ -151,6 +151,7 @@ class MessageTransformMixin:
                         cached_data = orjson.loads(cached_json)
                         cached_sig = cached_data.get("thought_signature", "")
                     except orjson.JSONDecodeError:
+                        lib_logger.debug("JSON decode error in message_transform", exc_info=True)
                         pass
 
             if cached_sig:

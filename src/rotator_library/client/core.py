@@ -9,7 +9,6 @@
 # Do NOT reorder or simplify these imports.
 
 import os
-from typing import TYPE_CHECKING
 
 # Load .env file BEFORE reading any environment variables
 try:
@@ -37,9 +36,6 @@ from ..ssl_patch import _patch_aiohttp_connector
 from ..quota_reporter import QuotaReporter
 from ..anthropic_adapter import AnthropicAdapter
 
-if TYPE_CHECKING:
-    from ..anthropic_compat.models import AnthropicMessagesRequest, AnthropicCountTokensRequest
-
 _patch_aiohttp_connector()
 
 import asyncio
@@ -49,7 +45,10 @@ import httpx
 import litellm
 from litellm.litellm_core_utils.token_counter import token_counter
 from pathlib import Path
-from typing import List, Dict, Any, AsyncGenerator, Optional, Union
+from typing import List, Dict, Any, AsyncGenerator, Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..anthropic_compat.models import AnthropicMessagesRequest, AnthropicCountTokensRequest
 
 
 lib_logger = logging.getLogger("rotator_library")

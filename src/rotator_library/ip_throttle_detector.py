@@ -131,8 +131,14 @@ class IPThrottleDetector(metaclass=SingletonMeta):
         # Per-provider sharded locks (lazy init)
         self._locks = ProviderLockManager()
 
-        # Global lock for _records dict structure access
-        self._records_lock = asyncio.Lock()
+        # Global lock for _records dict structure access (lazy init)
+        self._records_lock_instance: Optional[asyncio.Lock] = None
+
+    @property
+    def _records_lock(self) -> asyncio.Lock:
+        if self._records_lock_instance is None:
+            self._records_lock_instance = asyncio.Lock()
+        return self._records_lock_instance
 
         # Per-provider tracking: provider -> list of _ThrottleRecord
         self._records: Dict[str, List[_ThrottleRecord]] = defaultdict(list)

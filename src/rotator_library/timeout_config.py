@@ -12,7 +12,7 @@ All values can be overridden via environment variables:
     TIMEOUT_WRITE - Request body send timeout (default: 30s)
     TIMEOUT_POOL - Connection pool acquisition timeout (default: 15s)
     TIMEOUT_READ_STREAMING - Read timeout between chunks for streaming (default: 300s / 5 min)
-    TIMEOUT_READ_NON_STREAMING - Read timeout for non-streaming responses (default: 300s / 5 min)
+    TIMEOUT_READ_NON_STREAMING - Read timeout for non-streaming responses (default: 120s / 2 min)
     TIMEOUT_QUOTA_VIEWER_CONNECT - Quota viewer liveness check (default: 3s)
     TIMEOUT_QUOTA_VIEWER_FETCH - Quota viewer stats fetch (default: 30s)
     TIMEOUT_QUOTA_VIEWER_ACTION - Quota viewer POST actions (default: 60s)
@@ -40,7 +40,7 @@ class TimeoutConfig:
     _WRITE = 30.0
     _POOL = 15.0  # Reduced from 60s for faster failure detection
     _READ_STREAMING = 300.0  # 5 minutes between chunks
-    _READ_NON_STREAMING = 300.0  # 5 minutes for full response (was 600s)
+    _READ_NON_STREAMING = 120.0  # 2 minutes for full response (was 300s)
 
     # DNS timeouts
     _DNS_QUERY = 10.0  # DNS resolution timeout
@@ -169,7 +169,7 @@ class TimeoutConfig:
         """
         Timeout configuration for non-streaming LLM requests.
 
-        Uses a longer read timeout (default 5 min) since the server
+        Uses a longer read timeout (default 2 min) since the server
         may take significant time to generate the complete response
         before sending anything back.
         """

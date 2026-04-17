@@ -6,11 +6,10 @@ from .config.defaults import TRACE
 
 from typing import Any, Optional, TYPE_CHECKING
 
-import orjson
-
 if TYPE_CHECKING:
-    from .anthropic_compat import AnthropicMessagesRequest, AnthropicCountTokensRequest
+    from .anthropic_compat.models import AnthropicMessagesRequest, AnthropicCountTokensRequest
 
+import orjson
 
 lib_logger = logging.getLogger("rotator_library")
 

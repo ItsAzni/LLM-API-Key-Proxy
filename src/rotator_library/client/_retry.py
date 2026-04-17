@@ -442,9 +442,10 @@ class RetryMixin:
                             http_client = await self._get_http_client_async(
                                 streaming=False
                             )
-                            response = await provider_plugin.acompletion(
-                                http_client, **litellm_kwargs
-                            )
+                            async with self._global_semaphore:
+                                response = await provider_plugin.acompletion(
+                                    http_client, **litellm_kwargs
+                                )
 
                             # For non-streaming, success is immediate
                             # Parallelize independent bookkeeping operations
@@ -627,9 +628,7 @@ class RetryMixin:
                             ) and "client has been closed" in str(e):
                                 self._reset_litellm_client_cache()
 
-                            # CRITICAL: Ensure HTTP client is usable before retry
-                            # Connection errors can leave the client in a closed state
-                            await self._get_http_client_async(streaming=False)
+                            # HTTP client will be refreshed at the start of the next attempt
                             continue
 
                         except GarbageResponseError as gre:
@@ -735,6 +734,9 @@ class RetryMixin:
                             raise last_exception or NoAvailableKeysError(
                                 f"Exceeded max total attempts ({MAX_TOTAL_ATTEMPTS})"
                             )
+                        # Ensure HTTP client pool is healthy at the start of each attempt
+                        # This replaces redundant per-error-handler calls below
+                        await self._get_http_client_async(streaming=False)
                         try:
                             lib_logger.info(
                                 "Attempting call with credential %s (Attempt %s/%s)",
@@ -761,10 +763,11 @@ class RetryMixin:
                                 **litellm_kwargs
                             )
 
-                            response = await api_call(
-                                **final_kwargs,
-                                logger_fn=self._litellm_logger_callback,
-                            )
+                            async with self._global_semaphore:
+                                response = await api_call(
+                                    **final_kwargs,
+                                    logger_fn=self._litellm_logger_callback,
+                                )
 
                             # Parallelize independent bookkeeping operations
                             await asyncio.gather(
@@ -927,9 +930,7 @@ class RetryMixin:
                             ) and "client has been closed" in str(e):
                                 self._reset_litellm_client_cache()
 
-                            # CRITICAL: Ensure HTTP client is usable before retry
-                            # Connection errors can leave the client in a closed state
-                            await self._get_http_client_async(streaming=False)
+                            # HTTP client pool will be refreshed at start of next attempt
                             continue  # Retry with the same key
 
                         except httpx.HTTPStatusError as e:
@@ -1014,9 +1015,7 @@ class RetryMixin:
                                     )
                                     await asyncio.sleep(wait_time)
 
-                                    # CRITICAL: Ensure HTTP client is usable before retry
-                                    # Connection errors can leave the client in a closed state
-                                    await self._get_http_client_async(streaming=False)
+                                    # HTTP client pool refreshed at start of next attempt
                                     continue
 
                             # Record failure and rotate to next key
@@ -1325,45 +1324,46 @@ class RetryMixin:
                                 http_client = await self._get_http_client_async(
                                     streaming=True
                                 )
-                                response = await provider_plugin.acompletion(
-                                    http_client, **litellm_kwargs
-                                )
-
-                                lib_logger.info(
-                                    "Stream connection established for credential %s. Processing response.",
-                                    mask_credential(current_cred),
-                                )
-
-                                stream_generator = self._safe_streaming_wrapper(
-                                    response,
-                                    current_cred,
-                                    model,
-                                    request,
-                                    provider_plugin,
-                                )
-
-                                # Release the key when the stream consumer finishes iterating.
-                                # The outer finally only fires on generator finalization;
-                                # this try/finally ensures the credential is released
-                                # promptly whether the stream completes normally, errors
-                                # out, or the consumer stops early.
-                                try:
-                                    if transaction_logger:
-                                        async for (
-                                            chunk
-                                        ) in self._transaction_logging_stream_wrapper(
-                                            stream_generator, transaction_logger, kwargs
-                                        ):
-                                            yield chunk
-                                    else:
-                                        async for chunk in stream_generator:
-                                            yield chunk
-                                finally:
-                                    await self.usage_manager.release_key(
-                                        current_cred, model
+                                async with self._global_semaphore:
+                                    response = await provider_plugin.acompletion(
+                                        http_client, **litellm_kwargs
                                     )
-                                    key_acquired = False  # prevent outer finally from double-releasing
-                                # Streaming completed successfully — mirror non-streaming bookkeeping
+
+                                    lib_logger.info(
+                                        "Stream connection established for credential %s. Processing response.",
+                                        mask_credential(current_cred),
+                                    )
+
+                                    stream_generator = self._safe_streaming_wrapper(
+                                        response,
+                                        current_cred,
+                                        model,
+                                        request,
+                                        provider_plugin,
+                                    )
+
+                                    # Release the key when the stream consumer finishes iterating.
+                                    # The outer finally only fires on generator finalization;
+                                    # this try/finally ensures the credential is released
+                                    # promptly whether the stream completes normally, errors
+                                    # out, or the consumer stops early.
+                                    try:
+                                        if transaction_logger:
+                                            async for (
+                                                chunk
+                                            ) in self._transaction_logging_stream_wrapper(
+                                                stream_generator, transaction_logger, kwargs
+                                            ):
+                                                yield chunk
+                                        else:
+                                            async for chunk in stream_generator:
+                                                yield chunk
+                                    finally:
+                                        await self.usage_manager.release_key(
+                                            current_cred, model
+                                        )
+                                        key_acquired = False  # prevent outer finally from double-releasing
+                                # Streaming completed successfully (semaphore released) — mirror non-streaming bookkeeping
                                 await asyncio.gather(
                                     self._resilience.record_success(provider),
                                     self._resilience.record_rate_success(provider),
@@ -1517,9 +1517,7 @@ class RetryMixin:
                                 )
                                 await asyncio.sleep(wait_time)
 
-                                # CRITICAL: Ensure HTTP client is usable before retry
-                                # Connection errors can leave the client in a closed state
-                                await self._get_http_client_async(streaming=True)
+                                # HTTP client will be refreshed at the start of the next attempt
                                 continue
 
                             except (
@@ -1589,8 +1587,7 @@ class RetryMixin:
                                     mask_credential(current_cred),
                                 )
 
-                                # Ensure HTTP client is usable before retry
-                                await self._get_http_client_async(streaming=True)
+                                # HTTP client will be refreshed at the start of the next attempt
                                 continue
 
                             except asyncio.CancelledError:
@@ -1752,6 +1749,9 @@ class RetryMixin:
                             raise last_exception or NoAvailableKeysError(
                                 f"Exceeded max total attempts ({MAX_TOTAL_ATTEMPTS})"
                             )
+                        # Ensure HTTP client pool is healthy at the start of each attempt
+                        # This replaces redundant per-error-handler calls below
+                        await self._get_http_client_async(streaming=True)
                         try:
                             lib_logger.info(
                                 "Attempting stream with credential %s (Attempt %d/%d)",
@@ -1778,44 +1778,45 @@ class RetryMixin:
                                 **litellm_kwargs
                             )
 
-                            response = await litellm.acompletion(
-                                **final_kwargs,
-                                logger_fn=self._litellm_logger_callback,
-                            )
-
-                            lib_logger.info(
-                                "Stream connection established for credential %s. Processing response.",
-                                mask_credential(current_cred),
-                            )
-
-                            stream_generator = self._safe_streaming_wrapper(
-                                response,
-                                current_cred,
-                                model,
-                                request,
-                                provider_plugin,
-                            )
-
-                            # Release the key when the stream consumer finishes iterating.
-                            try:
-                                if transaction_logger:
-                                    async for (
-                                        chunk
-                                    ) in self._transaction_logging_stream_wrapper(
-                                        stream_generator, transaction_logger, kwargs
-                                    ):
-                                        yield chunk
-                                else:
-                                    async for chunk in stream_generator:
-                                        yield chunk
-                            finally:
-                                await self.usage_manager.release_key(
-                                    current_cred, model
+                            async with self._global_semaphore:
+                                response = await litellm.acompletion(
+                                    **final_kwargs,
+                                    logger_fn=self._litellm_logger_callback,
                                 )
-                                key_acquired = (
-                                    False  # prevent outer finally from double-releasing
+
+                                lib_logger.info(
+                                    "Stream connection established for credential %s. Processing response.",
+                                    mask_credential(current_cred),
                                 )
-                            # Streaming completed successfully — mirror non-streaming bookkeeping
+
+                                stream_generator = self._safe_streaming_wrapper(
+                                    response,
+                                    current_cred,
+                                    model,
+                                    request,
+                                    provider_plugin,
+                                )
+
+                                # Release the key when the stream consumer finishes iterating.
+                                try:
+                                    if transaction_logger:
+                                        async for (
+                                            chunk
+                                        ) in self._transaction_logging_stream_wrapper(
+                                            stream_generator, transaction_logger, kwargs
+                                        ):
+                                            yield chunk
+                                    else:
+                                        async for chunk in stream_generator:
+                                            yield chunk
+                                finally:
+                                    await self.usage_manager.release_key(
+                                        current_cred, model
+                                    )
+                                    key_acquired = (
+                                        False  # prevent outer finally from double-releasing
+                                    )
+                            # Streaming completed successfully (semaphore released) — mirror non-streaming bookkeeping
                             await asyncio.gather(
                                 self._resilience.record_success(provider),
                                 self._resilience.record_rate_success(provider),
@@ -1993,9 +1994,7 @@ class RetryMixin:
                                             attempt + 1, self.max_retries, backoff,
                                         )
                                         await asyncio.sleep(backoff)
-                                        await self._get_http_client_async(
-                                            streaming=True
-                                        )
+                                        # HTTP client pool refreshed at start of next attempt
                                         continue  # Retry same key instead of rotating
 
                                 lib_logger.warning(
@@ -2087,9 +2086,7 @@ class RetryMixin:
                                 mask_credential(current_cred), model, error_message_text,
                             )
 
-                            # CRITICAL: Ensure HTTP client is usable before retry
-                            # Connection errors can leave the client in a closed state
-                            await self._get_http_client_async(streaming=True)
+                            # HTTP client pool refreshed at start of next attempt
                             continue
 
                         except (
@@ -2158,8 +2155,7 @@ class RetryMixin:
                                 f"Cred {mask_credential(current_cred)} transport error. Retrying within remaining budget."
                             )
 
-                            # Ensure HTTP client is usable before retry
-                            await self._get_http_client_async(streaming=True)
+                            # HTTP client pool refreshed at start of next attempt
                             continue
 
                         except asyncio.CancelledError:
@@ -2282,24 +2278,27 @@ class RetryMixin:
             yield STREAM_DONE
 
     async def _rate_limited_execute(self, api_call, request, pre_request_callback=None, **kwargs):
-        """Backpressure-gated entry point for non-streaming API calls."""
-        async with self._global_semaphore:
-            return await self._execute_with_retry(
-                api_call, request, pre_request_callback=pre_request_callback, **kwargs
-            )
+        """Backpressure-gated entry point for non-streaming API calls.
+
+        The semaphore is acquired per-attempt inside _execute_with_retry,
+        not around the entire retry cycle, so backoff sleeps don't hold
+        a semaphore slot.
+        """
+        return await self._execute_with_retry(
+            api_call, request, pre_request_callback=pre_request_callback, **kwargs
+        )
 
     async def _rate_limited_streaming(self, request, pre_request_callback=None, **kwargs):
         """Backpressure-gated entry point for streaming API calls.
 
-        The async with semaphore is safe with async generators: CPython's
-        async generator finalizer runs __aexit__ even on GeneratorExit or
-        CancelledError, so the semaphore is always released.
+        The semaphore is acquired per-attempt inside
+        _streaming_acompletion_with_retry, not around the entire retry
+        cycle, so backoff sleeps don't hold a semaphore slot.
         """
-        async with self._global_semaphore:
-            async for chunk in self._streaming_acompletion_with_retry(
-                request, pre_request_callback=pre_request_callback, **kwargs
-            ):
-                yield chunk
+        async for chunk in self._streaming_acompletion_with_retry(
+            request, pre_request_callback=pre_request_callback, **kwargs
+        ):
+            yield chunk
 
     async def _forced_streaming_acompletion(
         self,

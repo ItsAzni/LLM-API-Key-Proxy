@@ -618,8 +618,10 @@ class ProviderCache:
             self._init_task.cancel()
             try:
                 await self._init_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                lib_logger.debug(f"ProviderCache[{self._cache_name}]: Init task error during shutdown: {e}")
 
         # Cancel background tasks
         for task in (self._writer_task, self._cleanup_task):
