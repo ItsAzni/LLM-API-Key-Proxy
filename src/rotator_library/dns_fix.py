@@ -100,13 +100,6 @@ def _get_cached_ips(hostname: str) -> Optional[List[str]]:
         return None
 
 
-def _cache_ips(hostname: str, ips: List[str]) -> None:
-    """Cache IPs with TTL."""
-    if ips:
-        ttl = get_dns_cache_ttl()
-        with _dns_cache_lock:
-            _dns_cache[hostname] = (ips, time.monotonic() + ttl)
-
 
 def get_dns_query_timeout() -> int:
     """Get DNS query timeout from config."""

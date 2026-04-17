@@ -34,7 +34,6 @@ async def audio_speech(
 
     log_request_to_console(
         url=str(request.url),
-        headers=request.headers,
         client_info=(request.client.host, request.client.port),
         request_data=request_data,
     )
@@ -106,7 +105,6 @@ async def audio_transcriptions(
 
     log_request_to_console(
         url=str(request.url),
-        headers=request.headers,
         client_info=(request.client.host, request.client.port),
         request_data={"model": model, "file": file_filename, **{k: v for k, v in kwargs.items() if k not in ("file",)}},
     )
