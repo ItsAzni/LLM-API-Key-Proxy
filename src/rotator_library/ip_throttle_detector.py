@@ -130,15 +130,7 @@ class IPThrottleDetector(metaclass=SingletonMeta):
 
         # Per-provider sharded locks (lazy init)
         self._locks = ProviderLockManager()
-
-        # Global lock for _records dict structure access (lazy init)
-        self._records_lock_instance: Optional[asyncio.Lock] = None
-
-    @property
-    def _records_lock(self) -> asyncio.Lock:
-        if self._records_lock_instance is None:
-            self._records_lock_instance = asyncio.Lock()
-        return self._records_lock_instance
+        self._records_lock = asyncio.Lock()
 
         # Per-provider tracking: provider -> list of _ThrottleRecord
         self._records: Dict[str, List[_ThrottleRecord]] = defaultdict(list)
@@ -156,19 +148,17 @@ class IPThrottleDetector(metaclass=SingletonMeta):
         normalized = "".join(error_body.split()).lower()
         return hashlib.md5(normalized.encode(), usedforsecurity=False).hexdigest()
 
-    async def _cleanup_old_records(self, provider: str) -> None:
+    def _prune_records(self, records: List[_ThrottleRecord], now: Optional[float] = None) -> List[_ThrottleRecord]:
         """Remove records older than the detection window and enforce memory limit."""
-        cutoff = time.monotonic() - self.window_seconds
-        lock = await self._locks.get_lock(provider)
-        async with lock:
-            self._records[provider] = [
-                r for r in self._records[provider] if r.timestamp > cutoff
-            ]
-            # FIFO eviction if records exceed memory limit
-            if len(self._records[provider]) > self.MAX_RECORDS_PER_PROVIDER:
-                self._records[provider] = self._records[provider][
-                    -self.MAX_RECORDS_PER_PROVIDER :
-                ]
+        cutoff = (now if now is not None else time.monotonic()) - self.window_seconds
+        records = [r for r in records if r.timestamp > cutoff]
+        if len(records) > self.MAX_RECORDS_PER_PROVIDER:
+            records = records[-self.MAX_RECORDS_PER_PROVIDER :]
+        return records
+
+    async def _provider_names(self) -> tuple[str, ...]:
+        async with self._records_lock:
+            return tuple(self._records)
 
     async def record_429(
         self,
@@ -195,25 +185,21 @@ class IPThrottleDetector(metaclass=SingletonMeta):
         now = time.monotonic()
         error_body_hash = self._hash_error_body(error_body)
 
-        # Create and store the record
         record = _ThrottleRecord(
             timestamp=now,
             credential=credential,
             error_body_hash=error_body_hash,
             retry_after=retry_after,
-            error_body=error_body[:500] if error_body else None,  # Truncate for storage
+            error_body=error_body[:500] if error_body else None,
         )
         lock = await self._locks.get_lock(provider)
         async with lock:
-            self._records[provider].append(record)
+            records = self._prune_records(self._records[provider], now)
+            records.append(record)
+            records = self._prune_records(records, now)
+            self._records[provider] = records
+            assessment = self._assess_throttle_scope_from_records(records)
 
-        # Cleanup old records
-        await self._cleanup_old_records(provider)
-
-        # Assess throttle scope
-        assessment = await self._assess_throttle_scope(provider)
-
-        # Override cooldown with retry_after if provided
         if retry_after and retry_after > assessment.suggested_cooldown:
             assessment.suggested_cooldown = retry_after
 
@@ -225,28 +211,15 @@ class IPThrottleDetector(metaclass=SingletonMeta):
         return assessment
 
     async def _assess_throttle_scope(self, provider: str) -> ThrottleAssessment:
-        """
-        Assess the scope of throttling for a provider.
+        """Assess the scope of throttling for a provider."""
+        lock = await self._locks.get_lock(provider)
+        async with lock:
+            records = self._prune_records(self._records[provider])
+            self._records[provider] = records
+            return self._assess_throttle_scope_from_records(records)
 
-        Analyzes recent 429 records to determine if throttling is:
-        - Per-credential (normal rate limit)
-        - IP-level (affects all credentials)
-        - Account-level (affects all keys in account)
-
-        Detection heuristics:
-        1. 3+ different credentials with 429 in window -> IP throttle (high confidence)
-        2. Same error_body_hash across credentials -> Same throttle source
-        3. Single credential with 429 -> Credential-level throttle
-
-        Args:
-            provider: Provider name to assess
-
-        Returns:
-            ThrottleAssessment with detected scope and recommendations
-        """
-        async with self._records_lock:
-            records = list(self._records[provider])
-
+    def _assess_throttle_scope_from_records(self, records: List[_ThrottleRecord]) -> ThrottleAssessment:
+        """Assess the scope of throttling from a consistent records snapshot."""
         if not records:
             return ThrottleAssessment(
                 scope=ThrottleScope.CREDENTIAL,
@@ -254,40 +227,22 @@ class IPThrottleDetector(metaclass=SingletonMeta):
                 suggested_cooldown=self.credential_cooldown,
             )
 
-        # Get unique credentials
         unique_credentials = list(dict.fromkeys(r.credential for r in records))
         num_unique_credentials = len(unique_credentials)
 
-        # Analyze error body hashes
         hash_counts: Dict[Optional[str], int] = defaultdict(int)
         for r in records:
             hash_counts[r.error_body_hash] += 1
 
-        # Find the most common error hash
-        most_common_hash = max(hash_counts.items(), key=lambda x: x[1])
-        common_hash, common_hash_count = most_common_hash
-
-        # Get the maximum retry_after from recent records
+        common_hash, common_hash_count = max(hash_counts.items(), key=lambda x: x[1])
         max_retry_after = max((r.retry_after or 0) for r in records)
 
-        # Calculate confidence based on correlation strength
-        # IP throttle detection
         if num_unique_credentials >= self.min_credentials:
-            # Multiple credentials throttled -> likely IP-level
             confidence = min(1.0, num_unique_credentials / self.min_credentials)
-
-            # Higher confidence if same error body
             if common_hash and common_hash_count >= 2:
                 confidence = min(1.0, confidence + 0.2)
-
-            # Even higher confidence if same error across ALL credentials
             if common_hash and common_hash_count == len(records):
                 confidence = min(1.0, confidence + 0.1)
-
-            lib_logger.info(
-                f"IP-level throttle detected: provider={provider}, "
-                f"credentials={num_unique_credentials}, confidence={confidence:.2f}"
-            )
 
             return ThrottleAssessment(
                 scope=ThrottleScope.IP,
@@ -302,7 +257,6 @@ class IPThrottleDetector(metaclass=SingletonMeta):
                 },
             )
 
-        # Single credential throttled -> credential-level
         return ThrottleAssessment(
             scope=ThrottleScope.CREDENTIAL,
             confidence=0.8,
@@ -322,48 +276,51 @@ class IPThrottleDetector(metaclass=SingletonMeta):
             Dict mapping provider names to their ThrottleAssessment
         """
         result = {}
-        async with self._records_lock:
-            providers = list(self._records.keys())
-        for provider in providers:
-            await self._cleanup_old_records(provider)
-            async with self._records_lock:
-                has_records = bool(self._records[provider])
-            if has_records:
-                assessment = await self._assess_throttle_scope(provider)
-                if assessment.scope == ThrottleScope.IP:
-                    result[provider] = assessment
+        for provider in await self._provider_names():
+            assessment = await self._assess_throttle_scope(provider)
+            if assessment.scope == ThrottleScope.IP:
+                result[provider] = assessment
         return result
 
     async def clear_provider(self, provider: str) -> None:
         """Clear all records for a provider (e.g., after cooldown expires)."""
-        async with self._records_lock:
-            if provider in self._records:
-                del self._records[provider]
+        lock = await self._locks.get_lock(provider)
+        async with lock:
+            async with self._records_lock:
+                if provider in self._records:
+                    del self._records[provider]
         lib_logger.debug(f"IPThrottleDetector: cleared records for {provider}")
 
     async def clear_all(self) -> None:
         """Clear all records."""
-        async with self._records_lock:
-            self._records.clear()
+        for provider in await self._provider_names():
+            lock = await self._locks.get_lock(provider)
+            async with lock:
+                async with self._records_lock:
+                    self._records.pop(provider, None)
         lib_logger.debug("IPThrottleDetector: cleared all records")
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get diagnostic statistics about the detector state."""
-        async with self._records_lock:
-            stats = {
-                "providers_tracked": len(self._records),
-                "total_records": sum(len(r) for r in self._records.values()),
-                "window_seconds": self.window_seconds,
-                "min_credentials": self.min_credentials,
-                "per_provider": {},
+        per_provider = {}
+        total_records = 0
+        for provider in await self._provider_names():
+            lock = await self._locks.get_lock(provider)
+            async with lock:
+                records = self._prune_records(self._records[provider])
+                self._records[provider] = records
+            unique_creds = len(set(r.credential for r in records))
+            per_provider[provider] = {
+                "records": len(records),
+                "unique_credentials": unique_creds,
             }
+            total_records += len(records)
 
-            for provider, records in self._records.items():
-                unique_creds = len(set(r.credential for r in records))
-                stats["per_provider"][provider] = {
-                    "records": len(records),
-                    "unique_credentials": unique_creds,
-                }
-
-        return stats
+        return {
+            "providers_tracked": len(per_provider),
+            "total_records": total_records,
+            "window_seconds": self.window_seconds,
+            "min_credentials": self.min_credentials,
+            "per_provider": per_provider,
+        }
 

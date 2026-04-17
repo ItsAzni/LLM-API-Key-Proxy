@@ -5,6 +5,9 @@ import asyncio
 import logging
 from typing import AsyncGenerator, Any, Optional
 
+
+_GENERIC_STREAM_ERROR_MESSAGE = "An unexpected error occurred during the stream"
+
 from fastapi import HTTPException, Request
 from rotator_library import STREAM_DONE
 from rotator_library.error_types import ClassifiedError
@@ -22,7 +25,7 @@ async def streaming_response_wrapper(
     request: Request,
     response_stream: AsyncGenerator[Any, None],
     logger: Optional[RawIOLogger] = None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str | bytes, None]:
     """
     Wraps a streaming response to log the full response after completion
     and ensures any errors during the stream are sent to the client.
@@ -31,9 +34,9 @@ async def streaming_response_wrapper(
     serializes to SSE only at the HTTP yield boundary (single serialize).
     """
     # --- Aggregation state: only needed when logger is active ---
-    aggregator = None
-    if logger is not None:
-        aggregator = ChunkAggregator()
+    aggregator = ChunkAggregator() if logger is not None else None
+    final_status_code = 200
+    final_error_log_context = None
 
     # Track active streaming connections for graceful shutdown
     # NOTE: track_stream() in dependencies.py also increments the counter.
@@ -63,8 +66,8 @@ async def streaming_response_wrapper(
 
             if logger is not None:
                 logger.log_stream_chunk(chunk)
-
-                aggregator.add_chunk(chunk)
+                if aggregator is not None:
+                    aggregator.add_chunk(chunk)
     except (GeneratorExit, asyncio.CancelledError):
         if hasattr(response_stream, "aclose"):
             await response_stream.aclose()
@@ -73,28 +76,38 @@ async def streaming_response_wrapper(
         logging.exception("Error during response stream")
         # Propagate classified error type so clients can distinguish 429/503/502
         if isinstance(e, ClassifiedError) and e.status_code:
+            final_status_code = e.status_code
+            final_error_log_context = {
+                "type": e.error_type,
+                "code": e.status_code,
+            }
             error_payload = {
                 "error": {
-                    "message": str(e.original_exception or e),
+                    "message": _GENERIC_STREAM_ERROR_MESSAGE,
                     "type": e.error_type,
                     "code": e.status_code,
                 }
             }
         else:
+            final_status_code = 500
+            final_error_log_context = {
+                "type": "proxy_internal_error",
+                "code": 500,
+            }
             error_payload = {
                 "error": {
-                    "message": "An unexpected error occurred during the stream",
+                    "message": _GENERIC_STREAM_ERROR_MESSAGE,
                     "type": "proxy_internal_error",
                     "code": 500,
                 }
             }
+        logging.error(
+            "Stream failed: type=%s code=%s",
+            final_error_log_context["type"] if final_error_log_context else "proxy_internal_error",
+            final_error_log_context["code"] if final_error_log_context else 500,
+        )
         yield sse_data_event(error_payload)
         yield b"data: [DONE]\n\n"
-        # Also log this as a failed request
-        if logger:
-            logger.log_final_response(
-                status_code=500, headers=None, body={"error": str(e)}
-            )
         return  # Stop further processing
     finally:
         if _owns_counter:
@@ -102,13 +115,12 @@ async def streaming_response_wrapper(
                 await _dec_streams(request)
             except AttributeError:
                 logging.debug("stream_response: request lacks stream counter attribute on decrement")
-        if logger:
+        if logger and aggregator is not None:
             try:
-                full_response = aggregator.build_response_dict() if aggregator else {}
                 logger.log_final_response(
-                    status_code=200,
+                    status_code=final_status_code,
                     headers=None,
-                    body=full_response,
+                    body=aggregator.build_response_dict() if final_status_code == 200 else {"error": {"message": _GENERIC_STREAM_ERROR_MESSAGE, "type": final_error_log_context["type"] if final_error_log_context else "proxy_internal_error", "code": final_status_code}},
                 )
             except Exception as e:
                 logging.exception("Error during stream finalization logging: %s", e)

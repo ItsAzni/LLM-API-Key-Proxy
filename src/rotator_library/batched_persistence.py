@@ -25,6 +25,7 @@ from .config import env_bool as _env_bool, env_float as _env_float
 from .utils.resilient_io import safe_write_json
 
 lib_logger = logging.getLogger("rotator_library")
+_PENDING_STATE_EMPTY = object()
 
 
 @dataclass
@@ -101,6 +102,8 @@ class BatchedPersistence:
 
         # Background task
         self._writer_task: Optional[asyncio.Task] = None
+        self._pending_update_task: Optional[asyncio.Task] = None
+        self._pending_state: Any = _PENDING_STATE_EMPTY
         self._running = False
 
         # Statistics
@@ -161,26 +164,27 @@ class BatchedPersistence:
 
     async def _write_to_disk(self) -> bool:
         """Write current state to disk (non-blocking)."""
-        if not self._config.enable_disk or self._state is None:
-            return True
-
         async with self._lock:
+            if not self._config.enable_disk or self._state is None:
+                return True
             try:
                 # Ensure directory exists
                 self._file_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Serialize and write off the event loop to avoid blocking
                 data = self._state if isinstance(self._state, dict) else {"data": self._state}
+                write_started_at = self._last_change
                 success = await asyncio.to_thread(
                     safe_write_json,
                     self._file_path,
                     data,
                     lib_logger,
-                    True,   # atomic
+                    True,
                 )
 
                 if success:
-                    self._dirty = False
+                    if self._last_change == write_started_at:
+                        self._dirty = False
                     self._last_write = time.monotonic()
                     self._stats["writes"] += 1
                     try:
@@ -208,8 +212,8 @@ class BatchedPersistence:
         """
         Update state (in-memory, marks dirty).
 
-        When an event loop is running, schedules update_async() to ensure
-        the shared lock is acquired, preventing races with _write_to_disk().
+        When an event loop is running, schedules at most one update task
+        and coalesces bursty updates into the latest pending state.
         When no loop is running, mutates directly (safe — no concurrent writer).
 
         Args:
@@ -217,7 +221,9 @@ class BatchedPersistence:
         """
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.update_async(state))
+            self._pending_state = state
+            if self._pending_update_task is None or self._pending_update_task.done():
+                self._pending_update_task = loop.create_task(self._flush_pending_update())
         except RuntimeError:
             self._apply_update(state)
 
@@ -231,6 +237,17 @@ class BatchedPersistence:
         async with self._lock:
             self._apply_update(state)
 
+    async def _flush_pending_update(self) -> None:
+        while True:
+            async with self._lock:
+                state = self._pending_state
+                self._pending_state = _PENDING_STATE_EMPTY
+                if state is not _PENDING_STATE_EMPTY:
+                    self._apply_update(state)
+
+            if self._pending_state is _PENDING_STATE_EMPTY:
+                return
+
     def get_state(self) -> Any:
         """Get current state (from memory)."""
         return self._state
@@ -242,6 +259,8 @@ class BatchedPersistence:
         Returns:
             True if write succeeded
         """
+        if self._pending_update_task:
+            await self._pending_update_task
         return await self._write_to_disk()
 
     async def stop(self) -> None:
@@ -254,6 +273,9 @@ class BatchedPersistence:
                 await self._writer_task
             except asyncio.CancelledError:
                 lib_logger.debug("Writer task cancelled during stop")
+
+        if self._pending_update_task:
+            await self._pending_update_task
 
         # Final write
         if self._dirty and self._state is not None:
