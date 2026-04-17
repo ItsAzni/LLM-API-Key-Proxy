@@ -31,6 +31,8 @@ lib_logger = logging.getLogger("rotator_library")
 class HelpersMixin:
     """Mixin with helper methods for RotatingClient."""
 
+    _last_cache_reset_time: float = 0.0
+
     def _build_request_headers(self, request: Optional[Any]) -> Dict[str, Any]:
         """Build a stable request headers dict for failure logging."""
         if request is None:
@@ -255,7 +257,14 @@ class HelpersMixin:
 
         This addresses the issue where LiteLLM's cached client becomes unusable
         after certain network errors.
+
+        Throttled: does not reset more than once per 60 seconds to avoid
+        killing connection pooling on repeated auth errors.
         """
+        now = time.monotonic()
+        if now - self._last_cache_reset_time < 60.0:
+            return
+        self._last_cache_reset_time = now
         try:
             # LiteLLM caches clients in litellm.llms.openai.openai module
             # We need to clear the async client cache
@@ -540,7 +549,8 @@ class HelpersMixin:
     def _strip_client_headers(self, litellm_kwargs: Dict[str, Any]) -> None:
         """
         Remove client-provided headers/api_key from top-level litellm_kwargs
-        that could override provider credentials.
+        that could override provider credentials, and strip internal kwargs
+        (prefixed with ``_``) that must never reach litellm.
 
         Args:
             litellm_kwargs: The kwargs dict to clean in-place
@@ -552,6 +562,8 @@ class HelpersMixin:
             if key_lower in self._STRIP_EXACT:
                 litellm_kwargs.pop(key, None)
             elif key_lower.startswith(self._STRIP_PREFIXES):
+                litellm_kwargs.pop(key, None)
+            elif key.startswith("_"):
                 litellm_kwargs.pop(key, None)
 
     async def _apply_provider_headers(

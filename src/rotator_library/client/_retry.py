@@ -836,7 +836,7 @@ class RetryMixin:
                                     break  # Move to the next key
 
                             # For temporary errors, wait before retrying with the same key.
-                            wait_time = compute_backoff_with_jitter(attempt, retry_after=classified_error.retry_after)
+                            wait_time = compute_backoff_with_jitter(attempt, max_wait=30.0, retry_after=classified_error.retry_after)
                             remaining_budget = deadline - time.monotonic()
 
                             # If the required wait time exceeds the budget, don't wait; rotate to the next key immediately.
@@ -934,7 +934,7 @@ class RetryMixin:
                                 should_retry_same_key(classified_error)
                                 and attempt < self.max_retries - 1
                             ):
-                                base_wait = compute_backoff_with_jitter(attempt, retry_after=classified_error.retry_after)
+                                base_wait = compute_backoff_with_jitter(attempt, max_wait=30.0, retry_after=classified_error.retry_after)
                                 wait_time = base_wait
                                 remaining_budget = deadline - time.monotonic()
                                 if wait_time <= remaining_budget:
@@ -1390,7 +1390,7 @@ class RetryMixin:
                                 ) and "client has been closed" in str(e):
                                     self._reset_litellm_client_cache()
 
-                                base_wait = compute_backoff_with_jitter(attempt, retry_after=classified_error.retry_after)
+                                base_wait = compute_backoff_with_jitter(attempt, max_wait=30.0, retry_after=classified_error.retry_after)
                                 wait_time = base_wait
                                 remaining_budget = deadline - time.monotonic()
                                 if wait_time > remaining_budget:
@@ -1739,7 +1739,7 @@ class RetryMixin:
                                 )
 
                                 # Add exponential backoff delay before retry
-                                wait_time = compute_backoff_with_jitter(attempt, retry_after=classified_error.retry_after)
+                                wait_time = compute_backoff_with_jitter(attempt, max_wait=30.0, retry_after=classified_error.retry_after)
                                 lib_logger.warning(
                                     f"Rate limit ({classified_error.error_type}) during litellm stream. "
                                     f"Waiting {wait_time:.2f}s before retry."

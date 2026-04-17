@@ -674,7 +674,6 @@ class SettingsTool:
             )
 
         return f"[bold]ℹ️  Pending changes: {', '.join(parts)}[/bold]"
-        self.running = True
 
     def get_available_providers(self) -> List[str]:
         """Get list of providers that have credentials configured"""
