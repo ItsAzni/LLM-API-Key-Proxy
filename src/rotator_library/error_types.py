@@ -118,6 +118,35 @@ class EmptyResponseError(Exception):
         super().__init__(self.message)
 
 
+class GarbageResponseError(Exception):
+    """
+    Raised when a provider returns a garbage/hallucinated response.
+
+    Detected by content quality validation heuristics:
+    - High word repetition ratio
+    - Code fragment injection into non-code context
+    - Mixed-script gibberish patterns
+    - File path leakage into response content
+
+    This is a rotatable error - the request should try the next credential.
+    Treated as a transient server-side issue (503 equivalent).
+
+    Attributes:
+        provider: The provider name
+        model: The model that was requested
+        reason: Why the response was classified as garbage
+    """
+
+    def __init__(self, provider: str, model: str, reason: str = ""):
+        self.provider = provider
+        self.model = model
+        self.reason = reason
+        self.message = (
+            reason or f"Garbage response from {provider}/{model}"
+        )
+        super().__init__(self.message)
+
+
 class TransientQuotaError(Exception):
     """
     Raised when a provider returns a 429 without retry timing information.

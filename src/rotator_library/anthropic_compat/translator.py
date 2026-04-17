@@ -12,6 +12,7 @@ This enables any OpenAI-compatible provider to work with Anthropic clients.
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
+from ..error_handler import validate_response_quality
 from ..utils.json_utils import json_dumps_str as _json_dumps, json_loads as _json_loads
 from orjson import JSONDecodeError as _json_decode_error
 
@@ -550,6 +551,11 @@ def openai_to_anthropic_response(openai_response: dict, original_model: str) -> 
     if cached_tokens > 0:
         anthropic_usage["cache_read_input_tokens"] = cached_tokens
         anthropic_usage["cache_creation_input_tokens"] = 0
+
+    # Validate response quality before translating to Anthropic format
+    # GarbageResponseError propagates to the retry loop in _retry.py for credential rotation
+    provider = original_model.split("/")[0] if "/" in original_model else ""
+    validate_response_quality(openai_response, provider=provider, model=original_model)
 
     return {
         "id": openai_response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),

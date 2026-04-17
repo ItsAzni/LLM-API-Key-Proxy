@@ -378,6 +378,36 @@ ADAPTIVE_RATE_LIMIT_INCREASE_RPS: float = 1.0
 ADAPTIVE_RATE_LIMIT_INCREASE_INTERVAL: float = 30.0
 
 # =============================================================================
+# GARBAGE RESPONSE DETECTION DEFAULTS
+# =============================================================================
+# Detects garbage/hallucinated model responses and retries with another credential.
+
+# Enable garbage response quality validation
+# Override: GARBAGE_DETECTION_ENABLED=true/false
+GARBAGE_DETECTION_ENABLED: bool = env_bool("GARBAGE_DETECTION_ENABLED", True)
+
+# Word repetition threshold (unique/total ratio below this triggers garbage detection)
+# Lower = more tolerant (0.1 = almost all repeated), higher = stricter (0.4 = moderate variety required)
+# Override: GARBAGE_REPETITION_THRESHOLD=<float>
+GARBAGE_REPETITION_THRESHOLD: float = env_float("GARBAGE_REPETITION_THRESHOLD", 0.25)
+
+# =============================================================================
+# OAUTH & HOST DEFAULTS
+# =============================================================================
+
+# OAuth token refresh retry count
+# Override: OAUTH_REFRESH_MAX_RETRIES=<count>
+OAUTH_REFRESH_MAX_RETRIES: int = env_int("OAUTH_REFRESH_MAX_RETRIES", 3)
+
+# Default proxy host
+# Override: PROXY_DEFAULT_HOST=<host>
+PROXY_DEFAULT_HOST: str = os.getenv("PROXY_DEFAULT_HOST", "127.0.0.1")
+
+# Default proxy port
+# Override: PROXY_DEFAULT_PORT=<port>
+PROXY_DEFAULT_PORT: int = env_int("PROXY_DEFAULT_PORT", 8000)
+
+# =============================================================================
 # COOLDOWN DISABLE FLAGS (from theblazehen fork)
 # =============================================================================
 # Allows disabling cooldowns per-provider for debugging/emergency purposes.

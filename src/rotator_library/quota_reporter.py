@@ -211,8 +211,8 @@ class QuotaReporter:
                                     reset_iso = datetime.fromtimestamp(
                                         reset_ts, tz=timezone.utc
                                     ).isoformat()
-                                except (ValueError, OSError):
-                                    pass
+                                except (ValueError, OSError) as e:
+                                    lib_logger.debug("Could not process timestamp: %s", e)
 
                             requests_remaining = (
                                 max(0, max_req - req_count) if max_req else 0

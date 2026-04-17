@@ -46,9 +46,12 @@ from ..error_handler import (
     get_retry_backoff,
     should_retry_same_key,
     should_rotate_on_error,
+    validate_response_quality,
 )
 from ..error_types import (
+    ClassifiedError,
     ContextOverflowError,
+    GarbageResponseError,
     NoAvailableKeysError,
     PreRequestCallbackError,
     RequestErrorAccumulator,
@@ -467,6 +470,16 @@ class RetryMixin:
                             # Reset consecutive quota failures on success
                             await self.reset_quota_failures(current_cred, provider)
 
+                            # Validate response quality before returning to client
+                            try:
+                                validate_response_quality(response, provider=provider, model=model)
+                            except GarbageResponseError as exc:
+                                lib_logger.warning(
+                                    "Garbage response detected for %s/%s, rotating to next credential: %s",
+                                    provider, model, exc.message if hasattr(exc, 'message') else exc,
+                                )
+                                raise
+
                             return response
 
                         except (
@@ -619,6 +632,19 @@ class RetryMixin:
                             await self._get_http_client_async(streaming=False)
                             continue
 
+                        except GarbageResponseError as gre:
+                            # Garbage response - rotate to next credential immediately
+                            await self.usage_manager.record_failure(
+                                current_cred, model, ClassifiedError(
+                                    error_type="garbage_response",
+                                    original_exception=last_exception,
+                                    status_code=503,
+                                    reason=gre.reason,
+                                )
+                            )
+                            async with HalfOpenSlot(self._resilience, provider):
+                                break
+
                     # If the inner loop breaks, it means the key failed and we need to rotate.
                     # Continue to the next iteration of the outer while loop to pick a new key.
                     continue
@@ -762,6 +788,16 @@ class RetryMixin:
 
                             # Reset consecutive quota failures on success
                             await self.reset_quota_failures(current_cred, provider)
+
+                            # Validate response quality before returning to client
+                            try:
+                                validate_response_quality(response, provider=provider, model=model)
+                            except GarbageResponseError as exc:
+                                lib_logger.warning(
+                                    "Garbage response detected for %s/%s, rotating to next credential: %s",
+                                    provider, model, exc.message if hasattr(exc, 'message') else exc,
+                                )
+                                raise
 
                             return response
 
@@ -996,6 +1032,22 @@ class RetryMixin:
 
                         except asyncio.CancelledError:
                             raise
+                        except GarbageResponseError as gre:
+                            # Garbage response from validate_response_quality - rotate immediately
+                            classified_error = ClassifiedError(
+                                error_type="garbage_response",
+                                status_code=503,
+                                reason=gre.reason,
+                            )
+                            await self.usage_manager.record_failure(
+                                current_cred, model, classified_error
+                            )
+                            error_accumulator.record_error(
+                                current_cred, classified_error,
+                                "Garbage response detected, rotating"
+                            )
+                            async with HalfOpenSlot(self._resilience, provider):
+                                break
                         except Exception as e:
                             last_exception = e
                             log_failure(
@@ -2264,6 +2316,7 @@ class RetryMixin:
         identical to what litellm.acompletion(stream=False) would return.
         """
         model = kwargs.get("model", "")
+        provider = model.split("/")[0] if "/" in model else ""
         # Get the streaming generator from the normal streaming path
         stream_generator = self._streaming_acompletion_with_retry(
             request=request,
@@ -2294,5 +2347,14 @@ class RetryMixin:
             aggregator.finish_reason,
             aggregator.usage_data,
         )
+
+        try:
+            validate_response_quality(model_response, provider=provider, model=model)
+        except GarbageResponseError as exc:
+            lib_logger.warning(
+                "Garbage response detected for %s/%s, rotating to next credential: %s",
+                provider, model, exc.message if hasattr(exc, 'message') else exc,
+            )
+            raise
 
         return model_response

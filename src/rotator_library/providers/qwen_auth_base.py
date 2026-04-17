@@ -87,7 +87,7 @@ class QwenAuthBase(GoogleOAuthBase):
                     creds_raw = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
                     self._credentials_cache[path] = json_loads(creds_raw)
                 except FileNotFoundError:
-                    pass
+                    lib_logger.debug("Credential file not found, skipping")
             creds_from_file = self._credentials_cache[path]
 
             lib_logger.debug(f"Refreshing Qwen OAuth token for '{Path(path).name}'...")

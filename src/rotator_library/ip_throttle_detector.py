@@ -12,6 +12,7 @@ Detection heuristics:
 - Identical error_body hash between credentials (same error from same IP)
 """
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -130,6 +131,9 @@ class IPThrottleDetector(metaclass=SingletonMeta):
         # Per-provider sharded locks (lazy init)
         self._locks = ProviderLockManager()
 
+        # Global lock for _records dict structure access
+        self._records_lock = asyncio.Lock()
+
         # Per-provider tracking: provider -> list of _ThrottleRecord
         self._records: Dict[str, List[_ThrottleRecord]] = defaultdict(list)
 
@@ -245,7 +249,7 @@ class IPThrottleDetector(metaclass=SingletonMeta):
             )
 
         # Get unique credentials
-        unique_credentials = list(set(r.credential for r in records))
+        unique_credentials = list(dict.fromkeys(r.credential for r in records))
         num_unique_credentials = len(unique_credentials)
 
         # Analyze error body hashes

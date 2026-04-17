@@ -126,7 +126,7 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
         self._lock = threading.Lock()
         self._running = False
         self._retry_thread: Optional[threading.Thread] = None
-        self._logger = logging.getLogger("rotator_library.resilient_io")
+        self.logger = logging.getLogger("rotator_library.resilient_io")
 
         # Start background retry thread
         self._start_retry_thread()
@@ -196,7 +196,7 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
         path_str = str(Path(path).resolve())
         with self._lock:
             self._pending[path_str] = (data, serializer, options or {})
-            self._logger.debug(f"Registered pending write for {Path(path).name}")
+            self.logger.debug(f"Registered pending write for {Path(path).name}")
 
     def unregister(self, path: Union[str, Path]) -> None:
         """
@@ -257,24 +257,24 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
                 if tmp_fd is not None:
                     try:
                         os.close(tmp_fd)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self.logger.debug("I/O operation failed: %s", e)
                 if tmp_path and os.path.exists(tmp_path):
                     try:
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self.logger.debug("I/O operation failed: %s", e)
 
             # Success - remove from pending
             if remove_on_success:
                 with self._lock:
                     self._pending.pop(path_str, None)
 
-            self._logger.debug(f"Retry succeeded for {path.name}")
+            self.logger.debug(f"Retry succeeded for {path.name}")
             return True
 
         except (OSError, PermissionError, IOError) as e:
-            self._logger.debug(f"Retry failed for {path.name}: {e}")
+            self.logger.debug(f"Retry failed for {path.name}: {e}")
             return False
 
     def flush_all(self) -> Dict[str, bool]:
@@ -303,21 +303,21 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
         if pending_count == 0:
             return
 
-        self._logger.info(f"Flushing {pending_count} pending write(s) on shutdown...")
+        self.logger.info(f"Flushing {pending_count} pending write(s) on shutdown...")
         results = self.flush_all()
 
         succeeded = sum(1 for v in results.values() if v)
         failed = pending_count - succeeded
 
         if failed > 0:
-            self._logger.warning(
+            self.logger.warning(
                 f"Shutdown flush: {succeeded} succeeded, {failed} failed"
             )
             for path_str, success in results.items():
                 if not success:
-                    self._logger.warning(f"  Failed to save: {Path(path_str).name}")
+                    self.logger.warning(f"  Failed to save: {Path(path_str).name}")
         else:
-            self._logger.info(f"Shutdown flush: all {succeeded} write(s) succeeded")
+            self.logger.info(f"Shutdown flush: all {succeeded} write(s) succeeded")
 
     def get_pending_count(self) -> int:
         """Get the number of pending writes."""
@@ -487,13 +487,13 @@ class ResilientStateWriter:
                 if tmp_fd is not None:
                     try:
                         os.close(tmp_fd)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self.logger.debug("I/O operation failed: %s", e)
                 if tmp_path and os.path.exists(tmp_path):
                     try:
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self.logger.debug("I/O operation failed: %s", e)
 
             # Success - update health and unregister from shutdown flush
             self._disk_healthy = True
@@ -615,13 +615,13 @@ def safe_write_json(
                 if tmp_fd is not None:
                     try:
                         os.close(tmp_fd)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.debug("I/O operation failed: %s", e)
                 if tmp_path and os.path.exists(tmp_path):
                     try:
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.debug("I/O operation failed: %s", e)
         else:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -722,6 +722,7 @@ class AsyncResilientStateWriter:
         self._pending: Optional[Dict[str, Any]] = None
         self._lock = asyncio.Lock()
         self._flush_task: Optional[asyncio.Task] = None
+        self.logger = logging.getLogger("rotator_library.resilient_io")
 
     async def schedule_write(self, data: Dict[str, Any]) -> None:
         """Запланировать запись."""
@@ -753,7 +754,7 @@ class AsyncResilientStateWriter:
                 )
                 await _async_resilient_os_replace(str(temp_path), str(self.file_path))
             except Exception as e:
-                self._logger.debug("Atomic write failed, falling back to direct write: %s", e)
+                self.logger.debug("Atomic write failed, falling back to direct write: %s", e)
                 # Recovery: recreate directory if deleted
                 self.file_path.parent.mkdir(parents=True, exist_ok=True)
                 self.file_path.write_text(

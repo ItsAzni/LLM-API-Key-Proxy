@@ -466,7 +466,7 @@ class ProviderCircuitBreaker:
 
     async def get_all_states(self) -> Dict[str, CircuitState]:
         """Get the current state of all provider circuits concurrently."""
-        providers = list(self._circuits.keys())
+        providers = self._circuits.keys()
 
         async def _read_state(provider: str) -> Tuple[str, Optional[CircuitState]]:
             lock = await self._provider_lock_manager.get_lock(provider)
@@ -493,9 +493,7 @@ class ProviderCircuitBreaker:
 
     async def reset_all(self) -> None:
         """Reset all provider circuits to CLOSED state."""
-        providers = list(self._circuits.keys())
-
-        for provider in providers:
+        for provider in self._circuits:
             lock = await self._provider_lock_manager.get_lock(provider)
             async with lock:
                 if provider in self._circuits:
@@ -565,10 +563,8 @@ class ProviderCircuitBreaker:
         Returns:
         List of provider names with OPEN circuits
         """
-        providers = list(self._circuits.keys())
-
         open_circuits = []
-        for provider in providers:
+        for provider in self._circuits:
             lock = await self._provider_lock_manager.get_lock(provider)
             async with lock:
                 if provider in self._circuits and self._circuits[provider].state == CircuitState.OPEN:

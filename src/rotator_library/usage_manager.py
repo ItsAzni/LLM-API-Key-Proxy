@@ -2165,8 +2165,8 @@ class UsageManager:
                 last_reset_dt = datetime.fromisoformat(last_reset_str).replace(
                     tzinfo=timezone.utc
                 )
-            except ValueError:
-                pass
+            except ValueError as e:
+                lib_logger.debug("Could not parse value: %s", e)
 
         # Determine the reset threshold for today
         reset_threshold_today = datetime.combine(
