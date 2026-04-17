@@ -334,6 +334,7 @@ class RetryMixin:
         ):
             current_cred = None
             key_acquired = False
+            _cb_slot_held = False
             try:
                 creds_to_try = [
                     c for c in credentials_for_provider if c not in tried_creds
@@ -364,6 +365,8 @@ class RetryMixin:
                     if time.monotonic() + backoff < deadline:
                         await asyncio.sleep(backoff)
                     continue
+
+                _cb_slot_held = True  # can_attempt() acquired a half-open slot
 
                 # Get count of credentials not on cooldown for this model
                 availability_stats = (
@@ -457,6 +460,7 @@ class RetryMixin:
                                 self.usage_manager.release_key(current_cred, model),
                             )
                             key_acquired = False
+                            _cb_slot_held = False  # record_success already released the slot
 
                             # Log response to transaction logger
                             if transaction_logger:
@@ -766,6 +770,7 @@ class RetryMixin:
                                 self.usage_manager.release_key(current_cred, model),
                             )
                             key_acquired = False
+                            _cb_slot_held = False  # record_success already released the slot
 
                             # Log response to transaction logger
                             if transaction_logger:
@@ -1080,6 +1085,7 @@ class RetryMixin:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
+                                _cb_slot_held = False  # HalfOpenSlot will handle release
                                 async with HalfOpenSlot(self._resilience, provider):
                                     lib_logger.error(
                                         "Non-recoverable error (%s). Failing request.",
@@ -1095,11 +1101,14 @@ class RetryMixin:
                             await self.usage_manager.record_failure(
                                 current_cred, model, classified_error
                             )
+                            _cb_slot_held = False  # HalfOpenSlot will handle release
                             async with HalfOpenSlot(self._resilience, provider):
                                 break  # Try next key for other errors
             finally:
                 if key_acquired and current_cred:
                     await self.usage_manager.release_key(current_cred, model)
+                if _cb_slot_held:
+                    await self._resilience.release_half_open_slot(provider)
 
         # Check if we exhausted all credentials or timed out
         if time.monotonic() >= deadline:
@@ -1155,6 +1164,7 @@ class RetryMixin:
             ):
                 current_cred = None
                 key_acquired = False
+                _cb_slot_held = False
                 try:
                     creds_to_try = [
                         c for c in credentials_for_provider if c not in tried_creds
@@ -1192,6 +1202,8 @@ class RetryMixin:
                         if time.monotonic() + backoff < deadline:
                             await asyncio.sleep(backoff)
                         continue
+
+                    _cb_slot_held = True  # can_attempt() acquired a half-open slot
 
                     # Get count of credentials not on cooldown for this model
                     availability_stats = (
@@ -1342,6 +1354,7 @@ class RetryMixin:
                                     self._resilience.record_rate_success(provider),
                                     self.reset_quota_failures(current_cred, provider),
                                 )
+                                _cb_slot_held = False  # record_success already released the slot
                                 return
 
                             except (
@@ -1780,6 +1793,7 @@ class RetryMixin:
                                 self._resilience.record_rate_success(provider),
                                 self.reset_quota_failures(current_cred, provider),
                             )
+                            _cb_slot_held = False  # record_success already released the slot
                             return
 
                         except (
@@ -2162,6 +2176,7 @@ class RetryMixin:
 
                             # Check if this error should trigger rotation
                             if not should_rotate_on_error(classified_error):
+                                _cb_slot_held = False  # HalfOpenSlot will handle release
                                 async with HalfOpenSlot(self._resilience, provider):
                                     lib_logger.error(
                                         "Non-recoverable error (%s). Failing request.",
@@ -2177,12 +2192,15 @@ class RetryMixin:
                                 "Rotating to next key after %s error.",
                                 classified_error.error_type,
                             )
+                            _cb_slot_held = False  # HalfOpenSlot will handle release
                             async with HalfOpenSlot(self._resilience, provider):
                                 break
 
                 finally:
                     if key_acquired and current_cred:
                         await self.usage_manager.release_key(current_cred, model)
+                    if _cb_slot_held:
+                        await self._resilience.release_half_open_slot(provider)
 
             # Build detailed error response using error accumulator
             error_accumulator.timeout_occurred = time.monotonic() >= deadline
@@ -2204,7 +2222,7 @@ class RetryMixin:
                         f"Request failed. Last error: {str(last_exception)}"
                     )
                 error_data = {
-                    "error": {"message": final_error_message, "type": "proxy_error"}
+                    "error": {"message": final_error_message, "type": "proxy_busy"}
                 }
                 lib_logger.error(final_error_message)
 
