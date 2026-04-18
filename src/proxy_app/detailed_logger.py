@@ -38,6 +38,7 @@ from rotator_library.utils.resilient_io import (
     safe_mkdir,
 )
 from rotator_library.utils.paths import get_logs_dir
+from rotator_library.utils.json_utils import extract_reasoning
 
 
 def _get_raw_io_logs_dir() -> Path:
@@ -126,23 +127,6 @@ class RawIOLogger:
         self._write_json("final_response.json", response_data)
         self._log_metadata(response_data)
 
-    def _extract_reasoning(self, response_body: Dict[str, Any]) -> Optional[str]:
-        """Recursively searches for and extracts 'reasoning' fields from the response body."""
-        if not isinstance(response_body, dict):
-            return None
-
-        if "reasoning" in response_body:
-            return response_body["reasoning"]
-
-        if "choices" in response_body and response_body["choices"]:
-            message = response_body["choices"][0].get("message", {})
-            if "reasoning" in message:
-                return message["reasoning"]
-            if "reasoning_content" in message:
-                return message["reasoning_content"]
-
-        return None
-
     def _log_metadata(self, response_data: Dict[str, Any]):
         """Logs a summary of the transaction for quick analysis."""
         usage = response_data.get("body", {}).get("usage") or {}
@@ -173,7 +157,7 @@ class RawIOLogger:
             "reasoning_content": None,
         }
 
-        reasoning = self._extract_reasoning(response_data.get("body", {}))
+        reasoning = extract_reasoning(response_data.get("body", {}))
         if reasoning:
             metadata["reasoning_found"] = True
             metadata["reasoning_content"] = reasoning

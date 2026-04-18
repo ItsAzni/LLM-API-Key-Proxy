@@ -6,7 +6,6 @@ import logging
 from typing import Callable
 
 import json
-import orjson
 from fastapi import HTTPException
 from pydantic import ValidationError
 

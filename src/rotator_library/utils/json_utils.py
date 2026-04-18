@@ -10,9 +10,9 @@ serialization and deserialization of large payloads in hot paths
 
 import json
 import orjson
-from typing import Any
+from typing import Any, Dict, Optional
 
-JSONDecodeError = json.JSONDecodeError
+JSONDecodeError = getattr(orjson, "JSONDecodeError", json.JSONDecodeError)
 
 STREAM_DONE = object()
 """Sentinel marker indicating stream completion in internal pipeline."""
@@ -48,3 +48,22 @@ def json_deep_copy(obj: Any) -> Any:
     Tuples become lists; non-JSON types raise orjson.JSONEncodeError.
     """
     return orjson.loads(orjson.dumps(obj))
+
+
+def extract_reasoning(data: Dict[str, Any]) -> Optional[str]:
+    """Extract reasoning or reasoning_content from an OpenAI-compatible response dict.
+
+    Checks top-level ``reasoning``, then ``choices[0].message.reasoning``,
+    then ``choices[0].message.reasoning_content``.
+    """
+    if not isinstance(data, dict):
+        return None
+    if "reasoning" in data:
+        return data["reasoning"]
+    if "choices" in data and data["choices"]:
+        message = data["choices"][0].get("message", {})
+        if "reasoning" in message:
+            return message["reasoning"]
+        if "reasoning_content" in message:
+            return message["reasoning_content"]
+    return None

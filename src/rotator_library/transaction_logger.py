@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional, Union
 import aiofiles
 
 from .utils.paths import get_logs_dir
+from .utils.json_utils import extract_reasoning
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -299,29 +300,12 @@ class TransactionLogger:
         }
 
         # Extract reasoning if present
-        reasoning = self._extract_reasoning(response_data)
+        reasoning = extract_reasoning(response_data)
         if reasoning:
             metadata["reasoning_found"] = True
             metadata["reasoning_content"] = reasoning
 
         await self._write_json("metadata.json", metadata)
-
-    def _extract_reasoning(self, response_data: Dict[str, Any]) -> Optional[str]:
-        """Recursively search for and extract 'reasoning' fields from response."""
-        if not isinstance(response_data, dict):
-            return None
-
-        if "reasoning" in response_data:
-            return response_data["reasoning"]
-
-        if "choices" in response_data and response_data["choices"]:
-            message = response_data["choices"][0].get("message", {})
-            if "reasoning" in message:
-                return message["reasoning"]
-            if "reasoning_content" in message:
-                return message["reasoning_content"]
-
-        return None
 
     async def _write_json(self, filename: str, data: Dict[str, Any]) -> None:
         """Write JSON data to a file in the log directory."""

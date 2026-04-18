@@ -245,39 +245,6 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         return assistant_msg, user_msg
 
-    def _build_malformed_fallback_response(
-        self, model: str, error_details: str
-    ) -> litellm.ModelResponse:
-        """
-        Build error response when malformed call retries are exhausted.
-
-        Uses finish_reason=None to indicate the response didn't complete normally,
-        allowing clients to detect the incomplete state and potentially retry.
-        """
-        return litellm.ModelResponse(
-            **{
-                "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": (
-                                "[TOOL CALL ERROR] I attempted to call a function but "
-                                "repeatedly produced malformed syntax. This may be a model issue.\n\n"
-                                f"Last error: {error_details}\n\n"
-                                "Please try rephrasing your request or try a different approach."
-                            ),
-                        },
-                        "finish_reason": None,
-                    }
-                ],
-            }
-        )
-
     def _build_malformed_fallback_chunk(
         self,
         model: str,
@@ -324,63 +291,6 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     }
                 ],
                 "usage": usage,
-            }
-        )
-
-    def _build_fixed_tool_call_response(
-        self,
-        model: str,
-        parsed_call: Dict[str, Any],
-        error_info: Dict[str, Any],
-    ) -> Optional[litellm.ModelResponse]:
-        """
-        Build a synthetic valid tool call response from auto-fixed malformed JSON.
-
-        When Gemini 3 produces malformed JSON (e.g., unquoted keys), this method
-        takes the auto-corrected JSON from _analyze_json_error() and builds a
-        proper OpenAI-format tool call response.
-
-        Returns None if the JSON couldn't be fixed.
-        """
-        fixed_json = error_info.get("fixed_json")
-        if not fixed_json:
-            return None
-
-        # Validate the fixed JSON is actually valid
-        try:
-            json_loads(fixed_json)
-        except json.JSONDecodeError:
-            return None
-
-        tool_name = parsed_call["tool_name"]
-        tool_id = f"call_{uuid.uuid4().hex[:24]}"
-
-        return litellm.ModelResponse(
-            **{
-                "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": tool_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tool_name,
-                                        "arguments": fixed_json,
-                                    },
-                                }
-                            ],
-                        },
-                        "finish_reason": "tool_calls",
-                    }
-                ],
             }
         )
 

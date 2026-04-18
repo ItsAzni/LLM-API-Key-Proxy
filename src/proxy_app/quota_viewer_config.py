@@ -10,7 +10,6 @@ Handles remote proxy configurations including:
 - Default and last-used remote tracking
 """
 
-import orjson
 import json
 import logging
 from pathlib import Path

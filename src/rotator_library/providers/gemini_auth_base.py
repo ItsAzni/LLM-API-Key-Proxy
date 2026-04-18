@@ -57,8 +57,8 @@ class GeminiAuthBase(GoogleProjectDiscoveryMixin, GoogleOAuthBase):
         "https://www.googleapis.com/auth/userinfo.profile",
     ]
     ENV_PREFIX = "GEMINI_CLI"
-    CALLBACK_PORT = 8085
-    CALLBACK_PATH = "/oauth2callback"
+    # CALLBACK_PORT and CALLBACK_PATH intentionally omitted:
+    # parent defaults (8085, "/oauth2callback") are correct for Gemini CLI
 
     _provider_display_name = "Gemini"
     _auth_headers = GEMINI_CLI_AUTH_HEADERS

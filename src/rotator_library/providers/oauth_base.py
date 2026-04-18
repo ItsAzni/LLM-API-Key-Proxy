@@ -22,17 +22,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import httpx
-from rich.console import Console
-from rich.markup import escape as rich_escape
-from rich.panel import Panel
-from rich.text import Text
 
 from ..utils.headless_detection import is_headless_environment
 from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.ttl_dict import TTLDict
 
 lib_logger = logging.getLogger("rotator_library")
-console = Console()
 
 
 # =========================================================================
@@ -539,49 +534,6 @@ class OAuthMixin:
     # ========================================================================
     # RICH UI DISPLAY
     # ========================================================================
-
-    def _display_auth_instructions(
-        self,
-        auth_url: str,
-        display_name: str,
-        provider_name: str,
-        instructions: str = None,
-        headless_extra: str = None,
-    ) -> None:
-        """Display OAuth authentication instructions to user."""
-        is_headless = self._is_headless()
-
-        if instructions is None:
-            if is_headless:
-                instructions = (
-                    "Running in headless environment (no GUI detected).\n"
-                    "Please open the URL below in a browser on another machine to authorize:"
-                )
-            else:
-                instructions = (
-                    "1. Your browser will now open to log in and authorize the application.\n"
-                    "2. If it doesn't open automatically, please open the URL below manually."
-                )
-
-        if headless_extra and is_headless:
-            instructions = f"{instructions}\n{headless_extra}"
-
-        console.print(
-            Panel(
-                Text.from_markup(instructions),
-                title=f"{provider_name} OAuth Setup for [bold yellow]{display_name}[/bold yellow]",
-                style="bold blue",
-            )
-        )
-
-        escaped_url = rich_escape(auth_url)
-        console.print(f"[bold]URL:[/bold] [link={auth_url}]{escaped_url}[/link]\n")
-
-    def _display_waiting_status(self, message: str = None) -> None:
-        """Display a waiting spinner status."""
-        if message is None:
-            message = "[bold green]Waiting for authorization in the browser...[/bold green]"
-        console.print(message)
 
     # ========================================================================
     # REAUTH COORDINATION

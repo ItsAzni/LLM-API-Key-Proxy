@@ -156,14 +156,6 @@ class HelpersMixin:
                 mask_credential(credential), retry_after,
             )
 
-    def _is_client_usable(self, client: Optional[httpx.AsyncClient]) -> bool:
-        """Check if an HTTP client is not closed and available for requests."""
-        if client is None:
-            return False
-        if client.is_closed:
-            return False
-        return True
-
     async def _build_credential_priority_cache(
         self, provider: str, credentials: List[str]
     ) -> Tuple[Dict[str, int], Dict[str, str]]:
@@ -223,23 +215,6 @@ class HelpersMixin:
             self._credential_priority_cache[provider + ":result"] = result
 
             return result
-
-    async def _invalidate_priority_cache(self, provider: str) -> None:
-        """
-        Invalidate the priority cache for a provider.
-
-        Call this when credentials are added or removed.
-        Protected by per-provider lock to prevent concurrent cache corruption.
-        """
-        lock = await self._lock_manager.get_lock(provider)
-        async with lock:
-            self._credential_priority_cache.pop(provider, None)
-            self._credential_priority_cache.pop(provider + ":result", None)
-
-            # Also invalidate model ID cache entries for this provider
-            keys_to_remove = [k for k in self._resolve_model_id_cache if k[1] == provider]
-            for k in keys_to_remove:
-                del self._resolve_model_id_cache[k]
 
     def _reset_litellm_client_cache(self) -> None:
         """

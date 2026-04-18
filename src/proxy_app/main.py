@@ -276,7 +276,7 @@ if ENABLE_REQUEST_LOGGING:
     )
 if ENABLE_RAW_LOGGING:
     logger.info("Raw I/O logging is enabled (proxy boundary, unmodified HTTP data).")
-PROXY_API_KEY = os.getenv("PROXY_API_KEY")
+PROXY_API_KEY = _early_proxy_api_key
 # Note: PROXY_API_KEY validation moved to server startup to allow credential tool to run first
 # Pre-build Bearer string once to avoid f-string on every request
 _BEARER_PROXY_API_KEY = f"Bearer {PROXY_API_KEY}" if PROXY_API_KEY else None
@@ -509,8 +509,10 @@ if __name__ == "__main__":
 
             # After credential tool exits, reload and re-check
             load_dotenv(ENV_FILE, override=True)
-            # Re-read PROXY_API_KEY from environment
-            PROXY_API_KEY = os.getenv("PROXY_API_KEY")
+            # Re-read PROXY_API_KEY from environment (may have changed after credential tool)
+            _early_proxy_api_key = os.getenv("PROXY_API_KEY")
+            PROXY_API_KEY = _early_proxy_api_key
+            _BEARER_PROXY_API_KEY = f"Bearer {PROXY_API_KEY}" if PROXY_API_KEY else None
 
             # Verify onboarding is complete
             if needs_onboarding():

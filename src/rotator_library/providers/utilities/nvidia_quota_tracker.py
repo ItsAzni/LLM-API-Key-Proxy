@@ -107,12 +107,6 @@ class NvidiaQuotaTracker(BaseQuotaTracker):
         self._learned_costs_loaded = True  # Skip file loading; local-only tracker
         self._learned_costs_lock: Optional[asyncio.Lock] = None
 
-    def _ensure_learned_costs_lock(self) -> asyncio.Lock:
-        """Lazily create learned costs lock to avoid RuntimeError before event loop starts."""
-        if self._learned_costs_lock is None:
-            self._learned_costs_lock = asyncio.Lock()
-        return self._learned_costs_lock
-
     async def _fetch_quota_for_credential(self, credential_path: str) -> Dict:
         return {"status": "error", "error": "NVIDIA NIM has no public quota API", "identifier": credential_path, "tier": None, "fetched_at": time.time()}
 

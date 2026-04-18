@@ -197,26 +197,6 @@ class BaseQuotaTracker:
     # LEARNED COSTS MANAGEMENT
     # =========================================================================
 
-    async def _load_learned_costs_async(self) -> None:
-        """Load learned quota costs from cache file (async, race-safe)."""
-        async with self._learned_costs_lock:
-            if self._learned_costs_loaded:
-                return
-            costs_file = self._get_learned_costs_file()
-            if costs_file.exists():
-                try:
-                    loop = asyncio.get_running_loop()
-                    data = await loop.run_in_executor(None, self._read_costs_file, costs_file)
-                    if data:
-                        self._learned_costs = data.get("costs", {})
-                        lib_logger.debug(
-                            f"Loaded {sum(len(v) for v in self._learned_costs.values())} "
-                            f"learned cost entries from {costs_file}"
-                        )
-                except Exception as e:
-                    lib_logger.warning(f"Failed to load learned costs: {e}")
-            self._learned_costs_loaded = True
-
     def _read_costs_file(self, costs_file: Path) -> Optional[Dict]:
         """Sync helper to read costs file (called via run_in_executor)."""
         with open(costs_file, "r", encoding="utf-8") as f:

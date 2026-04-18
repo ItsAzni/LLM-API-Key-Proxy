@@ -25,20 +25,6 @@ from rotator_library.utils.terminal_utils import clear_screen
 
 console = Console()
 
-_CACHED_PROXY_API_KEY: str | None = None
-
-
-def _get_proxy_api_key() -> str | None:
-    global _CACHED_PROXY_API_KEY
-    if _CACHED_PROXY_API_KEY is None:
-        _CACHED_PROXY_API_KEY = os.getenv("PROXY_API_KEY")
-    return _CACHED_PROXY_API_KEY
-
-
-def _invalidate_proxy_api_key_cache() -> None:
-    global _CACHED_PROXY_API_KEY
-    _CACHED_PROXY_API_KEY = None
-
 
 
 
@@ -95,7 +81,6 @@ class LauncherConfig:
         env_file = get_data_file(".env")
         set_key(str(env_file), "PROXY_API_KEY", new_key)
         load_dotenv(dotenv_path=env_file, override=True)
-        _invalidate_proxy_api_key_cache()
 
 
 class SettingsDetector:
@@ -332,7 +317,7 @@ class LauncherTUI:
 
     def needs_onboarding(self) -> bool:
         """Check if onboarding is needed"""
-        return not self.env_file.exists() or not _get_proxy_api_key()
+        return not self.env_file.exists() or not os.getenv("PROXY_API_KEY")
 
     def run(self):
         """Main TUI loop"""
@@ -387,7 +372,7 @@ class LauncherTUI:
                 )
             )
         # Show security warning if PROXY_API_KEY is missing (but .env exists)
-        elif not _get_proxy_api_key():
+        elif not os.getenv("PROXY_API_KEY"):
             self.console.print()
             self.console.print(
                 Panel(
@@ -420,7 +405,7 @@ class LauncherTUI:
         )
 
         # Show actual API key value
-        proxy_key = _get_proxy_api_key()
+        proxy_key = os.getenv("PROXY_API_KEY")
         if proxy_key:
             _masked = proxy_key[:4] + "..." + proxy_key[-4:] if len(proxy_key) > 8 else "***"
             self.console.print(f"   Proxy API Key:       {_masked}")
@@ -491,7 +476,6 @@ class LauncherTUI:
             self.launch_quota_viewer()
         elif choice == "6":
             load_dotenv(dotenv_path=get_data_file(".env"), override=True)
-            _invalidate_proxy_api_key_cache()
             self.config = LauncherConfig()  # Reload config
             self.console.print("\n[green]✅ Configuration reloaded![/green]")
         elif choice == "7":
@@ -557,7 +541,7 @@ class LauncherTUI:
                 f"   Raw I/O Logging:     {'✅ Enabled' if self.config.config.get('enable_raw_logging', False) else '❌ Disabled'}"
             )
             self.console.print(
-                f"   Proxy API Key:       {'✅ Set' if _get_proxy_api_key() else '❌ Not Set'}"
+                f"   Proxy API Key:       {'✅ Set' if os.getenv('PROXY_API_KEY') else '❌ Not Set'}"
             )
 
             self.console.print()
@@ -644,7 +628,7 @@ class LauncherTUI:
                 if not confirmed:
                     continue
 
-                current = _get_proxy_api_key() or ""
+                current = os.getenv("PROXY_API_KEY") or ""
                 new_key = Prompt.ask(
                     "Enter new Proxy API Key (leave empty to disable authentication)",
                     default=current,
@@ -700,7 +684,7 @@ class LauncherTUI:
                 current_raw_logging = self.config.config.get(
                     "enable_raw_logging", False
                 )
-                current_api_key = _get_proxy_api_key() or ""
+                current_api_key = os.getenv("PROXY_API_KEY") or ""
 
                 # Build comparison table
                 warning_lines = [
@@ -908,7 +892,6 @@ class LauncherTUI:
         run_credential_tool(from_launcher=True)
         # Reload environment after credential tool
         load_dotenv(dotenv_path=get_data_file(".env"), override=True)
-        _invalidate_proxy_api_key_cache()
 
     def launch_settings_tool(self):
         """Launch settings configuration tool"""
@@ -1035,13 +1018,11 @@ class LauncherTUI:
 
             ensure_env_defaults()
             load_dotenv(dotenv_path=get_data_file(".env"), override=True)
-            _invalidate_proxy_api_key_cache()
             run_credential_tool()
             load_dotenv(dotenv_path=get_data_file(".env"), override=True)
-            _invalidate_proxy_api_key_cache()
-
+    
             # Check again after credential tool
-            if not _get_proxy_api_key():
+            if not os.getenv("PROXY_API_KEY"):
                 self.console.print(
                     "\n[red]❌ PROXY_API_KEY still not set. Cannot start proxy.[/red]"
                 )

@@ -28,6 +28,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from .singleton import SingletonMeta
 
+_logger = logging.getLogger("rotator_library.resilient_io")
+
 # =============================================================================
 # WINDOWS RESILIENT os.replace()
 # =============================================================================
@@ -247,8 +249,8 @@ class BufferedWriteRegistry(metaclass=SingletonMeta):
                 if options.get("secure_permissions") and os.name != "nt":
                     try:
                         os.chmod(tmp_path, 0o600)
-                    except (OSError, AttributeError):
-                        pass
+                    except (OSError, AttributeError) as e:
+                        self._logger.debug("Failed to set secure permissions: %s", e)
 
                 _resilient_os_replace(tmp_path, path)
                 tmp_path = None
@@ -606,8 +608,8 @@ def safe_write_json(
                 if secure_permissions and os.name != "nt":
                     try:
                         os.chmod(tmp_path, 0o600)
-                    except (OSError, AttributeError):
-                        pass
+                    except (OSError, AttributeError) as e:
+                        _logger.debug("Failed to set secure permissions: %s", e)
 
                 _resilient_os_replace(tmp_path, path)
                 tmp_path = None
@@ -629,8 +631,8 @@ def safe_write_json(
             if secure_permissions and os.name != "nt":
                 try:
                     os.chmod(path, 0o600)
-                except (OSError, AttributeError):
-                    pass
+                except (OSError, AttributeError) as e:
+                    logger.debug("Failed to set secure permissions: %s", e)
 
         # Success - remove from pending if it was there
         if buffer_on_failure:

@@ -26,8 +26,7 @@ from .ip_throttle_detector import (
 if TYPE_CHECKING:
     from .circuit_breaker import ProviderCircuitBreaker
     from .cooldown_manager import CooldownManager
-import json
-from .utils.json_utils import json_loads
+from .utils.json_utils import json_loads, JSONDecodeError
 from .utils.duration import parse_duration
 from .utils.http_retry import compute_backoff_with_jitter
 
@@ -113,10 +112,11 @@ _PROXY_PROVIDERS_DEFAULT = frozenset(
 )
 
 _env_providers = os.environ.get("PROXY_PROVIDERS")
-if _env_providers is not None:
-    PROXY_PROVIDERS = frozenset(p.strip() for p in _env_providers.split(",") if p.strip())
-else:
-    PROXY_PROVIDERS = _PROXY_PROVIDERS_DEFAULT
+PROXY_PROVIDERS = (
+    frozenset(p.strip() for p in _env_providers.split(",") if p.strip())
+    if _env_providers is not None
+    else _PROXY_PROVIDERS_DEFAULT
+)
 
 
 def _detect_ip_throttle(
@@ -289,7 +289,7 @@ def _extract_retry_from_json_body(json_text: str) -> Optional[int]:
                     if result is not None:
                         return result
 
-    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
+    except (JSONDecodeError, IndexError, KeyError, TypeError) as e:
         lib_logger.debug("Failed to extract retry info from response body: %s", e)
 
     return None

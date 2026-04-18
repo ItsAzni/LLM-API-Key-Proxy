@@ -42,7 +42,6 @@ class GeminiCredentialManager:
     Providers must implement:
     - _parse_env_credential_path(path: str) -> Optional[str] - Parse env:// paths
     - get_auth_header(credential_path: str) -> Dict[str, str] - Get auth header
-    - _discover_project_id(path, token, params) -> str - Discover project ID
     - fetch_initial_baselines(credentials) -> Dict - Fetch quota for all credentials
     - refresh_active_quota_baselines(credentials, usage_data) -> Dict - Refresh active
     - _store_baselines_to_usage_manager(results, manager) -> int - Store baselines
@@ -325,12 +324,6 @@ class GeminiCredentialManager:
     async def get_auth_header(self, credential_path: str) -> Dict[str, str]:
         """Get OAuth authorization header. Must be implemented by provider."""
         raise NotImplementedError("Subclass must implement get_auth_header")
-
-    async def _discover_project_id(
-        self, credential_path: str, access_token: str, litellm_params: Dict
-    ) -> str:
-        """Discover project ID for credential. Must be implemented by auth base."""
-        raise NotImplementedError("Subclass must implement _discover_project_id")
 
     async def fetch_initial_baselines(
         self, credential_paths: List[str]

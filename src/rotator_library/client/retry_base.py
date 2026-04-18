@@ -13,8 +13,6 @@ from typing import Any, Optional
 
 from cachetools import TTLCache
 
-from ..error_types import mask_credential
-
 lib_logger = logging.getLogger("rotator_library")
 
 # Deduplication cache for repeated circuit-breaker-open messages.

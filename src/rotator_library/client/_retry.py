@@ -6,7 +6,6 @@ streaming_acompletion_with_retry, forced_streaming_acompletion."""
 
 import asyncio
 import codecs
-import json
 import logging
 import re
 import time
@@ -19,7 +18,6 @@ from ..utils.chunk_aggregator import ChunkAggregator
 from .retry_base import (
     HalfOpenSlot,
     _RetryContext,
-    _KeySelectionResult,
     RetryBaseMixin,
 )
 
@@ -47,7 +45,7 @@ from ..error_types import (
 )
 from ..failure_logger import log_failure
 from ..request_sanitizer import sanitize_request_payload
-from ..utils.json_utils import STREAM_DONE, json_loads
+from ..utils.json_utils import STREAM_DONE, json_loads, JSONDecodeError
 from ..utils.http_retry import compute_backoff_with_jitter
 from ..utils.model_utils import (
     extract_provider_from_model,
@@ -1512,12 +1510,19 @@ class RetryMixin(RetryBaseMixin):
 
                                 # Add exponential backoff delay before retry
                                 wait_time = compute_backoff_with_jitter(attempt, max_wait=30.0, retry_after=classified_error.retry_after)
-                                lib_logger.warning(
-                                    "Rate limit (%s) during litellm stream. "
-                                    "Waiting %2.2fs before retry.",
-                                    classified_error.error_type, wait_time,
-                                )
-                                await asyncio.sleep(wait_time)
+                                remaining_budget = deadline - time.monotonic()
+                                if wait_time <= remaining_budget:
+                                    lib_logger.warning(
+                                        "Rate limit (%s) during litellm stream. "
+                                        "Waiting %2.2fs before retry.",
+                                        classified_error.error_type, wait_time,
+                                    )
+                                    await asyncio.sleep(wait_time)
+                                else:
+                                    lib_logger.warning(
+                                        "Retry wait (%2.2fs) exceeds budget (%2.2fs). Rotating.",
+                                        wait_time, remaining_budget,
+                                    )
 
                                 # Record failure and rotate to next credential
                                 await self.usage_manager.record_failure(
@@ -1543,7 +1548,7 @@ class RetryMixin(RetryBaseMixin):
                                         json_str_match.group(1), "unicode_escape"
                                     )
                                     error_payload = json_loads(cleaned_str)
-                            except (json.JSONDecodeError, TypeError):
+                            except (JSONDecodeError, TypeError):
                                 error_payload = {}
 
                             log_failure(
