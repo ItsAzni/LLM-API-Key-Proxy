@@ -45,6 +45,7 @@ DEFAULT_SSL_VERIFY = True  # SSL certificate verification enabled by default
 DEFAULT_HTTP2_ENABLED = (
     not _IS_WIN
 )  # HTTP/2 unreliable with SelectorEventLoop on Windows
+_COMPRESSION_THRESHOLD = 0.9  # Only compress if output is at least 10% smaller
 
 
 from .ssl_patch import AZURE_COMPATIBLE_CIPHERS
@@ -70,8 +71,8 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
     def __del__(self) -> None:
         try:
             self._gzip_executor.shutdown(wait=False)
-        except Exception:
-            pass
+        except Exception as e:
+            lib_logger.debug("Error in GzipMiddleware __del__: %s", e)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Compress request body if eligible before sending."""
@@ -87,7 +88,7 @@ class GzipRequestTransport(httpx.AsyncHTTPTransport):
                             self._gzip_executor, gzip.compress, request.content
                         )
 
-                        if len(compressed) < content_len * 0.9:
+                        if len(compressed) < content_len * _COMPRESSION_THRESHOLD:
                             # Create new request with compressed content
                             # (request.content is read-only in httpx)
                             headers = dict(request.headers)

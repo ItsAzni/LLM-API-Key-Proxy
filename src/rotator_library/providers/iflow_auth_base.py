@@ -433,7 +433,9 @@ class IFlowAuthBase(GoogleOAuthBase):
                     self._credentials_cache[path] = json_loads(creds_raw)
                 except FileNotFoundError:
                     lib_logger.debug("Credential file not found, skipping")
-            creds_from_file = self._credentials_cache[path]
+            creds_from_file = self._credentials_cache.get(path, cached_creds)
+            if not creds_from_file:
+                raise ValueError(f"No credentials available for '{Path(path).name}'")
 
             lib_logger.debug(f"Refreshing iFlow OAuth token for '{Path(path).name}'...")
             refresh_token = creds_from_file.get("refresh_token")

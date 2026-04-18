@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import litellm
 import json
-import orjson
+from ...utils.json_utils import json_loads, json_dumps_str
 from .constants import (
     lib_logger,
 )
@@ -100,9 +100,9 @@ class ToolRecoveryMixin:
             "fixed_json": None,
         }
 
-        # Option 1: Try orjson.loads to get exact error
+        # Option 1: Try json_loads to get exact error
         try:
-            orjson.loads(raw_args)
+            json_loads(raw_args)
             return result  # Valid JSON, no errors
         except json.JSONDecodeError as e:
             result["json_error"] = e.msg
@@ -144,9 +144,9 @@ class ToolRecoveryMixin:
 
         try:
             # Validate the fix works
-            parsed = orjson.loads(fixed)
+            parsed = json_loads(fixed)
             # Use compact JSON format (matches what model should produce)
-            result["fixed_json"] = orjson.dumps(parsed).decode()
+            result["fixed_json"] = json_dumps_str(parsed)
         except json.JSONDecodeError:
             # First fix didn't work - try more aggressive cleanup
             pass
@@ -157,8 +157,8 @@ class ToolRecoveryMixin:
                 # Normalize all whitespace (collapse newlines/multiple spaces)
                 aggressive_fix = re_module.sub(r"\s+", " ", fixed)
                 # Try parsing again
-                parsed = orjson.loads(aggressive_fix)
-                result["fixed_json"] = orjson.dumps(parsed).decode()
+                parsed = json_loads(aggressive_fix)
+                result["fixed_json"] = json_dumps_str(parsed)
                 lib_logger.debug(
                     "[Antigravity] Fixed malformed JSON with aggressive whitespace normalization"
                 )
@@ -177,8 +177,8 @@ class ToolRecoveryMixin:
                     r': "\1"\2',
                     fixed,
                 )
-                parsed = orjson.loads(aggressive_fix)
-                result["fixed_json"] = orjson.dumps(parsed).decode()
+                parsed = json_loads(aggressive_fix)
+                result["fixed_json"] = json_dumps_str(parsed)
                 lib_logger.debug(
                     "[Antigravity] Fixed malformed JSON by quoting unquoted string values"
                 )
@@ -238,7 +238,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Add schema if available (strip $schema reference)
         if tool_schema:
             clean_schema = {k: v for k, v in tool_schema.items() if k != "$schema"}
-            schema_str = orjson.dumps(clean_schema).decode()
+            schema_str = json_dumps_str(clean_schema)
             error_text += f"\n\nSchema: {schema_str}"
 
         user_msg = {"role": "user", "parts": [{"text": error_text}]}
@@ -348,7 +348,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         # Validate the fixed JSON is actually valid
         try:
-            orjson.loads(fixed_json)
+            json_loads(fixed_json)
         except json.JSONDecodeError:
             return None
 
@@ -413,7 +413,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         # Validate the fixed JSON is actually valid
         try:
-            orjson.loads(fixed_json)
+            json_loads(fixed_json)
         except json.JSONDecodeError:
             return None
 

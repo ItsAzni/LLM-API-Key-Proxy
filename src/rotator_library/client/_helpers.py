@@ -15,8 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 import litellm
-import orjson
-from ..utils.json_utils import json_deep_copy
+from ..utils.json_utils import json_deep_copy, json_loads
 
 if TYPE_CHECKING:
     from ..error_handler import ClassifiedError
@@ -612,7 +611,7 @@ class HelpersMixin:
         if provider_headers:
             try:
                 # Parse headers from JSON format
-                headers_dict = orjson.loads(provider_headers)
+                headers_dict = json_loads(provider_headers)
                 if isinstance(headers_dict, dict):
                     # Use headers parameter if available, otherwise create it
                     if "headers" not in litellm_kwargs:

@@ -8,8 +8,11 @@ serialization and deserialization of large payloads in hot paths
 (API request/response transformation, streaming, message cloning).
 """
 
+import json
 import orjson
 from typing import Any
+
+JSONDecodeError = json.JSONDecodeError
 
 STREAM_DONE = object()
 """Sentinel marker indicating stream completion in internal pipeline."""

@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 import httpx
 import litellm
 import json
-import orjson
+from ...utils.json_utils import json_loads
 
 from ...config import env_bool, env_int
 from ...error_handler import EmptyResponseError, TransientQuotaError
@@ -186,7 +186,7 @@ class AntigravityProvider(
             if not json_match:
                 return None
 
-            data = orjson.loads(json_match.group(0))
+            data = json_loads(json_match.group(0))
         except (json.JSONDecodeError, AttributeError, TypeError):
             return None
 

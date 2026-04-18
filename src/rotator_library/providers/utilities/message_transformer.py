@@ -17,7 +17,7 @@ Handles:
 
 import json
 import logging
-import orjson
+from ...utils.json_utils import json_loads
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 lib_logger = logging.getLogger("rotator_library")
@@ -221,7 +221,7 @@ def _transform_assistant_message_default(
                 continue
 
             try:
-                args_dict = orjson.loads(tool_call["function"]["arguments"])
+                args_dict = json_loads(tool_call["function"]["arguments"])
             except (json.JSONDecodeError, TypeError):
                 args_dict = {}
 
@@ -295,7 +295,7 @@ def _transform_tool_message(
 
     # Try to parse content as JSON, fall back to string
     try:
-        parsed_content = orjson.loads(content) if isinstance(content, str) else content
+        parsed_content = json_loads(content) if isinstance(content, str) else content
     except (json.JSONDecodeError, TypeError):
         parsed_content = content
 

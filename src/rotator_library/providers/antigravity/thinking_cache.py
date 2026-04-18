@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import json
-import orjson
+from ...utils.json_utils import json_loads, json_dumps_str
 from .constants import (
     CLAUDE_USER_INTERLEAVED_THINKING_REMINDER,
     lib_logger,
@@ -520,7 +520,7 @@ class ThinkingCacheMixin:
                             "type": "function",
                             "function": {
                                 "name": fc.get("name", ""),
-                                "arguments": orjson.dumps(fc.get("args", {})).decode(),
+                                "arguments": json_dumps_str(fc.get("args", {})),
                             },
                         }
                     )
@@ -538,7 +538,7 @@ class ThinkingCacheMixin:
             return False
 
         try:
-            thinking_data = orjson.loads(cached_json)
+            thinking_data = json_loads(cached_json)
             thinking_text = thinking_data.get("thinking_text", "")
             signature = thinking_data.get("thought_signature", "")
 
@@ -619,7 +619,7 @@ class ThinkingCacheMixin:
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name", ""),
-                                    "arguments": orjson.dumps(fc.get("args", {})).decode(),
+                                    "arguments": json_dumps_str(fc.get("args", {})),
                                 },
                             }
                         )
@@ -637,7 +637,7 @@ class ThinkingCacheMixin:
                 continue
 
             try:
-                thinking_data = orjson.loads(cached_json)
+                thinking_data = json_loads(cached_json)
                 thinking_text = thinking_data.get("thinking_text", "")
                 signature = thinking_data.get("thought_signature", "")
 
@@ -867,7 +867,7 @@ class ThinkingCacheMixin:
             "timestamp": time.time(),
         }
 
-        self._thinking_cache.store(cache_key, orjson.dumps(data).decode())
+        self._thinking_cache.store(cache_key, json_dumps_str(data))
         lib_logger.debug(f"Cached thinking: {cache_key[:50]}...")
 
     # =========================================================================

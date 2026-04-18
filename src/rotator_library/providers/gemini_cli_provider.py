@@ -4,7 +4,7 @@
 # src/rotator_library/providers/gemini_cli_provider.py
 
 import json
-import orjson
+from ..utils.json_utils import json_loads, json_dumps_str
 from ..utils.duration import parse_duration as _parse_duration_shared
 import httpx
 import logging
@@ -210,7 +210,7 @@ class GeminiCliProvider(
         try:
             json_match = regex_module.search(r"\{[\s\S]*\}", body)
             if json_match:
-                data = orjson.loads(json_match.group(0))
+                data = json_loads(json_match.group(0))
                 error_obj = data.get("error", data)
                 details = error_obj.get("details", [])
 
@@ -648,7 +648,7 @@ class GeminiCliProvider(
                     "type": "function",
                     "function": {
                         "name": function_name,
-                        "arguments": orjson.dumps(tool_args).decode(),
+                        "arguments": json_dumps_str(tool_args),
                     },
                 }
 

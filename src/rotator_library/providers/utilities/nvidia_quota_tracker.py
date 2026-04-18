@@ -6,14 +6,20 @@ NVIDIA NIM Quota Tracker - tracks rate limits via request counting.
 
 NVIDIA NIM doesn't provide public API for quota monitoring, so we use
 sliding window counters to estimate rate limit usage.
+
+Inherits from BaseQuotaTracker for tier-based rate limit lookup and
+learned cost persistence, while adding Nvidia-specific sliding window
+tracking and model quota groups.
 """
 
 import time
 import asyncio
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from collections import deque
 import logging
+
+from .base_quota_tracker import BaseQuotaTracker
 
 lib_logger = logging.getLogger('rotator_library')
 
@@ -39,7 +45,7 @@ class RateLimitWindow:
         return self.get_request_count(window_start) < limit
 
 
-class NvidiaQuotaTracker:
+class NvidiaQuotaTracker(BaseQuotaTracker):
     """
     Track NVIDIA NIM rate limits using sliding window counters.
 
@@ -49,21 +55,37 @@ class NvidiaQuotaTracker:
 
     Since NVIDIA doesn't provide rate limit headers, we track requests
     locally and estimate when limits are approached.
+
+    Inherits tier-based rate limit lookup from BaseQuotaTracker.
+    Adds Nvidia-specific sliding window tracking and model quota groups.
     """
 
+    # BaseQuotaTracker configuration
+    _use_integer_max_requests = True
+    provider_env_prefix = ""
+    cache_subdir = "nvidia"
+
     # Rate limits by tier (requests per minute)
-    RATE_LIMITS = {
-        "free": {"rpm": 40, "tpm": 200000},  # Estimated
-        "paid": {"rpm": 500, "tpm": 2000000},  # Estimated
+    # Maps to BaseQuotaTracker's default_max_requests via "_default" key
+    # since all models share the same RPM within a tier.
+    default_max_requests = {
+        "free": {"_default": 40},
+        "paid": {"_default": 500},
     }
+    default_max_requests_unknown = 40
+
+    # Model name mappings (not used by Nvidia)
+    user_to_api_model_map: Dict[str, str] = {}
+    api_to_user_model_map: Dict[str, str] = {}
 
     def __init__(self):
         # Per-credential tracking
         self._windows: Dict[str, Dict[str, RateLimitWindow]] = {}
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
 
-        # Per-credential tier detection
-        self._credential_tiers: Dict[str, str] = {}
+        # Per-credential tier detection (BaseQuotaTracker.project_tier_cache)
+        self.project_tier_cache: Dict[str, str] = {}
+        self.project_id_cache: Dict[str, str] = {}
 
         # Model quota groups (models that share rate limits)
         self._model_quota_groups: Dict[str, List[str]] = {
@@ -78,6 +100,30 @@ class NvidiaQuotaTracker:
                 "qwen/qwen3-coder-480b-a35b-instruct",
             ],
         }
+
+        # BaseQuotaTracker required attributes
+        self._quota_refresh_interval = 300
+        self._learned_costs: Dict[str, Dict[str, float]] = {}
+        self._learned_costs_loaded = True  # Skip file loading; local-only tracker
+        self._learned_costs_lock: Optional[asyncio.Lock] = None
+
+    def _ensure_learned_costs_lock(self) -> asyncio.Lock:
+        """Lazily create learned costs lock to avoid RuntimeError before event loop starts."""
+        if self._learned_costs_lock is None:
+            self._learned_costs_lock = asyncio.Lock()
+        return self._learned_costs_lock
+
+    async def _fetch_quota_for_credential(self, credential_path: str) -> Dict:
+        return {"status": "error", "error": "NVIDIA NIM has no public quota API", "identifier": credential_path, "tier": None, "fetched_at": time.time()}
+
+    def _extract_model_quota_from_response(self, quota_data: Dict, tier: str) -> List:
+        return []
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        """Lazily create asyncio.Lock to avoid RuntimeError before event loop starts."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def _get_window(self, credential: str, model: str) -> RateLimitWindow:
         """Get or create rate limit window for credential+model."""
@@ -97,10 +143,9 @@ class NvidiaQuotaTracker:
         return model  # Use model name as group if not in any group
 
     def _get_rate_limit(self, credential: str, model: str) -> int:
-        """Get rate limit for credential and model."""
-        tier = self._credential_tiers.get(credential, "free")
-        limits = self.RATE_LIMITS.get(tier, self.RATE_LIMITS["free"])
-        return limits["rpm"]
+        """Get rate limit for credential and model via BaseQuotaTracker."""
+        tier = self.project_tier_cache.get(credential, "free")
+        return self.get_max_requests_for_model("_default", tier)
 
     async def track_request(self, credential: str, model: str) -> None:
         """
@@ -110,7 +155,7 @@ class NvidiaQuotaTracker:
             credential: Credential identifier
             model: Model name (e.g., "nvidia/deepseek-ai/deepseek-v3.1")
         """
-        async with self._lock:
+        async with self._ensure_lock():
             # Strip provider prefix if present
             if "/" in model:
                 model = model.split("/", 1)[1]
@@ -207,7 +252,7 @@ class NvidiaQuotaTracker:
             "credential": credential,
             "model": model,
             "model_group": model_group,
-            "tier": self._credential_tiers.get(credential, "free"),
+            "tier": self.project_tier_cache.get(credential, "free"),
             "models": {}
         }
 
@@ -238,7 +283,7 @@ class NvidiaQuotaTracker:
             credential: Credential identifier
             tier: Tier name ("free" or "paid")
         """
-        self._credential_tiers[credential] = tier
+        self.project_tier_cache[credential] = tier
         lib_logger.info(f"Set NVIDIA credential {credential} tier to {tier}")
 
     def reset_window(self, credential: str, model: str) -> None:

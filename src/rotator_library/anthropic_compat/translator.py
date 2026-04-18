@@ -13,8 +13,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from ..error_handler import validate_response_quality
-from ..utils.json_utils import json_dumps_str as _json_dumps, json_loads as _json_loads
-from orjson import JSONDecodeError as _json_decode_error
+from ..utils.json_utils import json_dumps_str as _json_dumps, json_loads as _json_loads, JSONDecodeError as _json_decode_error
 
 from .models import AnthropicMessagesRequest
 

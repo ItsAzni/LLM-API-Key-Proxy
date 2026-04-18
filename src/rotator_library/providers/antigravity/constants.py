@@ -18,6 +18,7 @@ from typing import (
 import orjson
 
 from ...config import env_bool, env_int
+from ...utils.json_utils import json_loads
 from ...utils.paths import get_cache_dir
 
 class _MalformedFunctionCallDetected(Exception):
@@ -618,7 +619,7 @@ def _clean_claude_schema_cached(schema_bytes: bytes, for_gemini: bool) -> tuple:
     Cached implementation of schema cleaning.
     Takes serialized schema bytes and returns cleaned result as tuple for caching.
     """
-    schema = orjson.loads(schema_bytes)
+    schema = json_loads(schema_bytes)
     result = _clean_claude_schema_impl(schema, for_gemini)
     # Convert back to bytes for hashability
     return orjson.dumps(result, option=orjson.OPT_SORT_KEYS)
@@ -648,7 +649,7 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # Use thread-safe LRU cache via serialization
     schema_bytes = orjson.dumps(schema, option=orjson.OPT_SORT_KEYS)
     result_bytes = _clean_claude_schema_cached(schema_bytes, for_gemini)
-    return orjson.loads(result_bytes)
+    return json_loads(result_bytes)
 
 
 def _clean_claude_schema_impl(schema: Any, for_gemini: bool) -> Any:

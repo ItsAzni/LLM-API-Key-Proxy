@@ -15,7 +15,7 @@ from typing import (
 )
 import json
 import re
-import orjson
+from ..utils.json_utils import json_loads
 
 import logging
 import os
@@ -290,7 +290,7 @@ class ProviderInterface(ABC):
         try:
             json_match = re.search(r"\{[\s\S]*\}", body)
             if json_match:
-                data = orjson.loads(json_match.group(0))
+                data = json_loads(json_match.group(0))
         except (json.JSONDecodeError, ValueError):
             lib_logger.debug("JSON parse error in provider_interface", exc_info=True)
             pass

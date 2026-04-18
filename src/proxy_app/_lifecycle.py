@@ -426,7 +426,7 @@ def create_lifespan(config: LifespanConfig):
                 loop = asyncio.get_running_loop()
                 loop.set_exception_handler(_original_handler)
             except RuntimeError:
-                pass
+                logger.debug("Suppressed RuntimeError during shutdown handler cleanup")
 
         # Grace period: allow in-flight streaming responses to complete
         try:

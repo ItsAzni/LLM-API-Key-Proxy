@@ -13,7 +13,6 @@ Data retrieval happens asynchronously post-startup to keep initialization fast.
 import asyncio
 import functools
 import json
-import orjson
 import logging
 from .utils.json_utils import json_loads
 from .config.defaults import env_int

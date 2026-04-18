@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from .circuit_breaker import ProviderCircuitBreaker
     from .cooldown_manager import CooldownManager
 import json
-import orjson
 from .utils.json_utils import json_loads
 from .utils.duration import parse_duration
 from .utils.http_retry import compute_backoff_with_jitter

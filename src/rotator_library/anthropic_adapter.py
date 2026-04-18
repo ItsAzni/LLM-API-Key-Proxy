@@ -9,7 +9,7 @@ from typing import Any, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .anthropic_compat.models import AnthropicMessagesRequest, AnthropicCountTokensRequest
 
-import orjson
+from .utils.json_utils import json_dumps_str
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -206,7 +206,7 @@ class AnthropicAdapter:
             )
             if openai_tools:
                 # Serialize tools to count their token contribution
-                tools_text = orjson.dumps(openai_tools).decode()
+                tools_text = json_dumps_str(openai_tools)
                 tool_tokens = self._token_count(
                     model=request.model,
                     text=tools_text,

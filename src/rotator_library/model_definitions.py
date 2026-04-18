@@ -2,7 +2,6 @@
 # Copyright (c) 2026 ShmidtS
 
 import json
-import orjson
 import os
 import logging
 import functools

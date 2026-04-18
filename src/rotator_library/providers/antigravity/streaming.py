@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 import httpx
 import litellm
 import json
-import orjson
+from ...utils.json_utils import json_loads
 from ...error_handler import EmptyResponseError, TransientQuotaError
 from ...timeout_config import TimeoutConfig
 from ...transaction_logger import AntigravityProviderLogger
@@ -283,7 +283,7 @@ class AntigravityStreamingMixin:
                         break
 
                     try:
-                        chunk = orjson.loads(data_str)
+                        chunk = json_loads(data_str)
                         gemini_chunk = self._unwrap_response(chunk)
 
                         # Capture response ID from first chunk for synthetic responses

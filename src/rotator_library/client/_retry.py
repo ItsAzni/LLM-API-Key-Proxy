@@ -26,7 +26,6 @@ from .retry_base import (
 lib_logger = logging.getLogger("rotator_library")
 
 import litellm
-import orjson
 from litellm.exceptions import APIConnectionError, BadRequestError, InvalidRequestError
 
 from ..config.defaults import MAX_TOTAL_ATTEMPTS
@@ -48,7 +47,7 @@ from ..error_types import (
 )
 from ..failure_logger import log_failure
 from ..request_sanitizer import sanitize_request_payload
-from ..utils.json_utils import STREAM_DONE
+from ..utils.json_utils import STREAM_DONE, json_loads
 from ..utils.http_retry import compute_backoff_with_jitter
 from ..utils.model_utils import (
     extract_provider_from_model,
@@ -1543,7 +1542,7 @@ class RetryMixin(RetryBaseMixin):
                                     cleaned_str = codecs.decode(
                                         json_str_match.group(1), "unicode_escape"
                                     )
-                                    error_payload = orjson.loads(cleaned_str)
+                                    error_payload = json_loads(cleaned_str)
                             except (json.JSONDecodeError, TypeError):
                                 error_payload = {}
 

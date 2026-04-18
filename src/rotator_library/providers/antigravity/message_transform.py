@@ -8,9 +8,8 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import json
-import orjson
 from ...config import env_bool
-from ...utils.json_utils import json_deep_copy
+from ...utils.json_utils import json_deep_copy, json_loads, json_dumps_str
 from .constants import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     PREPEND_INSTRUCTION,
@@ -149,7 +148,7 @@ class MessageTransformMixin:
                 cached_json = await self._thinking_cache.retrieve_async(cache_key)
                 if cached_json:
                     try:
-                        cached_data = orjson.loads(cached_json)
+                        cached_data = json_loads(cached_json)
                         cached_sig = cached_data.get("thought_signature", "")
                     except json.JSONDecodeError:
                         lib_logger.debug("JSON decode error in message_transform", exc_info=True)
@@ -190,7 +189,7 @@ class MessageTransformMixin:
                 continue
 
             try:
-                args = orjson.loads(tc["function"]["arguments"])
+                args = json_loads(tc["function"]["arguments"])
             except (json.JSONDecodeError, TypeError):
                 args = {}
 
@@ -256,7 +255,7 @@ class MessageTransformMixin:
             return parts
 
         try:
-            thinking_data = orjson.loads(cached_json)
+            thinking_data = json_loads(cached_json)
             thinking_text = thinking_data.get("thinking_text", "")
             sig = thinking_data.get("thought_signature", "")
 
@@ -877,7 +876,7 @@ class MessageTransformMixin:
             "id": tool_id,
             "type": "function",
             "index": index,
-            "function": {"name": tool_name, "arguments": orjson.dumps(parsed_args).decode()},
+            "function": {"name": tool_name, "arguments": json_dumps_str(parsed_args)},
         }
 
         if accumulator is not None:
