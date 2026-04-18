@@ -854,9 +854,12 @@ class RetryMixin(RetryBaseMixin):
                                 current_cred, classified_error, error_message
                             )
 
-                            await self._apply_error_classifications(
+                            action = await self._apply_error_classifications(
                                 provider, current_cred, model, e, classified_error,
                             )
+                            if action == "force_rotate":
+                                async with HalfOpenSlot(self._resilience, provider):
+                                    break
 
                             if (
                                 should_retry_same_key(classified_error)
@@ -960,12 +963,13 @@ class RetryMixin(RetryBaseMixin):
             # Return the structured error response for the client
             return error_accumulator.build_client_error_response()
 
-        # Return None to indicate failure without error details (shouldn't normally happen)
         lib_logger.warning(
             "Unexpected state: request failed with no recorded errors. "
             "This may indicate a logic error in error tracking."
         )
-        return None
+        raise NoAvailableKeysError(
+            f"All credentials exhausted for {provider}/{model} with no recorded errors"
+        )
 
     async def _streaming_acompletion_with_retry(
         self,
@@ -993,7 +997,7 @@ class RetryMixin(RetryBaseMixin):
         # Cache request headers once to avoid repeated dict() conversion in error handlers
         _cached_request_headers = dict(request.headers) if request else {}
 
-        consecutive_quota_failures = 0
+        consecutive_quota_failures: dict[str, int] = {}
         total_api_attempts = 0
 
         try:
@@ -1575,7 +1579,9 @@ class RetryMixin(RetryBaseMixin):
                                 "quota" in error_message_text.lower()
                                 or "resource_exhausted" in error_status.lower()
                             ):
-                                consecutive_quota_failures += 1
+                                consecutive_quota_failures[current_cred] = (
+                                    consecutive_quota_failures.get(current_cred, 0) + 1
+                                )
 
                                 quota_value = "N/A"
                                 quota_id = "N/A"
@@ -1601,7 +1607,7 @@ class RetryMixin(RetryBaseMixin):
                                     current_cred, model, classified_error
                                 )
 
-                                if consecutive_quota_failures >= 3:
+                                if consecutive_quota_failures.get(current_cred, 0) >= 3:
                                     # Fatal: likely input data too large
                                     client_error_message = (
                                         "Request failed after 3 consecutive quota errors (input may be too large). "
@@ -1623,13 +1629,13 @@ class RetryMixin(RetryBaseMixin):
                                     lib_logger.warning(
                                         "Cred %s quota error (%s/3). Rotating.",
                                         mask_credential(current_cred),
-                                        consecutive_quota_failures,
+                                        consecutive_quota_failures.get(current_cred, 0),
                                     )
                                     async with HalfOpenSlot(self._resilience, provider):
                                         break
 
                             else:
-                                consecutive_quota_failures = 0
+                                consecutive_quota_failures.pop(current_cred, None)
 
                                 # For transient server errors (mid-stream), retry same key with backoff before rotating
                                 if (
@@ -1674,7 +1680,7 @@ class RetryMixin(RetryBaseMixin):
                             litellm.ServiceUnavailableError,
                             RuntimeError,  # "Cannot send a request, as the client has been closed"
                         ) as e:
-                            consecutive_quota_failures = 0
+                            consecutive_quota_failures.pop(current_cred, None)
                             last_exception = e
                             classified_error, error_message_text = await self._classify_log_error(
                                 e, provider, current_cred, model,
@@ -1733,7 +1739,7 @@ class RetryMixin(RetryBaseMixin):
                             httpx.RemoteProtocolError,
                             httpx.ConnectError,
                         ) as e:
-                            consecutive_quota_failures = 0
+                            consecutive_quota_failures.pop(current_cred, None)
                             last_exception = e
                             classified_error, error_message_text = await self._classify_log_error(
                                 e, provider, current_cred, model,
@@ -1794,7 +1800,7 @@ class RetryMixin(RetryBaseMixin):
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
-                            consecutive_quota_failures = 0
+                            consecutive_quota_failures.pop(current_cred, None)
                             last_exception = e
                             classified_error, error_message_text = await self._classify_log_error(
                                 e, provider, current_cred, model,

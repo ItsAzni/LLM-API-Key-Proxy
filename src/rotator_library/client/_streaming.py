@@ -47,7 +47,6 @@ class StreamingMixin:
         """
         stream_completed = False
         stream_iterator = stream.__aiter__()
-        json_buffer_parts: list[str] = []  # O(n) accumulation via list
         accumulated_finish_reason = None  # Track strongest finish_reason across chunks
         has_tool_calls = False  # Track if ANY tool calls were seen in stream
         chunk_index = 0  # Track chunk count for better error logging
@@ -66,12 +65,6 @@ class StreamingMixin:
                 try:
                     chunk = await stream_iterator.__anext__()
                     chunk_index += 1
-                    if json_buffer_parts:
-                        lib_logger.warning(
-                            "Discarding incomplete JSON buffer from previous chunk: %s",
-                            ''.join(json_buffer_parts),
-                        )
-                        json_buffer_parts.clear()
 
                     # Convert chunk to dict, handling both litellm.ModelResponse and raw dicts
                     # Per-chunk error isolation: malformed chunks are skipped, not fatal
@@ -190,12 +183,13 @@ class StreamingMixin:
                     raise
 
                 except Exception as e:
-                    # Check if this is a JSON decode error from fragmented chunks
+                    # JSON decode errors from fragmented chunks — log and skip
                     error_str = str(e)
                     if "Expecting value" in error_str or "Unterminated string" in error_str:
-                        # Buffer the raw chunk data for re-assembly, not the error string
-                        raw = chunk if isinstance(chunk, (str, bytes)) else str(chunk)
-                        json_buffer_parts.append(raw)
+                        lib_logger.debug(
+                            "Skipping unparseable streaming chunk for model %s, chunk %s: %s",
+                            model, chunk_index, error_str,
+                        )
                         continue
 
                     # For other errors during iteration, log and break
@@ -228,6 +222,7 @@ class StreamingMixin:
                     "type": "proxy_stream_error",
                 }
             }
+            stream_completed = True
             yield error_data
 
         finally:

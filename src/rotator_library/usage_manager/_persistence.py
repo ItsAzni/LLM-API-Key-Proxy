@@ -7,7 +7,6 @@ from ..utils.json_utils import json_loads
 from ..batched_persistence import UsagePersistenceManager
 import aiofiles
 import json
-import orjson
 import os
 
 

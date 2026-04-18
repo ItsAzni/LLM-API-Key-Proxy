@@ -9,7 +9,6 @@ import webbrowser
 from dataclasses import dataclass, field
 from typing import ClassVar, Union, Optional, List, Dict, Any
 import json
-import orjson
 import time
 import asyncio
 import logging

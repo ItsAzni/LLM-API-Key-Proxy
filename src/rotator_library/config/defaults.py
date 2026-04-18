@@ -75,7 +75,7 @@ MAX_TOTAL_ATTEMPTS: int = env_int("MAX_TOTAL_ATTEMPTS", 10)
 # If all credentials are on cooldown and the soonest one won't be available
 # within this timeout, the request fails fast with a clear message.
 # Override via environment variable: GLOBAL_TIMEOUT=<seconds>
-DEFAULT_GLOBAL_TIMEOUT: int = 30
+DEFAULT_GLOBAL_TIMEOUT: int = env_int("GLOBAL_TIMEOUT", 120)
 
 # =============================================================================
 # TIER & PRIORITY DEFAULTS
@@ -413,21 +413,3 @@ PROXY_DEFAULT_PORT: int = env_int("PROXY_DEFAULT_PORT", 8000)
 # Allows disabling cooldowns per-provider for debugging/emergency purposes.
 
 
-def is_cooldown_disabled(provider: str) -> bool:
-    """
-    Check if cooldown is disabled for a provider via env var.
-
-    Args:
-    provider: Provider name (e.g., "openai", "anthropic")
-
-    Returns:
-    True if DISABLE_COOLDOWN_<PROVIDER>=true is set
-
-    Example:
-    DISABLE_COOLDOWN_OPENAI=true # Disables cooldowns for OpenAI
-    DISABLE_COOLDOWN_ANTHROPIC=true # Disables cooldowns for Anthropic
-    """
-    return (
-        os.environ.get(f"DISABLE_COOLDOWN_{provider.upper()}", "false").lower()
-        == "true"
-    )

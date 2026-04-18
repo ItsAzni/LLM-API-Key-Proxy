@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026 ShmidtS
 
-from ._constants import lib_logger, MAX_CACHE_ENTRIES
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional

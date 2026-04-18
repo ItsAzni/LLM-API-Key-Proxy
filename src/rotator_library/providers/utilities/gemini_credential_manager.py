@@ -10,7 +10,6 @@ GeminiCliProvider and AntigravityProvider.
 """
 
 import json
-import orjson
 import logging
 from ...utils.json_utils import json_loads
 from pathlib import Path

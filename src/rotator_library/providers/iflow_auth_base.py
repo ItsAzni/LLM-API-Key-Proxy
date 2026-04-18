@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import ClassVar, Dict, Any, Tuple, Union, Optional, List
 from urllib.parse import urlencode
 
-import orjson
 import httpx
 
 from ..http_client_pool import get_http_pool

@@ -116,19 +116,6 @@ class AnthropicUsage(BaseModel):
     cache_read_input_tokens: Optional[int] = None
 
 
-class AnthropicMessagesResponse(BaseModel):
-    """Anthropic Messages API response format."""
-
-    id: str
-    type: str = "message"
-    role: str = "assistant"
-    content: List[Union[AnthropicTextBlock, AnthropicToolUseBlock, dict]]
-    model: str
-    stop_reason: Optional[str] = None
-    stop_sequence: Optional[str] = None
-    usage: AnthropicUsage
-
-
 # --- Count Tokens ---
 class AnthropicCountTokensRequest(BaseModel):
     """Anthropic count_tokens API request format."""
@@ -139,9 +126,3 @@ class AnthropicCountTokensRequest(BaseModel):
     tools: Optional[List[AnthropicTool]] = None
     tool_choice: Optional[dict] = None
     thinking: Optional[AnthropicThinkingConfig] = None
-
-
-class AnthropicCountTokensResponse(BaseModel):
-    """Anthropic count_tokens API response format."""
-
-    input_tokens: int

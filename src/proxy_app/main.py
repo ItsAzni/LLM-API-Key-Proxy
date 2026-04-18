@@ -532,10 +532,15 @@ if __name__ == "__main__":
             if hasattr(_signal, "SIGBREAK"):
                 _signal.signal(_signal.SIGBREAK, lambda *_: _signal.raise_signal(_signal.SIGINT))
 
+        try:
+            _limit_concurrency = int(os.getenv("MAX_CONCURRENT_REQUESTS", "1000"))
+        except ValueError:
+            logger.warning("Invalid integer value for MAX_CONCURRENT_REQUESTS env var, using default")
+            _limit_concurrency = 1000
         uvicorn.run(
             app,
             host=args.host,
             port=args.port,
-            limit_concurrency=int(os.getenv("MAX_CONCURRENT_REQUESTS", "1000")),
+            limit_concurrency=_limit_concurrency,
             backlog=2048,
         )

@@ -76,15 +76,6 @@ _dns_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _dns_executor_lock = threading.Lock()
 
 
-def get_dns_cache_ttl() -> int:
-    """Get DNS cache TTL from config."""
-    try:
-        from .config.defaults import DNS_CACHE_TTL
-
-        return DNS_CACHE_TTL
-    except ImportError:
-        return 300  # 5 minutes fallback
-
 
 def _get_cached_ips(hostname: str) -> Optional[List[str]]:
     """Get cached IPs if still valid."""

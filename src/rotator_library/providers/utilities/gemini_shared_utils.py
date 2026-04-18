@@ -10,7 +10,6 @@ AntigravityProvider, extracted to reduce code duplication.
 """
 
 import json
-import orjson
 
 from ...utils.json_utils import json_deep_copy, json_loads
 import logging

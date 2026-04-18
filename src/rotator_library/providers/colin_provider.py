@@ -20,7 +20,6 @@ Key differences from chat/completions:
 
 import json
 import os
-import orjson
 import logging
 from typing import List, Dict, Any, AsyncGenerator, Union
 import httpx
