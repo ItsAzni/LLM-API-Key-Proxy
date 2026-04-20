@@ -109,6 +109,7 @@ on:
       - 'src/rotator_library/**' # Key rotation library
       - '.github/workflows/build.yml'  # This workflow file
       - 'cliff.toml'             # Changelog configuration
+      - 'requirements.txt'        # Dependency changes
 
 # ════════════════════════════════════════════════════════════════════════════════════════════
 #                                         JOBS
