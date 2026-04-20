@@ -17,6 +17,7 @@ cachetools
 httpx
 aiofiles
 aiohttp
+orjson
 
 colorlog
 
