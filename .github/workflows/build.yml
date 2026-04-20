@@ -22,7 +22,7 @@ env:
   
   # Parent branches to search for tags when current branch has none (space-separated, priority order)
   # Used for first build on a new branch to find a comparison point
-  FALLBACK_BRANCHES: "main master develop dev"
+  FALLBACK_BRANCHES: "main dev"
 
   # ┌───────────────────────────────────────────────────────────────────────────────────────┐
   # │ RELEASE FILES - Files to include in release archives                                 │
